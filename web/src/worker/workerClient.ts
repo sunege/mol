@@ -6,11 +6,19 @@
  * spawns a fresh one. That keeps the UI responsive when the user edits the
  * molecule mid-calculation, at the cost of re-initialising the module (a few
  * milliseconds).
+ *
+ * A request is not one message each way. A geometry optimisation sends a `step`
+ * for every structure it accepts and only then the calculation that ends it, so
+ * a pending request stays pending until a terminal response arrives and hands
+ * the intermediate ones to a callback on the way through. Everything else is the
+ * degenerate case of that with no intermediate responses.
  */
+import { isTerminal } from './protocol';
 import type {
   DensityRequest,
   ElementInfo,
   IsoMesh,
+  OptimizationStep,
   ScfOutcome,
   WorkerRequest,
   WorkerResponse,
@@ -19,6 +27,8 @@ import type {
 type Pending = {
   resolve: (response: WorkerResponse) => void;
   reject: (error: Error) => void;
+  /** Called for each intermediate response, which does not settle the promise. */
+  onPartial?: (response: WorkerResponse) => void;
 };
 
 export class DftWorkerClient {
@@ -50,6 +60,10 @@ export class DftWorkerClient {
       }
       const pending = this.#pending.get(response.id);
       if (!pending) return;
+      if (!isTerminal(response)) {
+        pending.onPartial?.(response);
+        return;
+      }
       this.#pending.delete(response.id);
       if (response.type === 'error') {
         pending.reject(new Error(response.message));
@@ -72,12 +86,17 @@ export class DftWorkerClient {
 
   #send<T extends WorkerResponse>(
     build: (id: number) => WorkerRequest,
+    onPartial?: Pending['onPartial'],
     transfer: Transferable[] = [],
   ): Promise<T> {
     const id = this.#nextId++;
     const request = build(id);
     return new Promise<T>((resolve, reject) => {
-      this.#pending.set(id, { resolve: resolve as Pending['resolve'], reject });
+      this.#pending.set(id, {
+        resolve: resolve as Pending['resolve'],
+        reject,
+        onPartial,
+      });
       this.#ready.then(() => this.#worker?.postMessage(request, transfer));
     });
   }
@@ -105,6 +124,29 @@ export class DftWorkerClient {
       z,
       xyz,
     }));
+    return response.result;
+  }
+
+  /**
+   * Relaxes a structure towards the nearest minimum of the energy.
+   *
+   * `onStep` is called with every geometry the optimiser accepts, in Angstrom,
+   * as it is produced - that stream is the animation. The promise resolves with
+   * the calculation at the final geometry; a structure that did not reach a
+   * minimum resolves normally with `optimization.converged: false`, exactly as a
+   * non-converged SCF does.
+   */
+  async optimize(
+    z: Uint8Array,
+    xyz: Float64Array,
+    onStep: (step: OptimizationStep) => void,
+  ): Promise<ScfOutcome> {
+    const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>(
+      (id) => ({ id, type: 'optimize', z, xyz }),
+      (partial) => {
+        if (partial.type === 'step') onStep(partial.step);
+      },
+    );
     return response.result;
   }
 

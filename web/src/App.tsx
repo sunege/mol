@@ -7,22 +7,40 @@ import { PeriodicPicker } from './components/PeriodicPicker';
 import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
 import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
+import { hasUsableStructure } from './worker/protocol';
 import type {
   DensityChannel,
   DensityRequest,
   ElementInfo,
   IsoMesh,
+  OptimizationOutcome,
   ScfOutcome,
 } from './worker/protocol';
 import './App.css';
 
 /**
- * Phase 4: build a molecule by hand, run a real Kohn-Sham calculation on it,
- * and look at the electron density that comes out.
+ * What the frame player is showing.
+ *
+ * The two differ in what they leave behind. A divergence is a picture: the
+ * molecule comes apart and reassembles, and the structure is exactly as the user
+ * built it afterwards. An optimisation is not: the atoms genuinely move, and the
+ * relaxed positions replace the ones on screen when it finishes.
+ */
+type AnimationKind = 'divergence' | 'optimization';
+
+/**
+ * Phase 5: build a molecule by hand, watch it relax into a stable shape, and
+ * look at the electron density that comes out.
+ *
+ * Relaxing is the headline action, and it is the one that answers "what shape
+ * does this actually want to be" - the engine computes the forces on every
+ * nucleus and moves them downhill until nothing is pulling. Each step it accepts
+ * arrives here as it is produced and goes straight into the frame player, so the
+ * molecule is moving on screen while the next step is still being solved.
  *
  * The calculation is started explicitly rather than on every edit: benzene takes
  * seconds, so running it while the user drags an atom would be worse than
- * useless. From phase 5 the geometry optimisation takes over and drives itself.
+ * useless.
  *
  * The density surface is a second, much cheaper round trip over the same
  * converged calculation, which is what lets the threshold slider stay live.
@@ -38,6 +56,13 @@ import './App.css';
  * `converged: false`. That is not an error and is never written as one: the
  * molecule flies apart on screen and reassembles, which says what happened
  * without a word of chemistry (requirement F5).
+ *
+ * Running out of time is *not* that, and is deliberately shown differently. A
+ * relaxation that hits the worker's budget has solved the electrons at every
+ * geometry it visited; what it has is a real structure that is partly relaxed.
+ * So it stops where it is, keeps that structure, and says it ran out of time -
+ * because flying the molecule apart there would be saying "this cannot exist"
+ * when the true statement is "the computer was too slow".
  */
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -62,14 +87,33 @@ export default function App() {
   });
   const [mesh, setMesh] = useState<IsoMesh | null>(null);
   const [meshing, setMeshing] = useState(false);
-  const [diverging, setDiverging] = useState(false);
+  // What the frame player is showing, if anything. While this is set the player
+  // owns the atom positions and the effect that draws `atoms` stands aside.
+  const [animation, setAnimation] = useState<AnimationKind | null>(null);
   const isoLevel = levels[channel];
 
-  // Plays the frames of a failed calculation, and from phase 5 the steps of a
-  // geometry optimisation. It drives the viewer directly rather than through
-  // React state: the positions change every display frame, which is not
-  // something to re-render for.
+  // Plays the steps of a geometry optimisation and the frames of a failed
+  // calculation - the same queue, fed by two different producers. It drives the
+  // viewer directly rather than through React state: the positions change every
+  // display frame, which is not something to re-render for.
   const playerRef = useRef<FramePlayer | null>(null);
+
+  /**
+   * Whether whatever is feeding the player has finished producing frames.
+   *
+   * The distinction matters only for an optimisation. The player running dry
+   * there usually means the next step is still being solved, not that the
+   * animation is over, so going idle must not end it. Until this is set, the
+   * idle callback waits.
+   *
+   * It deliberately does *not* carry the structure to commit. A relaxed geometry
+   * is the answer, not a frame of an animation, so it is committed the moment
+   * the engine returns it; the animation only has to hand the viewer back
+   * afterwards. Waiting for the player would mean a tab left in the background -
+   * where `requestAnimationFrame` does not run at all - finishes a relaxation,
+   * says so in the panel, and still holds the structure the user started from.
+   */
+  const producerDoneRef = useRef(false);
 
   // Identifies the calculation whose result is still wanted. Cancelling or
   // editing bumps it, so a reply that arrives afterwards is ignored instead of
@@ -89,6 +133,19 @@ export default function App() {
   const meshInFlightRef = useRef(false);
   const meshRequestRef = useRef(0);
 
+  /**
+   * Ends whatever the player is showing, wherever it is. The molecule on screen
+   * is put back by the effect that watches `animation`, so this does not have to
+   * know what the current geometry is - and it deliberately does not commit a
+   * half-finished relaxation, because a structure the optimiser was still moving
+   * is not an answer.
+   */
+  const stopAnimation = useCallback(() => {
+    producerDoneRef.current = false;
+    playerRef.current?.stop();
+    setAnimation(null);
+  }, []);
+
   const cancelCalculation = useCallback(() => {
     // Replacing the worker is not free, so only do it when something is actually
     // running - every edit comes through here.
@@ -101,16 +158,21 @@ export default function App() {
     hasDensityRef.current = false;
     clientRef.current?.cancelAll();
     setComputing(false);
-  }, []);
+    stopAnimation();
+  }, [stopAnimation]);
 
   /**
-   * Ends the divergence animation wherever it is. The molecule on screen is put
-   * back by the effect that watches `diverging`, so this does not have to know
-   * what the current geometry is.
+   * Hands the viewer back to React once the frames have run out for good.
+   *
+   * Called from the player when it runs dry, and directly when the producer
+   * finishes after the player has already caught up - in which case the idle
+   * callback has come and gone and nothing else will call it. Either way the
+   * molecule it lands on is whatever `atoms` already holds.
    */
-  const stopDivergence = useCallback(() => {
-    playerRef.current?.stop();
-    setDiverging(false);
+  const finishAnimation = useCallback(() => {
+    if (!producerDoneRef.current) return;
+    producerDoneRef.current = false;
+    setAnimation(null);
   }, []);
 
   /**
@@ -122,7 +184,7 @@ export default function App() {
   const invalidateResult = useCallback(() => {
     setResult(null);
     setError(null);
-    stopDivergence();
+    stopAnimation();
     // The worker's copy of the density belongs to the old geometry, so the
     // surface on screen is stale whether or not the worker survives.
     hasDensityRef.current = false;
@@ -130,7 +192,7 @@ export default function App() {
     meshRequestRef.current += 1;
     setMesh(null);
     cancelCalculation();
-  }, [cancelCalculation, stopDivergence]);
+  }, [cancelCalculation, stopAnimation]);
 
   // --- edit operations -----------------------------------------------------
 
@@ -172,8 +234,8 @@ export default function App() {
 
   // The viewer is created once, so it calls through a ref that always holds the
   // current handlers rather than the ones captured at mount.
-  const handlers = useRef({ placeAtom, moveAtom, setSelected });
-  handlers.current = { placeAtom, moveAtom, setSelected };
+  const handlers = useRef({ placeAtom, moveAtom, setSelected, finishAnimation });
+  handlers.current = { placeAtom, moveAtom, setSelected, finishAnimation };
 
   // --- viewer and worker lifetime -----------------------------------------
 
@@ -202,9 +264,9 @@ export default function App() {
       // like one motion, slow enough that the interpolation has something to do.
       frameMs: 55,
       onFrame: (positions) => viewer?.setPositions(positions),
-      // The last frame is the molecule as the user built it, so there is
-      // nothing to put back; the effect below takes over from here.
-      onIdle: () => setDiverging(false),
+      // Running dry does not necessarily mean the animation is over: during an
+      // optimisation it usually means the next step is still being solved.
+      onIdle: () => handlers.current.finishAnimation(),
     });
     viewerRef.current = viewer;
     clientRef.current = client;
@@ -244,8 +306,8 @@ export default function App() {
   // it finished, or because the user edited the molecule out from under it - the
   // structure as built comes straight back.
   useEffect(() => {
-    if (elementsReady && !diverging) viewerRef.current?.setMolecule(atoms);
-  }, [atoms, elementsReady, diverging]);
+    if (elementsReady && animation === null) viewerRef.current?.setMolecule(atoms);
+  }, [atoms, elementsReady, animation]);
 
   useEffect(() => {
     viewerRef.current?.setActiveElement(activeZ);
@@ -338,7 +400,15 @@ export default function App() {
   const showDivergence = useCallback((current: SceneAtom[]) => {
     const player = playerRef.current;
     if (!player || current.length === 0) return;
-    setDiverging(true);
+    setAnimation('divergence');
+    // Queued rather than cut in: an optimisation that fell apart has steps still
+    // waiting, and letting them play means the molecule is seen relaxing as far
+    // as it got before it comes apart, with no jump between the two.
+    //
+    // Nothing is committed here. A divergence is a picture of what the engine
+    // found, not a move the molecule made, so the structure the user built is
+    // still the structure afterwards.
+    producerDoneRef.current = true;
     player.push(...divergenceFrames(toWorkerArrays(current).xyz));
   }, []);
 
@@ -348,7 +418,7 @@ export default function App() {
     const { z, xyz } = toWorkerArrays(atoms);
     const token = ++requestRef.current;
     inFlightRef.current = true;
-    stopDivergence();
+    stopAnimation();
     setComputing(true);
     // Drop the previous answer immediately: leaving it on screen next to
     // "計算中…" reads as though it belonged to the run in progress.
@@ -383,7 +453,90 @@ export default function App() {
     isoLevel,
     requestIsosurface,
     showDivergence,
-    stopDivergence,
+    stopAnimation,
+  ]);
+
+  /**
+   * Relaxes the structure and plays it moving (requirement F2).
+   *
+   * The engine streams a geometry per accepted step; each one goes straight into
+   * the frame player, which shows them at a steady rate however unevenly they
+   * arrive. When it finishes, the relaxed structure replaces the one the user
+   * built - unlike a divergence, the atoms really did move.
+   *
+   * A structure that will not relax - no self-consistent density, or still
+   * moving when the step limit or the time budget runs out - is not written as
+   * an error. The frames already queued play out and the molecule then comes
+   * apart, which is the same answer the single point gives and needs no words
+   * (requirement F5).
+   */
+  const relax = useCallback(() => {
+    const client = clientRef.current;
+    const player = playerRef.current;
+    if (!client || !player || atoms.length === 0) return;
+    const original = atoms;
+    const { z, xyz } = toWorkerArrays(original);
+    const token = ++requestRef.current;
+    inFlightRef.current = true;
+    stopAnimation();
+    setComputing(true);
+    setResult(null);
+    setError(null);
+    // The geometry is about to change under it, so the surface on screen belongs
+    // to a molecule that will not exist in a moment.
+    hasDensityRef.current = false;
+    wantedRef.current = null;
+    meshRequestRef.current += 1;
+    setMesh(null);
+    setAnimation('optimization');
+
+    client
+      .optimize(z, xyz, (step) => {
+        if (requestRef.current !== token) return;
+        player.push(step.xyz);
+      })
+      .then((outcome) => {
+        if (requestRef.current !== token) return;
+        inFlightRef.current = false;
+        setComputing(false);
+        setResult(outcome);
+
+        const relaxed = outcome.optimization;
+        if (!outcome.converged || !relaxed || !hasUsableStructure(relaxed)) {
+          showDivergence(original);
+          return;
+        }
+        // Whatever stopped it, the structure it reached is one the electrons
+        // were solved for, so it is the molecule now - partly relaxed if the
+        // budget ran out, fully relaxed if it settled. It is committed here
+        // rather than when the animation ends, so that the answer does not
+        // depend on frames the browser may not be drawing.
+        setAtoms(withPositions(original, relaxed.xyz));
+        setPresetId(null);
+        producerDoneRef.current = true;
+        // The player may already have caught up with the engine, in which case
+        // its idle callback has been and gone and nothing will call it again.
+        if (!player.playing) finishAnimation();
+
+        hasDensityRef.current = true;
+        if (showDensity) requestIsosurface(channel, isoLevel);
+      })
+      .catch((e: Error) => {
+        if (requestRef.current !== token) return;
+        inFlightRef.current = false;
+        setComputing(false);
+        stopAnimation();
+        setError(describeEngineError(e.message));
+      });
+  }, [
+    atoms,
+    showDensity,
+    channel,
+    isoLevel,
+    requestIsosurface,
+    showDivergence,
+    stopAnimation,
+    finishAnimation,
   ]);
 
   // --- keyboard ------------------------------------------------------------
@@ -406,7 +559,15 @@ export default function App() {
   }, [selected, deleteSelected]);
 
   // Narrowed once, so every readout below agrees on what counts as an answer.
-  const converged = result !== null && result.converged;
+  //
+  // The gate is the *electrons*, not the structure. Every number below - the
+  // energy, the iteration count, the density surface - describes the molecule
+  // currently on screen, and that description is true whenever its SCF
+  // converged, whether or not the optimiser had time to reach the bottom. What
+  // the optimiser managed is a separate line of its own.
+  const relaxation = result?.optimization ?? null;
+  const solved = result !== null && result.converged;
+  const settled = solved && (relaxation === null || relaxation.converged);
   const selectedAtom = selected === null ? null : atoms[selected];
   const selectedSymbol = selectedAtom
     ? (elements.find((e) => e.z === selectedAtom.z)?.symbol ?? `Z=${selectedAtom.z}`)
@@ -432,7 +593,7 @@ export default function App() {
 
       <aside className="panel">
         <h1>分子シミュレータ</h1>
-        <p className="phase">Phase 4 — 自動スピン・電荷決定</p>
+        <p className="phase">Phase 5 — 構造最適化</p>
 
         <h2>配置する元素</h2>
         <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
@@ -483,12 +644,22 @@ export default function App() {
           <button
             type="button"
             className={computing ? '' : 'active'}
-            onClick={computing ? cancelCalculation : calculate}
+            onClick={computing ? cancelCalculation : relax}
             disabled={atoms.length === 0}
           >
-            {computing ? '中止' : '計算する'}
+            {computing ? '中止' : '安定な形にする'}
+          </button>
+          <button type="button" onClick={calculate} disabled={computing || atoms.length === 0}>
+            この形のまま計算
           </button>
         </div>
+        <p className="hint">
+          {relaxation !== null && solved && relaxation.reason !== 'converged'
+            ? 'いまの形は途中までのものです。もう一度「安定な形にする」を押すと、' +
+              'ここから続きを計算します。'
+            : '「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
+              '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
+        </p>
 
         <h2>電子密度</h2>
         <label className="toggle">
@@ -521,7 +692,7 @@ export default function App() {
           value={isoLevel}
           range={ISO_RANGES[channel]}
           onChange={(level) => setLevels((prev) => ({ ...prev, [channel]: level }))}
-          disabled={!showDensity || !converged}
+          disabled={!showDensity || !solved}
         />
         <p className="hint">{explainChannel(channel, mesh)}</p>
 
@@ -533,9 +704,9 @@ export default function App() {
             {error ? (
               <span className="error">{error}</span>
             ) : computing ? (
-              '計算中…'
-            ) : converged ? (
-              '完了'
+              animation === 'optimization' ? '形を調整中…' : '計算中…'
+            ) : solved ? (
+              settled ? '完了' : '途中で終了'
             ) : (
               // A calculation that did not converge is deliberately blank rather
               // than described: the molecule flying apart on screen is what says
@@ -544,12 +715,17 @@ export default function App() {
               '—'
             )}
           </dd>
+          <dt>形の調整</dt>
+          <dd>{describeRelaxation(relaxation, solved)}</dd>
           <dt>全エネルギー</dt>
-          {/* Only a converged energy is a number about the molecule; the last
-              iterate of a diverging one is a number about the iteration. */}
-          <dd>{converged ? `${result.energy.toFixed(6)} Ha` : '—'}</dd>
+          {/* The energy of the structure on screen, which is a real number
+              about a real structure even when the optimiser ran out of time
+              before reaching the bottom. What is never shown is the last
+              iterate of a diverging SCF: that is a number about the iteration,
+              not about the molecule. */}
+          <dd>{solved ? `${result.energy.toFixed(6)} Ha` : '—'}</dd>
           <dt>反復</dt>
-          <dd>{converged ? `${result.iterations} 回` : '—'}</dd>
+          <dd>{solved ? `${result.iterations} 回` : '—'}</dd>
           <dt>計算時間</dt>
           <dd>{result ? `${(result.elapsedMs / 1000).toFixed(2)} 秒` : '—'}</dd>
           <dt>等値面</dt>
@@ -568,6 +744,49 @@ export default function App() {
       </aside>
     </div>
   );
+}
+
+/**
+ * The same atoms at new positions, which is what a finished relaxation returns.
+ *
+ * Elements never change - only the optimiser's coordinates do - so the element
+ * list comes from the structure that went in.
+ */
+function withPositions(atoms: SceneAtom[], xyz: number[]): SceneAtom[] {
+  return atoms.map((atom, i) => ({
+    z: atom.z,
+    pos: [xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]] as [number, number, number],
+  }));
+}
+
+/**
+ * How far the structure got, and what stopped it.
+ *
+ * Only reached when the electrons were solved, so `'scf'` cannot appear here -
+ * that case is the molecule coming apart on screen and gets no words at all
+ * (requirement F5). The other two do get words, and they are about the clock
+ * rather than about chemistry: "it ran out of time" is a fact about this
+ * computer, and hiding it would leave a half-relaxed structure looking like a
+ * finished one.
+ */
+function describeRelaxation(
+  relaxation: OptimizationOutcome | null,
+  solved: boolean,
+): string {
+  if (relaxation === null || !solved) return '—';
+  const moved = `${relaxation.steps} 回動いたところまで`;
+  switch (relaxation.reason) {
+    case 'converged':
+      return relaxation.steps === 0
+        ? 'すでに安定な形でした'
+        : `${relaxation.steps} 回動いて落ち着きました`;
+    case 'interrupted':
+      return `時間切れ · ${moved}`;
+    case 'maxSteps':
+      return `回数の上限 · ${moved}`;
+    case 'scf':
+      return '—';
+  }
 }
 
 /**

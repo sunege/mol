@@ -9,8 +9,19 @@
  * It never throws across the message boundary: failures come back as `error`
  * responses, and a non-converged SCF is a normal `scf` response with
  * `converged: false`.
+ *
+ * A geometry optimisation streams: the engine calls back into JavaScript for
+ * every structure it accepts, and each of those is posted immediately. The
+ * computation is synchronous and blocks this worker's message loop, but
+ * `postMessage` is not - the frames reach the UI thread while the next step is
+ * still being solved, which is what lets a slow molecule still animate.
  */
-import init, { supportedElements, scf, type Calculation } from '../wasm/dft_wasm.js';
+import init, {
+  supportedElements,
+  scf,
+  optimize,
+  type Calculation,
+} from '../wasm/dft_wasm.js';
 import wasmUrl from '../wasm/dft_wasm_bg.wasm?url';
 import type {
   DensityChannel,
@@ -20,6 +31,15 @@ import type {
   WorkerRequest,
   WorkerResponse,
 } from './protocol';
+
+/** What the engine hands the step callback, before it is put on the wire. */
+interface RawStep {
+  step: number;
+  /** Angstrom, flattened. */
+  xyz: number[];
+  energy: number;
+  maxForce: number;
+}
 
 const post = (message: WorkerResponse, transfer: Transferable[] = []) =>
   self.postMessage(message, transfer);
@@ -62,6 +82,42 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           console.debug(
             `[dft] charge ${result.charge}, multiplicity ${result.multiplicity}` +
               ` after ${result.attempts} state(s), converged=${result.converged}`,
+          );
+        }
+        post({
+          id: request.id,
+          type: 'scf',
+          result: { ...result, elapsedMs: performance.now() - started },
+        });
+        break;
+      }
+      case 'optimize': {
+        const started = performance.now();
+        const calculation = optimize(request.z, request.xyz, (raw: RawStep) => {
+          // A fresh array each time, so it can be transferred rather than
+          // copied; the worker has no use for it afterwards.
+          const xyz = new Float32Array(raw.xyz);
+          post(
+            {
+              id: request.id,
+              type: 'step',
+              step: {
+                step: raw.step,
+                xyz,
+                energy: raw.energy,
+                maxForce: raw.maxForce,
+              },
+            },
+            [xyz.buffer],
+          );
+        });
+        current?.free();
+        current = calculation;
+        const result = calculation.summary() as Omit<ScfOutcome, 'elapsedMs'>;
+        if (import.meta.env.DEV) {
+          console.debug(
+            `[dft] relaxed in ${result.optimization?.steps ?? 0} step(s), ` +
+              `${result.optimization?.reason}, multiplicity ${result.multiplicity}`,
           );
         }
         post({

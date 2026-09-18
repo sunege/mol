@@ -61,11 +61,25 @@ pub struct System {
 
 impl System {
     pub fn build(molecule: Molecule, quality: GridQuality) -> Result<Self, BasisError> {
+        let grid = grid::build(&molecule, quality);
+        System::build_with_grid(molecule, grid)
+    }
+
+    /// The same, with the integration grid supplied rather than built.
+    ///
+    /// Two callers need this. The gradient's finite-difference test holds the
+    /// grid still while the nuclei move, which is exactly the energy the
+    /// analytic gradient differentiates once the weight derivatives are left
+    /// out. The geometry optimiser does the opposite - it rebuilds the grid at
+    /// every step - so this is not a shortcut it can take.
+    pub fn build_with_grid(
+        molecule: Molecule,
+        grid: MolecularGrid,
+    ) -> Result<Self, BasisError> {
         let basis = BasisSet::sto3g(&molecule)?;
         let (overlap, kinetic) = integrals::overlap_and_kinetic(&basis);
         let core = kinetic + integrals::nuclear_attraction(&basis, &molecule);
         let eri = integrals::compute_eri(&basis);
-        let grid = grid::build(&molecule, quality);
         let nuclear_repulsion = molecule.nuclear_repulsion();
         Ok(System { molecule, basis, overlap, core, eri, grid, nuclear_repulsion })
     }
@@ -76,7 +90,7 @@ impl System {
 }
 
 /// Where the first density matrix comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum InitialGuess {
     /// Superposition of atomic densities: converge each element's atom once and
     /// assemble the blocks. Much closer to the answer than the alternative.
@@ -86,6 +100,40 @@ pub enum InitialGuess {
     /// Crude, but it needs no other calculation, which is what the atomic
     /// calculations behind [`InitialGuess::Atomic`] themselves start from.
     Core,
+    /// Densities converged for a nearby geometry.
+    ///
+    /// One matrix - the total density - for a restricted run, two - alpha then
+    /// beta - for an unrestricted one; a restricted run given two adds them, and
+    /// an unrestricted run given one splits it evenly. This is what a geometry
+    /// optimisation starts each step from: after the first step the nuclei have
+    /// barely moved, and reusing the last density roughly halves the iterations.
+    Previous(Vec<DMatrix<f64>>),
+}
+
+impl InitialGuess {
+    /// The total density this guess implies, or `None` when it is not a restart.
+    fn total_density(&self) -> Option<DMatrix<f64>> {
+        match self {
+            InitialGuess::Previous(matrices) => match matrices.as_slice() {
+                [total] => Some(total.clone()),
+                [alpha, beta] => Some(alpha + beta),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The two spin densities this guess implies, splitting a total one evenly.
+    fn spin_densities(&self) -> Option<(DMatrix<f64>, DMatrix<f64>)> {
+        match self {
+            InitialGuess::Previous(matrices) => match matrices.as_slice() {
+                [total] => Some((total * 0.5, total * 0.5)),
+                [alpha, beta] => Some((alpha.clone(), beta.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 /// How electrons are spread over orbitals.
@@ -326,11 +374,14 @@ pub fn run_restricted(system: &System, options: &ScfOptions) -> ScfResult {
     let fill = |fock: &DMatrix<f64>| {
         solve(fock, &x, n_electrons, CLOSED_SHELL_CAPACITY, options.occupation)
     };
-    let mut density = match options.initial_guess {
+    let mut density = match &options.initial_guess {
         InitialGuess::Atomic => {
             guess::superposition_of_atomic_densities(&system.molecule, &system.basis)
         }
         InitialGuess::Core => fill(&system.core).2,
+        restart => restart
+            .total_density()
+            .expect("a restart guess must carry one or two density matrices"),
     };
     let mut diis = Diis::new(options.diis_subspace);
 
@@ -424,16 +475,19 @@ pub fn run_unrestricted(system: &System, options: &ScfOptions) -> ScfResult {
     // first diagonalisation is too - what separates them is that alpha then
     // takes more orbitals than beta, and from the second iteration on they see
     // genuinely different potentials.
-    let total = match options.initial_guess {
+    let (mut alpha, mut beta) = match &options.initial_guess {
         InitialGuess::Atomic => {
-            guess::superposition_of_atomic_densities(&system.molecule, &system.basis)
+            let total = guess::superposition_of_atomic_densities(&system.molecule, &system.basis);
+            (&total * 0.5, &total * 0.5)
         }
         InitialGuess::Core => {
-            fill(&system.core, n_alpha).2 + fill(&system.core, n_beta).2
+            let total = fill(&system.core, n_alpha).2 + fill(&system.core, n_beta).2;
+            (&total * 0.5, &total * 0.5)
         }
+        restart => restart
+            .spin_densities()
+            .expect("a restart guess must carry one or two density matrices"),
     };
-    let mut alpha = &total * 0.5;
-    let mut beta = &total * 0.5;
     let mut diis = Diis::new(options.diis_subspace);
 
     let n = system.n_functions();

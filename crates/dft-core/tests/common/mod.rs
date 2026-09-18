@@ -154,6 +154,89 @@ impl OpenShellReference {
     }
 }
 
+/// One analytic nuclear gradient from PySCF, at a fixed geometry and spin state.
+#[derive(Debug, Deserialize)]
+pub struct GradientReference {
+    pub key: String,
+    pub multiplicity: u32,
+    pub atoms: Vec<RefAtom>,
+    pub energy: f64,
+    /// `dE/dR` in Hartree/Bohr, `[atom][axis]`.
+    pub gradient: Vec<[f64; 3]>,
+}
+
+/// A structure relaxed by scipy's BFGS over PySCF energies and gradients - a
+/// different minimiser over a different engine, which is what makes it worth
+/// comparing the Rust optimiser's answer against.
+#[derive(Debug, Deserialize)]
+pub struct RelaxedReference {
+    pub key: String,
+    pub multiplicity: u32,
+    pub symbols: Vec<String>,
+    /// The geometry it started from, flattened, in Bohr.
+    pub start: Vec<f64>,
+    pub energy: f64,
+    pub max_force: f64,
+    /// The relaxed geometry, flattened, in Bohr.
+    pub coords: Vec<f64>,
+    /// Distance from atom 0 to each other atom, in Bohr.
+    pub bonds_from_first_atom: Vec<f64>,
+    /// Angle at atom 0 between atoms 1 and 2, in degrees.
+    pub angle_1_0_2: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GradientReferences {
+    /// Whether PySCF included the grid response. It does not, which is the same
+    /// approximation the engine makes.
+    pub grid_response: bool,
+    pub cases: Vec<GradientReference>,
+    pub relaxed: Vec<RelaxedReference>,
+}
+
+impl GradientReferences {
+    pub fn case(&self, key: &str) -> &GradientReference {
+        self.cases
+            .iter()
+            .find(|c| c.key == key)
+            .unwrap_or_else(|| panic!("no gradient reference {key:?}"))
+    }
+
+    pub fn relaxed(&self, key: &str) -> &RelaxedReference {
+        self.relaxed
+            .iter()
+            .find(|r| r.key == key)
+            .unwrap_or_else(|| panic!("no relaxed reference {key:?}"))
+    }
+}
+
+impl GradientReference {
+    pub fn molecule(&self) -> Molecule {
+        let atoms = self.atoms.iter().map(|a| Atom { z: a.z, pos: a.pos }).collect();
+        let mut molecule = Molecule::new(atoms).expect("reference geometry must be valid");
+        molecule.multiplicity = self.multiplicity;
+        molecule
+    }
+}
+
+impl RelaxedReference {
+    /// The geometry the reference optimiser started from, with the spin state it
+    /// used, so the Rust optimiser is given exactly the same problem.
+    pub fn starting_molecule(&self, z: &[u8]) -> Molecule {
+        let atoms = z
+            .iter()
+            .enumerate()
+            .map(|(i, &z)| Atom {
+                z,
+                pos: [self.start[3 * i], self.start[3 * i + 1], self.start[3 * i + 2]],
+            })
+            .collect();
+        let mut molecule = Molecule::new(atoms).expect("reference geometry must be valid");
+        molecule.multiplicity = self.multiplicity;
+        molecule
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct XcUnpolarized {
     pub rho: f64,

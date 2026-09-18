@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { PRESETS, toWorkerArrays } from '../molecules/presets';
-import type { IsoMesh, ScfOutcome, WorkerRequest, WorkerResponse } from './protocol';
+import { hasUsableStructure, isTerminal } from './protocol';
+import type {
+  IsoMesh,
+  OptimizationOutcome,
+  OptimizationReason,
+  ScfOutcome,
+  WorkerRequest,
+  WorkerResponse,
+} from './protocol';
 
 /**
  * Messages cross the worker boundary through the structured clone algorithm, so
@@ -211,3 +219,128 @@ describe('worker protocol', () => {
     expect(cloned.result.charge).toBe(0);
   });
 });
+
+/**
+ * A geometry optimisation is the one request that answers more than once. The
+ * client keeps it pending until a terminal response arrives, so which responses
+ * count as terminal is part of the contract rather than an implementation
+ * detail.
+ */
+describe('streaming a geometry optimisation', () => {
+  it('treats a step as intermediate and everything else as final', () => {
+    const step: WorkerResponse = {
+      id: 4,
+      type: 'step',
+      step: { step: 2, xyz: new Float32Array([0, 0, 0]), energy: -74.7, maxForce: 0.03 },
+    };
+    expect(isTerminal(step)).toBe(false);
+
+    const finals: WorkerResponse[] = [
+      { id: 4, type: 'scf', result: convergedOutcome() },
+      { id: 4, type: 'error', message: 'nope' },
+      { id: 4, type: 'elements', elements: [] },
+    ];
+    for (const response of finals) expect(isTerminal(response)).toBe(true);
+  });
+
+  it('carries a step as a transferable frame the player can use directly', () => {
+    const xyz = new Float32Array([0, 0, 0.117, 0, 0.757, -0.469, 0, -0.757, -0.469]);
+    const response: WorkerResponse = {
+      id: 9,
+      type: 'step',
+      step: { step: 5, xyz, energy: -74.7318, maxForce: 0.0412 },
+    };
+    const cloned = structuredClone(response);
+    if (cloned.type !== 'step') throw new Error('unreachable');
+    // Float32Array is what FramePlayer takes, so no conversion happens on the
+    // UI thread between arrival and display.
+    expect(cloned.step.xyz).toBeInstanceOf(Float32Array);
+    expect(cloned.step.xyz.length).toBe(9);
+    expect(cloned.step.step).toBe(5);
+  });
+
+  it('separates "no bound electrons" from "the computer was too slow"', () => {
+    // The whole of the interface's decision. Only a failed SCF means the nuclei
+    // cannot hold electrons where they are, and only that is shown as the
+    // molecule coming apart; the other two are facts about the clock, and the
+    // structure they end on is a real, partly relaxed one to keep.
+    const ended = (reason: OptimizationReason): OptimizationOutcome => ({
+      converged: reason === 'converged',
+      reason,
+      steps: 3,
+      xyz: [0, 0, 0],
+      maxForce: 0.004,
+    });
+    expect(hasUsableStructure(ended('converged'))).toBe(true);
+    expect(hasUsableStructure(ended('interrupted'))).toBe(true);
+    expect(hasUsableStructure(ended('maxSteps'))).toBe(true);
+    expect(hasUsableStructure(ended('scf'))).toBe(false);
+  });
+
+  it('reports a structure that would not settle as an ordinary result', () => {
+    // Requirement F5 again, now for the geometry rather than the electrons:
+    // running out of steps is a value with a reason attached, not an error.
+    const outcome: ScfOutcome = {
+      ...convergedOutcome(),
+      optimization: {
+        converged: false,
+        reason: 'maxSteps',
+        steps: 100,
+        // Real coordinates even so: the electrons were solved at every geometry
+        // on the way, so this is a structure, just not a settled one.
+        xyz: [0, 0, 0.121, 0, 0.771, -0.487, 0, -0.769, -0.489],
+        maxForce: 0.0071,
+      },
+    };
+    const response: WorkerResponse = { id: 11, type: 'scf', result: outcome };
+    const cloned = structuredClone(response);
+    if (cloned.type !== 'scf') throw new Error('unreachable');
+    expect(cloned.result.optimization?.converged).toBe(false);
+    expect(cloned.result.optimization?.reason).toBe('maxSteps');
+    // The electrons were fine; it is the structure that did not settle, and the
+    // two are reported separately so the interface can tell them apart.
+    expect(cloned.result.converged).toBe(true);
+    expect(hasUsableStructure(cloned.result.optimization!)).toBe(true);
+  });
+
+  it('hands back the relaxed geometry in Angstrom, atom for atom', () => {
+    const outcome: ScfOutcome = {
+      ...convergedOutcome(),
+      optimization: {
+        converged: true,
+        reason: 'converged',
+        steps: 11,
+        xyz: [0, 0, 0.1246, 0, 0.7761, -0.4946, 0, -0.7761, -0.4946],
+        maxForce: 1.2e-4,
+      },
+    };
+    const cloned = structuredClone(outcome);
+    expect(cloned.optimization?.xyz.length).toBe(9);
+    // Three coordinates per atom, so the UI can zip it against the elements it
+    // already has without being told the atom count again.
+    expect((cloned.optimization?.xyz.length ?? 0) % 3).toBe(0);
+    expect(cloned.optimization?.converged).toBe(true);
+  });
+});
+
+/** A plausible converged single point, for the cases above to build on. */
+function convergedOutcome(): ScfOutcome {
+  return {
+    converged: true,
+    iterations: 8,
+    multiplicity: 1,
+    charge: 0,
+    attempts: 2,
+    energy: -74.73205936,
+    components: {
+      core: -122.39740918,
+      coulomb: 47.35230686,
+      exchangeCorrelation: -8.87592562,
+      nuclearRepulsion: 9.18896857,
+    },
+    homoLumoGap: 0.2515,
+    basisFunctions: 7,
+    electronsOnGrid: 9.999991,
+    elapsedMs: 312.5,
+  };
+}

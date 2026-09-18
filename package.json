@@ -3,13 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "description": "Browser molecular simulator: real DFT in WebAssembly",
-  "workspaces": ["web"],
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
     "dev": "npm run dev --workspace web",
     "build": "npm run build --workspace web",
     "preview": "npm run preview --workspace web",
     "test": "npm run test --workspace web",
-    "build:wasm": "wasm-pack build crates/dft-wasm --release --target web --out-dir ../../web/src/wasm && rm -f web/src/wasm/.gitignore",
+    "build:wasm": "rm -f web/src/wasm/package.json && wasm-pack build crates/dft-wasm --release --target web --out-dir ../../web/src/wasm && rm -f web/src/wasm/.gitignore",
     "test:rust": "cargo test"
   }
 }

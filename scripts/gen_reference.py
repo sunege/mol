@@ -231,6 +231,20 @@ GEOMETRIES = {
         ("H", (0.0, 0.9617, -0.8240)),
         ("H", (0.0, -0.9617, -0.8240)),
     ],
+    # Methane pulled off its tetrahedron, for the gradient reference: every
+    # force component is non-zero and no symmetry can hide a wrong term.
+    "ch4_distorted": [
+        ("C", (0.04, -0.02, 0.03)),
+        ("H", (0.78, 0.71, 0.55)),
+        ("H", (0.55, -0.83, -0.71)),
+        ("H", (-0.83, 0.62, -0.49)),
+        ("H", (-0.61, -0.74, 0.97)),
+    ],
+    # Oxygen at a stretched bond, off-axis so all three components are alive.
+    "o2_stretched": [
+        ("O", (0.0, 0.0, 0.0)),
+        ("O", (0.164, -0.090, 1.349)),
+    ],
     # Linear, two heavy atoms.
     "co2": [
         ("C", (0.0, 0.0, 0.0)),
@@ -553,6 +567,149 @@ def open_shell_reference() -> None:
     )
 
 
+# --------------------------------------------------------------------------
+# Analytic nuclear gradients, and a relaxed geometry to compare against
+# --------------------------------------------------------------------------
+
+# Geometries the Rust gradient tests check, with the spin multiplicity each is
+# solved at. The distorted ones carry large forces, which is the point: a term
+# that is wrong by a few percent shows up as a few percent of something big.
+GRADIENT_CASES = [
+    ("h2o_distorted", "h2o_distorted", 1),
+    ("ch4_distorted", "ch4_distorted", 1),
+    ("o2_stretched_triplet", "o2_stretched", 3),
+    ("ch3_doublet", "ch3", 2),
+]
+
+
+def _mean_field(mol):
+    """A converged SVWN5 calculation, restricted or not as the spin requires."""
+    mf = dft.RKS(mol) if mol.spin == 0 else dft.UKS(mol)
+    mf.xc = "lda,vwn5"
+    mf.grids.level = REFERENCE_GRID_LEVEL
+    mf.conv_tol = 1e-12
+    energy = float(mf.kernel())
+    if not mf.converged:
+        mf = mf.newton()
+        energy = float(mf.kernel())
+    assert mf.converged
+    return mf, energy
+
+
+def _analytic_gradient(mf):
+    """dE/dR in Hartree/Bohr, with the grid held still.
+
+    `grid_response = False` is PySCF's default and is the same approximation the
+    engine makes: the derivatives of the Becke weights are left out. Turning it
+    on here would compare two different quantities.
+    """
+    grad = mf.nuc_grad_method()
+    grad.grid_response = False
+    return grad.kernel()
+
+
+def gradient_reference() -> None:
+    cases = []
+    for key, name, multiplicity in GRADIENT_CASES:
+        mol = build_mol(name, spin=multiplicity - 1)
+        mf, energy = _mean_field(mol)
+        gradient = _analytic_gradient(mf)
+        cases.append(
+            {
+                "key": key,
+                "multiplicity": multiplicity,
+                "atoms": [
+                    {
+                        "z": int(mol.atom_charge(i)),
+                        "pos": [float(x) for x in mol.atom_coord(i)],
+                    }
+                    for i in range(mol.natm)
+                ],
+                "energy": energy,
+                # Hartree/Bohr, [natm][3].
+                "gradient": [[float(x) for x in row] for row in gradient],
+            }
+        )
+
+    dump(
+        "gradients.json",
+        {
+            "functional": "lda,vwn5",
+            "basis": "sto-3g",
+            "grid_level": REFERENCE_GRID_LEVEL,
+            "grid_response": False,
+            "source": "pyscf mf.nuc_grad_method().kernel()",
+            "cases": cases,
+            "relaxed": [relaxed_geometry("h2o", 1), relaxed_geometry("ch4", 1)],
+        },
+    )
+
+
+def relaxed_geometry(name: str, multiplicity: int) -> dict:
+    """Minimises the energy with scipy's BFGS over PySCF energies and gradients.
+
+    Deliberately not PySCF's own geometry optimiser: geomeTRIC and pyberny are
+    not installed, and an independent optimiser over an independent engine is a
+    better reference anyway - if the Rust optimiser lands on the same structure,
+    two different minimisers agreed about where the minimum is.
+    """
+    from scipy.optimize import minimize
+
+    template = GEOMETRIES[name]
+    symbols = [symbol for symbol, _ in template]
+
+    def build(flat_bohr):
+        mol = gto.Mole()
+        mol.atom = [
+            (symbol, tuple(flat_bohr[3 * i : 3 * i + 3]))
+            for i, symbol in enumerate(symbols)
+        ]
+        mol.basis = "sto-3g"
+        mol.unit = "Bohr"
+        mol.spin = multiplicity - 1
+        mol.charge = 0
+        mol.verbose = 0
+        mol.build()
+        return mol
+
+    def objective(flat_bohr):
+        mf, energy = _mean_field(build(flat_bohr))
+        return energy, _analytic_gradient(mf).ravel()
+
+    start = build_mol(name, spin=multiplicity - 1).atom_coords().ravel()
+    outcome = minimize(objective, start, jac=True, method="BFGS", tol=1e-8,
+                       options={"gtol": 1e-6, "maxiter": 200})
+    assert outcome.success, f"{name} did not relax: {outcome.message}"
+
+    coords = np.asarray(outcome.x).reshape(-1, 3)
+
+    def distance(i, j):
+        return float(np.linalg.norm(coords[i] - coords[j]))
+
+    def angle(i, j, k):
+        u = coords[i] - coords[j]
+        v = coords[k] - coords[j]
+        cosine = float(u @ v / (np.linalg.norm(u) * np.linalg.norm(v)))
+        return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+    # Every bond from the first atom, which is the heavy one in both cases here,
+    # plus one angle across it. Enough to pin the structure without writing out
+    # coordinates that depend on an arbitrary orientation.
+    bonds = [distance(0, i) for i in range(1, len(symbols))]
+    return {
+        "key": name,
+        "multiplicity": multiplicity,
+        "symbols": symbols,
+        "start": [float(x) for x in start],
+        "energy": float(outcome.fun),
+        "max_force": float(np.abs(outcome.jac).max()),
+        # Bohr.
+        "coords": [float(x) for x in np.asarray(outcome.x)],
+        "bonds_from_first_atom": bonds,
+        "angle_1_0_2": angle(1, 0, 2),
+    }
+
+
 def flat(matrix) -> list[float]:
     return [float(x) for x in np.asarray(matrix).ravel()]
 
@@ -589,6 +746,7 @@ def main() -> None:
     scf_reference("benzene", "benzene", with_density=False)
     atomic_reference()
     open_shell_reference()
+    gradient_reference()
 
 
 if __name__ == "__main__":

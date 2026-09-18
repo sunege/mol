@@ -5,6 +5,7 @@
 //! with d or f functions needs no new integral kernels.
 
 pub mod boys;
+pub mod deriv;
 pub mod eri;
 pub mod md;
 pub mod onee;

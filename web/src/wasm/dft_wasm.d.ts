@@ -80,6 +80,23 @@ export class IsoMesh {
 }
 
 /**
+ * Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
+ * structure as it is produced (requirement F2).
+ *
+ * The charge and spin state are chosen once, on the structure as given, and
+ * held for the whole optimisation: running the search at every geometry would
+ * multiply the cost by the number of states tried, and the state is not what is
+ * being optimised.
+ *
+ * `on_step` receives `{ step, xyz, energy, maxForce }` with coordinates in
+ * Angstrom, and returning `false` from it stops the relaxation where it is.
+ * Nothing here throws: a structure the engine cannot solve comes back as a
+ * calculation whose `optimization.converged` is false, which the interface
+ * turns into an animation rather than a message (requirement F5).
+ */
+export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Function): Calculation;
+
+/**
  * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
  * the charge and spin state itself (requirement F4).
  *
@@ -118,13 +135,16 @@ export interface InitOutput {
     readonly isomesh_positiveIndices: (a: number) => [number, number];
     readonly isomesh_positiveNormals: (a: number) => [number, number];
     readonly isomesh_positivePositions: (a: number) => [number, number];
+    readonly optimize: (a: number, b: number, c: number, d: number, e: any) => [number, number, number];
     readonly scf: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly start: () => void;
     readonly supportedElements: () => [number, number, number];
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }

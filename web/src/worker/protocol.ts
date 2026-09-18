@@ -5,6 +5,13 @@
  * single worker can serve overlapping requests (a pending isosurface redraw
  * while a new geometry is being submitted, for example).
  *
+ * Most requests answer once. A geometry optimisation answers many times: a
+ * `step` for every structure the engine accepts, and then one `scf` carrying the
+ * final calculation. The `step` messages are what the relaxation animation is
+ * made of, and they are sent as the engine produces them rather than collected
+ * up, so a molecule that takes a second per step is still moving on screen while
+ * it is being solved.
+ *
  * Coordinates crossing this boundary are always in Angstrom and energies always
  * in Hartree; the engine converts to Bohr internally. Densities are the one
  * thing left in engine units - electrons per cubic Bohr - because they are only
@@ -29,6 +36,66 @@ export interface EnergyComponents {
   coulomb: number;
   exchangeCorrelation: number;
   nuclearRepulsion: number;
+}
+
+/** How a geometry optimisation ended. */
+export type OptimizationReason =
+  /** Reached a stationary point: the forces and the energy change are all small. */
+  | 'converged'
+  /** Ran out of steps with the structure still moving. */
+  | 'maxSteps'
+  /** Ran out of the worker's wall-clock budget. */
+  | 'interrupted'
+  /** An SCF along the way found no self-consistent density for the nuclei. */
+  | 'scf';
+
+/**
+ * The geometry half of an optimisation's result.
+ *
+ * Not reaching a minimum is an ordinary outcome rather than an error
+ * (requirement F5), so this always arrives. `converged` says whether the
+ * structure settled; `reason` says what stopped it, and the three ways of not
+ * settling are not the same thing - see {@link hasUsableStructure}.
+ */
+export interface OptimizationOutcome {
+  converged: boolean;
+  reason: OptimizationReason;
+  /** Accepted moves, not counting the structure as it was submitted. */
+  steps: number;
+  /**
+   * The geometry the optimiser ended on, in Angstrom, flattened.
+   *
+   * Real whenever {@link hasUsableStructure} holds - which includes running out
+   * of time, where it is simply how far the structure got.
+   */
+  xyz: number[];
+  /** Largest remaining force, in Hartree per Angstrom. */
+  maxForce: number;
+}
+
+/**
+ * Whether the structure this optimisation ended on is one to keep.
+ *
+ * The distinction the interface turns on. Running out of time or out of steps
+ * says nothing about the molecule: the electrons were solved at every geometry
+ * along the way, and the structure reached is a real, partly relaxed one. Only
+ * `'scf'` means the engine found no bound arrangement of electrons for these
+ * nuclei, and only that is worth showing as the molecule coming apart.
+ */
+export function hasUsableStructure(outcome: OptimizationOutcome): boolean {
+  return outcome.reason !== 'scf';
+}
+
+/** One geometry the optimiser accepted, streamed as it is produced. */
+export interface OptimizationStep {
+  /** Zero for the structure as submitted, then one per accepted move. */
+  step: number;
+  /** Coordinates in Angstrom, three per atom, ready for the frame player. */
+  xyz: Float32Array;
+  /** Total energy at this geometry, in Hartree. */
+  energy: number;
+  /** Largest force component, in Hartree per Angstrom. */
+  maxForce: number;
 }
 
 /** Result of a single-point calculation. */
@@ -63,6 +130,11 @@ export interface ScfOutcome {
    * count is the quadrature error, and is a useful health check on the grid.
    */
   electronsOnGrid: number;
+  /**
+   * Present only when this came from an `optimize` request, in which case the
+   * calculation describes the *relaxed* geometry rather than the submitted one.
+   */
+  optimization?: OptimizationOutcome;
   /** Wall-clock milliseconds spent inside the engine, measured by the worker. */
   elapsedMs: number;
 }
@@ -128,13 +200,34 @@ export interface IsoMesh {
 export type WorkerRequest =
   | { id: number; type: 'elements' }
   | { id: number; type: 'scf'; z: Uint8Array; xyz: Float64Array }
-  /** Cuts the density of the last `scf` request at a new level. */
+  /**
+   * Relaxes the structure, answering with a `step` per accepted geometry and
+   * then one `scf` for the final calculation.
+   */
+  | { id: number; type: 'optimize'; z: Uint8Array; xyz: Float64Array }
+  /** Cuts the density of the last `scf` or `optimize` request at a new level. */
   | { id: number; type: 'isosurface'; channel: DensityRequest; isoLevel: number };
 
 export type WorkerResponse =
   /** Emitted once, unsolicited, when the WASM module has finished loading. */
   | { id: 0; type: 'ready' }
   | { id: number; type: 'elements'; elements: ElementInfo[] }
+  /**
+   * An intermediate answer: more will follow for the same `id`. Every other
+   * response type ends the request it belongs to.
+   */
+  | { id: number; type: 'step'; step: OptimizationStep }
   | { id: number; type: 'scf'; result: ScfOutcome }
   | { id: number; type: 'mesh'; mesh: IsoMesh }
   | { id: number; type: 'error'; message: string };
+
+/**
+ * Whether a response ends the request it answers.
+ *
+ * The worker client keeps a request pending until one of these arrives, which is
+ * what lets an optimisation stream its steps through the same correlation table
+ * as every other request.
+ */
+export function isTerminal(response: WorkerResponse): boolean {
+  return response.type !== 'step';
+}

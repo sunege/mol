@@ -125,6 +125,133 @@ pub fn unrestricted(
     UnrestrictedXcResult { energy, potential_alpha, potential_beta, n_electrons }
 }
 
+/// Gradient of `E_xc` with respect to every nuclear position, in Hartree/Bohr.
+///
+/// At a converged density the only geometry dependence left is in the basis
+/// functions, which move with their nuclei:
+///
+/// ```text
+/// dE_xc/dA_k = -2 sum_sigma sum_(mu on A, nu) D_sigma_mu_nu
+///                  sum_g w_g v_sigma(r_g) (d_k phi_mu)(r_g) phi_nu(r_g)
+/// ```
+///
+/// The minus sign is the whole content of the derivative: a basis function
+/// depends on `r - A`, so moving its nucleus one way is moving the electron the
+/// other, and the factor of two is the two places a function appears in the
+/// density.
+///
+/// **The derivatives of the grid weights are deliberately left out.** The Becke
+/// cells are tied to the nuclei, so strictly `dw_g/dA` contributes too; that
+/// term is the standard omission in practical codes because it costs as much as
+/// everything else here and, on a grid of this size, moves a force by far less
+/// than the threshold at which the optimiser stops. What it does mean is that
+/// the gradient below is the exact derivative of the energy *on a fixed grid*
+/// rather than of the energy as the grid follows the atoms, and the
+/// finite-difference tests are written to respect that distinction: the strict
+/// comparison freezes the grid, and a second, looser one measures what the
+/// omission is actually worth.
+pub fn unrestricted_gradient(
+    basis: &BasisSet,
+    grid: &MolecularGrid,
+    alpha: &DMatrix<f64>,
+    beta: &DMatrix<f64>,
+    n_atoms: usize,
+) -> Vec<[f64; 3]> {
+    let n = basis.n_functions();
+    debug_assert_eq!(alpha.nrows(), n);
+    debug_assert_eq!(beta.nrows(), n);
+
+    // sum_g w_g v_sigma(r_g) (d_k phi_mu)(r_g) phi_nu(r_g), one per direction
+    // and spin. Not symmetric: only the bra is differentiated.
+    let mut weighted_alpha: [DMatrix<f64>; 3] =
+        std::array::from_fn(|_| DMatrix::zeros(n, n));
+    let mut weighted_beta: [DMatrix<f64>; 3] = std::array::from_fn(|_| DMatrix::zeros(n, n));
+
+    let mut values = vec![0.0; n * BLOCK];
+    let mut dx = vec![0.0; n * BLOCK];
+    let mut dy = vec![0.0; n * BLOCK];
+    let mut dz = vec![0.0; n * BLOCK];
+    let mut scaled = DMatrix::zeros(n, BLOCK);
+    let mut factors_alpha = vec![0.0; BLOCK];
+    let mut factors_beta = vec![0.0; BLOCK];
+
+    let mut start = 0;
+    while start < grid.len() {
+        let count = BLOCK.min(grid.len() - start);
+        for j in 0..count {
+            let point = grid.points[start + j];
+            let range = j * n..(j + 1) * n;
+            basis.evaluate_into(point, &mut values[range.clone()]);
+            basis.evaluate_gradient_into(
+                point,
+                &mut dx[range.clone()],
+                &mut dy[range.clone()],
+                &mut dz[range],
+            );
+        }
+        let phi = DMatrixView::from_slice(&values[..n * count], n, count);
+        let phi_t = phi.transpose();
+        let gradients = [
+            DMatrixView::from_slice(&dx[..n * count], n, count),
+            DMatrixView::from_slice(&dy[..n * count], n, count),
+            DMatrixView::from_slice(&dz[..n * count], n, count),
+        ];
+        let weights = &grid.weights[start..start + count];
+
+        let phi_alpha = alpha * phi;
+        let phi_beta = beta * phi;
+        for j in 0..count {
+            let rho_alpha = column_dot(&phi, &phi_alpha, j).max(0.0);
+            let rho_beta = column_dot(&phi, &phi_beta, j).max(0.0);
+            let point = lda::lda(rho_alpha, rho_beta);
+            factors_alpha[j] = weights[j] * point.v_alpha;
+            factors_beta[j] = weights[j] * point.v_beta;
+        }
+
+        for k in 0..3 {
+            for (factors, target) in [
+                (&factors_alpha, &mut weighted_alpha[k]),
+                (&factors_beta, &mut weighted_beta[k]),
+            ] {
+                let mut block = scaled.view_mut((0, 0), (n, count));
+                for j in 0..count {
+                    for mu in 0..n {
+                        block[(mu, j)] = factors[j] * gradients[k][(mu, j)];
+                    }
+                }
+                target.gemm(1.0, &block, &phi_t, 1.0);
+            }
+        }
+        start += count;
+    }
+
+    let centers = basis.function_centers();
+    let mut gradient = vec![[0.0; 3]; n_atoms];
+    for mu in 0..n {
+        let atom = centers[mu];
+        for k in 0..3 {
+            let mut sum = 0.0;
+            for nu in 0..n {
+                sum += alpha[(mu, nu)] * weighted_alpha[k][(mu, nu)]
+                    + beta[(mu, nu)] * weighted_beta[k][(mu, nu)];
+            }
+            gradient[atom][k] -= 2.0 * sum;
+        }
+    }
+    gradient
+}
+
+/// The same for a spin-restricted density, where both channels hold half of it.
+pub fn restricted_gradient(
+    basis: &BasisSet,
+    grid: &MolecularGrid,
+    density: &DMatrix<f64>,
+    n_atoms: usize,
+) -> Vec<[f64; 3]> {
+    let half = density * 0.5;
+    unrestricted_gradient(basis, grid, &half, &half, n_atoms)
+}
+
 /// Walks the grid in blocks, handing each block's basis values and weights to
 /// `consume`.
 ///

@@ -191,6 +191,37 @@ export class IsoMesh {
 if (Symbol.dispose) IsoMesh.prototype[Symbol.dispose] = IsoMesh.prototype.free;
 
 /**
+ * Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
+ * structure as it is produced (requirement F2).
+ *
+ * The charge and spin state are chosen once, on the structure as given, and
+ * held for the whole optimisation: running the search at every geometry would
+ * multiply the cost by the number of states tried, and the state is not what is
+ * being optimised.
+ *
+ * `on_step` receives `{ step, xyz, energy, maxForce }` with coordinates in
+ * Angstrom, and returning `false` from it stops the relaxation where it is.
+ * Nothing here throws: a structure the engine cannot solve comes back as a
+ * calculation whose `optimization.converged` is false, which the interface
+ * turns into an animation rather than a message (requirement F5).
+ * @param {Uint8Array} z
+ * @param {Float64Array} xyz_angstrom
+ * @param {Function} on_step
+ * @returns {Calculation}
+ */
+export function optimize(z, xyz_angstrom, on_step) {
+    const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.optimize(ptr0, len0, ptr1, len1, on_step);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Calculation.__wrap(ret[0]);
+}
+
+/**
  * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
  * the charge and spin state itself (requirement F4).
  *
@@ -242,6 +273,10 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_5d9e815e6fdf150f: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
+        __wbg_call_6bcf8d3e20937e46: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = arg0.call(arg1, arg2);
+            return ret;
+        }, arguments); },
         __wbg_error_757e9472f8410341: function(arg0, arg1) {
             let deferred0_0;
             let deferred0_1;
@@ -320,6 +355,12 @@ const IsoMeshFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_isomesh_free(ptr, 1));
 
+function addToExternrefTable0(obj) {
+    const idx = wasm.__externref_table_alloc();
+    wasm.__wbindgen_externrefs.set(idx, obj);
+    return idx;
+}
+
 function getArrayF32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
@@ -372,6 +413,15 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function handleError(f, args) {
+    try {
+        return f.apply(this, args);
+    } catch (e) {
+        const idx = addToExternrefTable0(e);
+        wasm.__wbindgen_exn_store(idx);
+    }
 }
 
 function passArray8ToWasm0(arg, malloc) {

@@ -185,6 +185,61 @@ impl Shell {
             *out_i = scale * radial * powi(dx, lx) * powi(dy, ly) * powi(dz, lz);
         }
     }
+
+    /// Gradient of every component with respect to the *electron* coordinate,
+    /// writing `n_components()` values into each of the three slices.
+    ///
+    /// The nuclear gradient wants the derivative with respect to the centre
+    /// instead, which is minus this: a basis function depends on `r - R`, so
+    /// moving the nucleus one way is the same as moving the electron the other.
+    /// The sign flip happens where the atom index is in hand.
+    pub fn evaluate_gradient_into(
+        &self,
+        point: [f64; 3],
+        dx_out: &mut [f64],
+        dy_out: &mut [f64],
+        dz_out: &mut [f64],
+    ) {
+        let d = [
+            point[0] - self.origin[0],
+            point[1] - self.origin[1],
+            point[2] - self.origin[2],
+        ];
+        let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+
+        // The contracted radial part and its derivative with respect to r^2,
+        // which differ only by the -2a every primitive picks up.
+        let mut radial = 0.0;
+        let mut radial_slope = 0.0;
+        for (&a, &c) in self.exponents.iter().zip(&self.coefficients) {
+            let term = c * (-a * r2).exp();
+            radial += term;
+            radial_slope += -2.0 * a * term;
+        }
+
+        for (component, (&powers, &scale)) in self.powers.iter().zip(&self.scales).enumerate() {
+            let monomial = [powi(d[0], powers[0]), powi(d[1], powers[1]), powi(d[2], powers[2])];
+            let product = monomial[0] * monomial[1] * monomial[2];
+            // d/dx [x^l y^m z^n R(r^2)] = l x^(l-1) y^m z^n R + x^l y^m z^n * x * 2R'(r^2),
+            // with the factor 2 already carried by `radial_slope`.
+            let lowered = |axis: usize| -> f64 {
+                if powers[axis] == 0 {
+                    return 0.0;
+                }
+                let mut term = powers[axis] as f64 * powi(d[axis], powers[axis] - 1);
+                for other in 0..3 {
+                    if other != axis {
+                        term *= monomial[other];
+                    }
+                }
+                term
+            };
+            let tail = product * radial_slope;
+            dx_out[component] = scale * (lowered(0) * radial + d[0] * tail);
+            dy_out[component] = scale * (lowered(1) * radial + d[1] * tail);
+            dz_out[component] = scale * (lowered(2) * radial + d[2] * tail);
+        }
+    }
 }
 
 fn powi(x: f64, n: u8) -> f64 {
@@ -272,6 +327,18 @@ impl BasisSet {
         start..end
     }
 
+    /// The nucleus each basis function sits on, indexed by function.
+    ///
+    /// The gradient code needs it in the inner loop: a derivative with respect
+    /// to an atom only touches the functions centred on that atom.
+    pub fn function_centers(&self) -> Vec<usize> {
+        let mut centers = Vec::with_capacity(self.n_functions());
+        for shell in &self.shells {
+            centers.extend(std::iter::repeat(shell.center).take(shell.n_components()));
+        }
+        centers
+    }
+
     /// Highest angular momentum present, which sizes the integral scratch space.
     pub fn max_angular_momentum(&self) -> u8 {
         self.shells.iter().map(|s| s.l).max().unwrap_or(0)
@@ -285,6 +352,28 @@ impl BasisSet {
             let from = self.offsets[s];
             let to = self.offsets[s + 1];
             shell.evaluate_into(point, &mut out[from..to]);
+        }
+    }
+
+    /// Gradients of every basis function at `point` (Bohr) with respect to the
+    /// electron coordinate, one slice of `n_functions()` values per direction.
+    pub fn evaluate_gradient_into(
+        &self,
+        point: [f64; 3],
+        dx_out: &mut [f64],
+        dy_out: &mut [f64],
+        dz_out: &mut [f64],
+    ) {
+        debug_assert_eq!(dx_out.len(), self.n_functions());
+        for (s, shell) in self.shells.iter().enumerate() {
+            let from = self.offsets[s];
+            let to = self.offsets[s + 1];
+            shell.evaluate_gradient_into(
+                point,
+                &mut dx_out[from..to],
+                &mut dy_out[from..to],
+                &mut dz_out[from..to],
+            );
         }
     }
 
@@ -362,6 +451,36 @@ mod tests {
             for (component, norm) in component_norms(&shell, 6.0, 110).into_iter().enumerate() {
                 assert_relative_eq!(norm, 1.0, epsilon = 2e-4);
                 assert!(norm > 0.0, "component {component} of l={l} vanished");
+            }
+        }
+    }
+
+    /// The analytic basis-function gradient against central differences of the
+    /// values themselves, on a d shell where the monomial factor actually has
+    /// something to differentiate.
+    #[test]
+    fn basis_gradients_match_central_differences() {
+        for l in 0..=2u8 {
+            let shell = Shell::new(0, [0.2, -0.4, 0.7], l, &[1.7, 0.45], &[0.4, 0.8]);
+            let n = shell.n_components();
+            let point = [0.9, 0.3, -1.1];
+            let (mut dx, mut dy, mut dz) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+            shell.evaluate_gradient_into(point, &mut dx, &mut dy, &mut dz);
+
+            let h = 1e-5;
+            for axis in 0..3 {
+                let mut plus = point;
+                let mut minus = point;
+                plus[axis] += h;
+                minus[axis] -= h;
+                let (mut a, mut b) = (vec![0.0; n], vec![0.0; n]);
+                shell.evaluate_into(plus, &mut a);
+                shell.evaluate_into(minus, &mut b);
+                let analytic = [&dx, &dy, &dz][axis];
+                for component in 0..n {
+                    let numeric = (a[component] - b[component]) / (2.0 * h);
+                    assert_relative_eq!(analytic[component], numeric, epsilon = 1e-7);
+                }
             }
         }
     }
