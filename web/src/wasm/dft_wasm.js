@@ -191,7 +191,8 @@ export class IsoMesh {
 if (Symbol.dispose) IsoMesh.prototype[Symbol.dispose] = IsoMesh.prototype.free;
 
 /**
- * Runs a restricted Kohn-Sham LDA single point on a geometry given in Angstrom.
+ * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
+ * the charge and spin state itself (requirement F4).
  *
  * Non-convergence comes back through `summary().converged`, never as a thrown
  * error: the UI turns it into an animation rather than a message
@@ -262,6 +263,10 @@ function __wbg_get_imports() {
         },
         __wbg_new_ffa92086ea89f79c: function() {
             const ret = new Array();
+            return ret;
+        },
+        __wbg_now_d1fb6650485d7f3e: function() {
+            const ret = Date.now();
             return ret;
         },
         __wbg_set_13d25b81ab403f5e: function(arg0, arg1, arg2) {

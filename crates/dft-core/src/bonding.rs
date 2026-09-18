@@ -185,14 +185,28 @@ pub fn mirror_parities(
     )
 }
 
+/// One orbital of an [`ScfResult`], named by the spin channel it belongs to.
+///
+/// A restricted result has a single channel holding both spins; an unrestricted
+/// one has alpha and beta, whose pi orbitals need not even be the same in
+/// number - in O2 two of them are occupied in alpha and empty in beta, which is
+/// exactly what makes it a triplet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrbitalRef {
+    /// Index into [`ScfResult::channels`].
+    pub channel: usize,
+    /// Index of the orbital within that channel.
+    pub index: usize,
+}
+
 /// Which electrons a surface is drawn from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DensityChannel {
     /// Every electron. Always non-negative.
     Total,
-    /// The occupied orbitals antisymmetric about a planar molecule's plane, by
-    /// index. Also non-negative: it is a density, not an orbital.
-    Pi(Vec<usize>),
+    /// The occupied orbitals antisymmetric about a planar molecule's plane. Also
+    /// non-negative: it is a density, not an orbital.
+    Pi(Vec<OrbitalRef>),
     /// Molecular density minus superposed free atoms. Signed, and the only
     /// channel that is.
     Deformation,
@@ -215,20 +229,28 @@ pub fn bonding_channel(system: &System, result: &ScfResult) -> DensityChannel {
     let Some(plane) = molecular_plane(&system.molecule) else {
         return DensityChannel::Deformation;
     };
-    let parities = mirror_parities(&system.basis, &system.overlap, &result.orbitals, &plane);
 
     let mut pi = Vec::new();
-    for i in 0..result.occupations.len() {
-        if result.occupations[i] <= 1e-8 {
-            continue;
-        }
-        let parity = parities[i];
-        if parity <= -PARITY_THRESHOLD {
-            pi.push(i);
-        } else if parity < PARITY_THRESHOLD {
-            // The reflection is not a symmetry of this geometry after all, so
-            // the split would be meaningless. Better to show something true.
-            return DensityChannel::Deformation;
+    for (channel, set) in result.channels.iter().enumerate() {
+        // Each spin channel has its own orbitals, so each needs its own
+        // parities; the reflection matrix behind them depends only on the basis
+        // and is rebuilt per channel rather than cached, which costs nothing
+        // beside the density sampling that follows.
+        let parities =
+            mirror_parities(&system.basis, &system.overlap, &set.coefficients, &plane);
+        for index in 0..set.occupations.len() {
+            if set.occupations[index] <= 1e-8 {
+                continue;
+            }
+            let parity = parities[index];
+            if parity <= -PARITY_THRESHOLD {
+                pi.push(OrbitalRef { channel, index });
+            } else if parity < PARITY_THRESHOLD {
+                // The reflection is not a symmetry of this geometry after all,
+                // so the split would be meaningless. Better to show something
+                // true.
+                return DensityChannel::Deformation;
+            }
         }
     }
 
@@ -250,9 +272,10 @@ pub fn channel_density(
         DensityChannel::Pi(orbitals) => {
             let n = system.n_functions();
             let mut density = DMatrix::zeros(n, n);
-            for &i in orbitals {
-                let column = result.orbitals.column(i);
-                density += (column * column.transpose()) * result.occupations[i];
+            for orbital in orbitals {
+                let set = &result.channels[orbital.channel];
+                let column = set.coefficients.column(orbital.index);
+                density += (column * column.transpose()) * set.occupations[orbital.index];
             }
             density
         }
@@ -380,16 +403,16 @@ mod tests {
         let system = System::build(molecule, GridQuality::Coarse).unwrap();
         let plane = molecular_plane(&system.molecule).unwrap();
         let result = scf::run_restricted(&system, &ScfOptions::default());
-        let parities =
-            mirror_parities(&system.basis, &system.overlap, &result.orbitals, &plane);
+        let orbitals = &result.channels[0].coefficients;
+        let parities = mirror_parities(&system.basis, &system.overlap, orbitals, &plane);
 
         for i in [0usize, 16, 20, 25] {
             let numerical = system.grid.integrate(|p| {
                 let here = system.basis.evaluate(p);
                 let there = system.basis.evaluate(plane.reflect(p));
-                let psi: f64 = (0..here.len()).map(|m| result.orbitals[(m, i)] * here[m]).sum();
+                let psi: f64 = (0..here.len()).map(|m| orbitals[(m, i)] * here[m]).sum();
                 let psi_mirror: f64 =
-                    (0..there.len()).map(|m| result.orbitals[(m, i)] * there[m]).sum();
+                    (0..there.len()).map(|m| orbitals[(m, i)] * there[m]).sum();
                 psi * psi_mirror
             });
             assert_relative_eq!(parities[i], numerical, epsilon = 2e-4);
@@ -412,11 +435,15 @@ mod tests {
         assert!(!channel.is_signed());
 
         // The highest occupied orbital is one of them: benzene's HOMO is pi.
-        let homo = (0..result.occupations.len())
-            .filter(|&i| result.occupations[i] > 1e-8)
+        let set = &result.channels[0];
+        let homo = (0..set.occupations.len())
+            .filter(|&i| set.occupations[i] > 1e-8)
             .next_back()
             .unwrap();
-        assert!(orbitals.contains(&homo), "the HOMO should be pi");
+        assert!(
+            orbitals.contains(&OrbitalRef { channel: 0, index: homo }),
+            "the HOMO should be pi"
+        );
 
         let density = channel_density(&system, &result, &channel);
         let spec = GridSpec::for_molecule(&system.molecule);

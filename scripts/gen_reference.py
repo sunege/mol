@@ -237,6 +237,19 @@ GEOMETRIES = {
         ("O", (0.0, 0.0, 1.1621)),
         ("O", (0.0, 0.0, -1.1621)),
     ],
+    # Open-shell systems, for the unrestricted path and the automatic spin
+    # search. O2 is the one that matters: its ground state is a triplet, which
+    # is exactly what the search has to discover on its own.
+    "o2": [("O", (0.0, 0.0, 0.0)), ("O", (0.0, 0.0, 1.208))],
+    # Planar methyl radical: an odd electron count, so a doublet with no choice
+    # to make.
+    "ch3": [
+        ("C", (0.0, 0.0, 0.0)),
+        ("H", (1.0790, 0.0, 0.0)),
+        ("H", (-0.5395, 0.9344, 0.0)),
+        ("H", (-0.5395, -0.9344, 0.0)),
+    ],
+    "oh": [("O", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.9697))],
     "nh3": [
         ("N", (0.0, 0.0, 0.1173)),
         ("H", (0.0, 0.9377, -0.2737)),
@@ -425,6 +438,121 @@ def atomic_reference():
     dump("scf_atoms.json", {"functional": "lda,vwn5", "basis": "sto-3g", "atoms": out})
 
 
+# --------------------------------------------------------------------------
+# Open-shell (unrestricted) references
+# --------------------------------------------------------------------------
+
+# Spin multiplicity of each open-shell reference, 2S+1. O2 carries the whole
+# point of the automatic search: its ground state is the triplet, and nothing in
+# the geometry says so.
+OPEN_SHELL_MOLECULES = [
+    ("o2_triplet", "o2", 3),
+    ("o2_singlet", "o2", 1),
+    ("ch3_doublet", "ch3", 2),
+    ("oh_doublet", "oh", 2),
+]
+
+# Atoms, where the unrestricted solution differs most from the restricted one.
+# Nitrogen is a quartet: three unpaired electrons exercise a multiplicity the
+# molecular cases never reach. Aluminium and silicon are the hard ones - their
+# 3s and 3p levels are close enough that an ordinary SCF oscillates between the
+# equivalent ways of occupying the shell, and the engine needs a level shift to
+# reach the answer PySCF reaches with its second-order solver.
+OPEN_SHELL_ATOMS = [("H", 2), ("C", 3), ("N", 4), ("O", 3), ("Al", 2), ("Si", 3)]
+
+
+def unrestricted_payload(mol, label: str) -> dict:
+    """Converges one system with UKS (or RKS when it is closed-shell) and
+    records everything a Rust test needs to localise a disagreement."""
+    restricted = mol.spin == 0
+    mf = dft.RKS(mol) if restricted else dft.UKS(mol)
+    mf.xc = "lda,vwn5"
+    mf.grids.level = REFERENCE_GRID_LEVEL
+    mf.conv_tol = 1e-11
+    energy = float(mf.kernel())
+    if not mf.converged:
+        # An open-shell atom has a partly filled, exactly degenerate p shell, and
+        # ordinary DIIS oscillates between the equivalent ways of occupying it.
+        # The second-order solver walks down to the stationary point instead of
+        # rediagonalising, so the degeneracy costs it nothing.
+        mf = mf.newton()
+        energy = float(mf.kernel())
+    assert mf.converged, f"{label} did not converge"
+
+    dm = mf.make_rdm1()
+    mo_energy = mf.mo_energy
+    if restricted:
+        # Written in the same shape as the open-shell case so the Rust side has
+        # one code path: a closed shell is the special case where the two spin
+        # channels are identical.
+        dm = np.array([dm * 0.5, dm * 0.5])
+        mo_energy = np.array([mo_energy, mo_energy])
+
+    n_alpha, n_beta = mol.nelec
+    payload = {
+        "key": label,
+        "charge": int(mol.charge),
+        "multiplicity": int(mol.spin) + 1,
+        "n_alpha": int(n_alpha),
+        "n_beta": int(n_beta),
+        "unrestricted": not restricted,
+        "atoms": [
+            {
+                "z": int(mol.atom_charge(i)),
+                "pos": [float(x) for x in mol.atom_coord(i)],
+            }
+            for i in range(mol.natm)
+        ],
+        "nbf": int(mol.nao),
+        "n_electrons": int(mol.nelectron),
+        "nuclear_repulsion": float(mol.energy_nuc()),
+        "energy": energy,
+        "e_core": float(mf.scf_summary["e1"]),
+        "e_coulomb": float(mf.scf_summary["coul"]),
+        "e_xc": float(mf.scf_summary["exc"]),
+        # Per spin channel, alpha first.
+        "mo_energies": [[float(x) for x in row] for row in mo_energy],
+        "density_matrix": [flat(block) for block in dm],
+        # <S^2>, which says how far the unrestricted solution is from a spin
+        # eigenstate. The engine computes it the same way and must agree.
+        "spin_squared": float(mf.spin_square()[0]) if not restricted else 0.0,
+    }
+    coarse = dft.RKS(mol) if restricted else dft.UKS(mol)
+    coarse.xc = "lda,vwn5"
+    coarse.grids.level = 3
+    coarse.conv_tol = 1e-11
+    payload["energy_grid_level_3"] = float(coarse.kernel())
+    return payload
+
+
+def open_shell_reference() -> None:
+    systems = []
+    for key, name, multiplicity in OPEN_SHELL_MOLECULES:
+        mol = build_mol(name, spin=multiplicity - 1)
+        systems.append(unrestricted_payload(mol, key))
+
+    atoms = []
+    for symbol, multiplicity in OPEN_SHELL_ATOMS:
+        mol = gto.Mole()
+        mol.atom = [(symbol, (0.0, 0.0, 0.0))]
+        mol.basis = "sto-3g"
+        mol.spin = multiplicity - 1
+        mol.verbose = 0
+        mol.build()
+        atoms.append(unrestricted_payload(mol, f"{symbol.lower()}_atom"))
+
+    dump(
+        "scf_open_shell.json",
+        {
+            "functional": "lda,vwn5",
+            "basis": "sto-3g",
+            "grid_level": REFERENCE_GRID_LEVEL,
+            "systems": systems,
+            "atoms": atoms,
+        },
+    )
+
+
 def flat(matrix) -> list[float]:
     return [float(x) for x in np.asarray(matrix).ravel()]
 
@@ -460,6 +588,7 @@ def main() -> None:
         scf_reference(key, name)
     scf_reference("benzene", "benzene", with_density=False)
     atomic_reference()
+    open_shell_reference()
 
 
 if __name__ == "__main__":

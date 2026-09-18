@@ -34,12 +34,24 @@ export interface EnergyComponents {
 /** Result of a single-point calculation. */
 export interface ScfOutcome {
   /**
-   * False when the iteration limit was reached. This is a normal outcome, not an
-   * error: from phase 4 on the UI shows it as a diverging molecule rather than a
-   * message (requirement F5).
+   * False when no spin state the engine tried reached a self-consistent
+   * density. This is a normal outcome, not an error: the UI shows it as a
+   * diverging molecule rather than a message (requirement F5).
    */
   converged: boolean;
   iterations: number;
+  /**
+   * The spin multiplicity and charge the engine chose for itself.
+   *
+   * Diagnostics, not interface. Requirement F4 keeps every DFT parameter off
+   * the screen, and these two must stay off it; they cross the boundary so that
+   * a developer can confirm from the console that O2 was treated as a triplet,
+   * and so phase 5 can hold the state fixed while the geometry moves.
+   */
+  multiplicity: number;
+  charge: number;
+  /** How many spin states were solved before one was chosen. */
+  attempts: number;
   /** Total energy in Hartree. */
   energy: number;
   components: EnergyComponents;

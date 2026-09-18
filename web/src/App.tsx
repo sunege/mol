@@ -5,6 +5,8 @@ import { DftWorkerClient } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
 import { PeriodicPicker } from './components/PeriodicPicker';
 import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
+import { divergenceFrames } from './animation/divergence';
+import { FramePlayer } from './animation/framePlayer';
 import type {
   DensityChannel,
   DensityRequest,
@@ -15,7 +17,7 @@ import type {
 import './App.css';
 
 /**
- * Phase 3: build a molecule by hand, run a real Kohn-Sham calculation on it,
+ * Phase 4: build a molecule by hand, run a real Kohn-Sham calculation on it,
  * and look at the electron density that comes out.
  *
  * The calculation is started explicitly rather than on every edit: benzene takes
@@ -29,6 +31,13 @@ import './App.css';
  * that made the bonds. Which surface the second one turns out to be is the
  * engine's decision - it depends on whether the molecule has a pi system - so
  * the UI asks for "bonding" and reads back what it got.
+ *
+ * Nothing here knows what a spin state is. The engine tries the ones that could
+ * be the ground state and keeps the best (requirement F4), and an arrangement of
+ * nuclei it cannot solve at any of them comes back as an ordinary answer with
+ * `converged: false`. That is not an error and is never written as one: the
+ * molecule flies apart on screen and reassembles, which says what happened
+ * without a word of chemistry (requirement F5).
  */
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -53,7 +62,14 @@ export default function App() {
   });
   const [mesh, setMesh] = useState<IsoMesh | null>(null);
   const [meshing, setMeshing] = useState(false);
+  const [diverging, setDiverging] = useState(false);
   const isoLevel = levels[channel];
+
+  // Plays the frames of a failed calculation, and from phase 5 the steps of a
+  // geometry optimisation. It drives the viewer directly rather than through
+  // React state: the positions change every display frame, which is not
+  // something to re-render for.
+  const playerRef = useRef<FramePlayer | null>(null);
 
   // Identifies the calculation whose result is still wanted. Cancelling or
   // editing bumps it, so a reply that arrives afterwards is ignored instead of
@@ -88,6 +104,16 @@ export default function App() {
   }, []);
 
   /**
+   * Ends the divergence animation wherever it is. The molecule on screen is put
+   * back by the effect that watches `diverging`, so this does not have to know
+   * what the current geometry is.
+   */
+  const stopDivergence = useCallback(() => {
+    playerRef.current?.stop();
+    setDiverging(false);
+  }, []);
+
+  /**
    * Every edit invalidates the last result and abandons a calculation that is
    * still running for the old geometry. Called from the edit handlers rather
    * than from an effect on `atoms`, so the molecule and the readout change in
@@ -96,6 +122,7 @@ export default function App() {
   const invalidateResult = useCallback(() => {
     setResult(null);
     setError(null);
+    stopDivergence();
     // The worker's copy of the density belongs to the old geometry, so the
     // surface on screen is stale whether or not the worker survives.
     hasDensityRef.current = false;
@@ -103,7 +130,7 @@ export default function App() {
     meshRequestRef.current += 1;
     setMesh(null);
     cancelCalculation();
-  }, [cancelCalculation]);
+  }, [cancelCalculation, stopDivergence]);
 
   // --- edit operations -----------------------------------------------------
 
@@ -170,8 +197,18 @@ export default function App() {
       }
     }
     const client = new DftWorkerClient();
+    const player = new FramePlayer({
+      // Roughly eight display frames per keyframe at 60 Hz: fast enough to feel
+      // like one motion, slow enough that the interpolation has something to do.
+      frameMs: 55,
+      onFrame: (positions) => viewer?.setPositions(positions),
+      // The last frame is the molecule as the user built it, so there is
+      // nothing to put back; the effect below takes over from here.
+      onIdle: () => setDiverging(false),
+    });
     viewerRef.current = viewer;
     clientRef.current = client;
+    playerRef.current = player;
 
     // Only load the element table here; drawing is left to the effects below so
     // the molecule on screen is always the current one.
@@ -190,10 +227,12 @@ export default function App() {
     return () => {
       stale = true;
       setElements([]);
+      player.stop();
       viewer?.dispose();
       client.dispose();
       viewerRef.current = null;
       clientRef.current = null;
+      playerRef.current = null;
     };
   }, []);
 
@@ -201,9 +240,12 @@ export default function App() {
 
   const elementsReady = elements.length > 0;
 
+  // While the animation is running it owns the positions; when it ends - because
+  // it finished, or because the user edited the molecule out from under it - the
+  // structure as built comes straight back.
   useEffect(() => {
-    if (elementsReady) viewerRef.current?.setMolecule(atoms);
-  }, [atoms, elementsReady]);
+    if (elementsReady && !diverging) viewerRef.current?.setMolecule(atoms);
+  }, [atoms, elementsReady, diverging]);
 
   useEffect(() => {
     viewerRef.current?.setActiveElement(activeZ);
@@ -286,12 +328,27 @@ export default function App() {
     });
   }, []);
 
+  /**
+   * Shows a calculation that would not converge as the molecule coming apart.
+   *
+   * There is no message and no density: the engine found no bound arrangement of
+   * electrons for these nuclei, so there is nothing true to draw, and the
+   * animation is the whole of the answer (requirement F5).
+   */
+  const showDivergence = useCallback((current: SceneAtom[]) => {
+    const player = playerRef.current;
+    if (!player || current.length === 0) return;
+    setDiverging(true);
+    player.push(...divergenceFrames(toWorkerArrays(current).xyz));
+  }, []);
+
   const calculate = useCallback(() => {
     const client = clientRef.current;
     if (!client || atoms.length === 0) return;
     const { z, xyz } = toWorkerArrays(atoms);
     const token = ++requestRef.current;
     inFlightRef.current = true;
+    stopDivergence();
     setComputing(true);
     // Drop the previous answer immediately: leaving it on screen next to
     // "計算中…" reads as though it belonged to the run in progress.
@@ -304,6 +361,10 @@ export default function App() {
         inFlightRef.current = false;
         setComputing(false);
         setResult(outcome);
+        if (!outcome.converged) {
+          showDivergence(atoms);
+          return;
+        }
         // The worker is now holding a density; show it without making the user
         // ask, so placing atoms and seeing the cloud is one action.
         hasDensityRef.current = true;
@@ -315,7 +376,15 @@ export default function App() {
         setComputing(false);
         setError(describeEngineError(e.message));
       });
-  }, [atoms, showDensity, channel, isoLevel, requestIsosurface]);
+  }, [
+    atoms,
+    showDensity,
+    channel,
+    isoLevel,
+    requestIsosurface,
+    showDivergence,
+    stopDivergence,
+  ]);
 
   // --- keyboard ------------------------------------------------------------
 
@@ -336,6 +405,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [selected, deleteSelected]);
 
+  // Narrowed once, so every readout below agrees on what counts as an answer.
+  const converged = result !== null && result.converged;
   const selectedAtom = selected === null ? null : atoms[selected];
   const selectedSymbol = selectedAtom
     ? (elements.find((e) => e.z === selectedAtom.z)?.symbol ?? `Z=${selectedAtom.z}`)
@@ -361,7 +432,7 @@ export default function App() {
 
       <aside className="panel">
         <h1>分子シミュレータ</h1>
-        <p className="phase">Phase 3 — 電子密度等値面</p>
+        <p className="phase">Phase 4 — 自動スピン・電荷決定</p>
 
         <h2>配置する元素</h2>
         <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
@@ -450,7 +521,7 @@ export default function App() {
           value={isoLevel}
           range={ISO_RANGES[channel]}
           onChange={(level) => setLevels((prev) => ({ ...prev, [channel]: level }))}
-          disabled={!showDensity || result === null}
+          disabled={!showDensity || !converged}
         />
         <p className="hint">{explainChannel(channel, mesh)}</p>
 
@@ -463,20 +534,22 @@ export default function App() {
               <span className="error">{error}</span>
             ) : computing ? (
               '計算中…'
-            ) : result === null ? (
-              '—'
-            ) : result.converged ? (
+            ) : converged ? (
               '完了'
             ) : (
-              // Phase 4 replaces this with the diverging-molecule animation; it
-              // is deliberately not phrased as an error.
-              '収束しませんでした'
+              // A calculation that did not converge is deliberately blank rather
+              // than described: the molecule flying apart on screen is what says
+              // it (requirement F5), and a line of text here would be the error
+              // message that requirement rules out.
+              '—'
             )}
           </dd>
           <dt>全エネルギー</dt>
-          <dd>{result ? `${result.energy.toFixed(6)} Ha` : '—'}</dd>
+          {/* Only a converged energy is a number about the molecule; the last
+              iterate of a diverging one is a number about the iteration. */}
+          <dd>{converged ? `${result.energy.toFixed(6)} Ha` : '—'}</dd>
           <dt>反復</dt>
-          <dd>{result ? `${result.iterations} 回` : '—'}</dd>
+          <dd>{converged ? `${result.iterations} 回` : '—'}</dd>
           <dt>計算時間</dt>
           <dd>{result ? `${(result.elapsedMs / 1000).toFixed(2)} 秒` : '—'}</dd>
           <dt>等値面</dt>
@@ -508,7 +581,7 @@ function describeMesh(
   mesh: IsoMesh | null,
   meshing: boolean,
 ): string {
-  if (result === null) return '—';
+  if (result === null || !result.converged) return '—';
   if (meshing && mesh === null) return '生成中…';
   if (mesh === null) return '—';
   const faces = [mesh.positive, mesh.negative]

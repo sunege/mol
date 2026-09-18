@@ -80,7 +80,8 @@ export class IsoMesh {
 }
 
 /**
- * Runs a restricted Kohn-Sham LDA single point on a geometry given in Angstrom.
+ * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
+ * the charge and spin state itself (requirement F4).
  *
  * Non-convergence comes back through `summary().converged`, never as a thrown
  * error: the UI turns it into an animation rather than a message

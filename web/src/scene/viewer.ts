@@ -182,9 +182,39 @@ export class MoleculeViewer {
     this.#updateHighlight();
   }
 
-  /** Replaces the rendered molecule. Cheap enough to call every frame. */
+  /**
+   * Replaces the rendered molecule. Cheap enough to call every frame.
+   *
+   * The array is copied because {@link setPositions} replaces entries in it
+   * while an animation runs, and the caller's copy is React state.
+   */
   setMolecule(atoms: SceneAtom[]) {
-    this.#atoms = atoms;
+    this.#atoms = atoms.slice();
+    this.#syncAtomMeshes();
+    this.#syncBondMeshes();
+    this.#updateHighlight();
+  }
+
+  /**
+   * Moves the atoms already on screen, keeping their elements.
+   *
+   * This is what an animation drives: a frame is only a set of coordinates, and
+   * the elements it belongs to are already here. Bonds are recomputed, so they
+   * stretch and break as the atoms separate, which is most of what a molecule
+   * coming apart looks like.
+   *
+   * Coordinates are in Angstrom, three per atom, in the order the atoms were
+   * given to {@link setMolecule}. A frame of the wrong length is ignored rather
+   * than half-applied: it belongs to a molecule that has since been edited.
+   */
+  setPositions(positions: ArrayLike<number>) {
+    if (positions.length !== this.#atoms.length * 3) return;
+    for (let i = 0; i < this.#atoms.length; i++) {
+      this.#atoms[i] = {
+        z: this.#atoms[i].z,
+        pos: [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]],
+      };
+    }
     this.#syncAtomMeshes();
     this.#syncBondMeshes();
     this.#updateHighlight();

@@ -37,6 +37,9 @@ describe('worker protocol', () => {
     const outcome: ScfOutcome = {
       converged: true,
       iterations: 8,
+      multiplicity: 1,
+      charge: 0,
+      attempts: 2,
       energy: -74.73205936,
       components: {
         core: -122.39740918,
@@ -156,6 +159,9 @@ describe('worker protocol', () => {
       result: {
         converged: false,
         iterations: 100,
+        multiplicity: 1,
+        charge: 0,
+        attempts: 6,
         energy: -1.5,
         components: { core: -3, coulomb: 1, exchangeCorrelation: -0.5, nuclearRepulsion: 1 },
         homoLumoGap: null,
@@ -168,5 +174,40 @@ describe('worker protocol', () => {
     if (cloned.type !== 'scf') throw new Error('unreachable');
     expect(cloned.result.converged).toBe(false);
     expect(cloned.result.homoLumoGap).toBeNull();
+    // Every state the driver had was tried before it gave up, which is what
+    // makes this a real answer rather than an early exit.
+    expect(cloned.result.attempts).toBeGreaterThan(1);
+  });
+
+  it('carries the spin state the engine chose for itself', () => {
+    // Requirement F4 keeps this off the screen, but it has to cross the worker
+    // boundary: phase 5 holds the state fixed while the geometry moves, and
+    // there is otherwise no way to confirm that O2 was solved as a triplet.
+    const response: WorkerResponse = {
+      id: 6,
+      type: 'scf',
+      result: {
+        converged: true,
+        iterations: 7,
+        multiplicity: 3,
+        charge: 0,
+        attempts: 2,
+        energy: -147.194,
+        components: {
+          core: -260.293,
+          coulomb: 101.117,
+          exchangeCorrelation: -16.054,
+          nuclearRepulsion: 28.036,
+        },
+        homoLumoGap: 0.08,
+        basisFunctions: 10,
+        electronsOnGrid: 16.0,
+        elapsedMs: 250,
+      },
+    };
+    const cloned = structuredClone(response);
+    if (cloned.type !== 'scf') throw new Error('unreachable');
+    expect(cloned.result.multiplicity).toBe(3);
+    expect(cloned.result.charge).toBe(0);
   });
 });

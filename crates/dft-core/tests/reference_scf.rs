@@ -119,13 +119,12 @@ fn orbital_energies_match_the_reference() {
         let system = system_of(&reference);
         let result = scf::run_restricted(&system, &ScfOptions::default());
         assert!(result.converged, "{file}: SCF did not converge");
-        assert_eq!(result.orbital_energies.len(), reference.mo_energies.len());
-        for (i, (&mine, &theirs)) in result
-            .orbital_energies
-            .iter()
-            .zip(&reference.mo_energies)
-            .enumerate()
-        {
+        // A restricted calculation has the one set of orbitals, standing for
+        // both spins.
+        assert_eq!(result.channels.len(), 1);
+        let energies = &result.channels[0].energies;
+        assert_eq!(energies.len(), reference.mo_energies.len());
+        for (i, (&mine, &theirs)) in energies.iter().zip(&reference.mo_energies).enumerate() {
             assert!(
                 (mine - theirs).abs() < 1e-4,
                 "{file}: orbital {i} at {mine} Ha, reference {theirs} Ha"

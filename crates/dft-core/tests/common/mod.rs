@@ -86,6 +86,74 @@ pub struct AtomicReferences {
     pub atoms: Vec<AtomReference>,
 }
 
+/// One open-shell (or, for a comparison case, closed-shell) reference solved
+/// with UKS. The two spin channels are written out separately, alpha first.
+#[derive(Debug, Deserialize)]
+pub struct OpenShellReference {
+    pub key: String,
+    pub charge: i32,
+    pub multiplicity: u32,
+    pub n_alpha: usize,
+    pub n_beta: usize,
+    /// False for the closed-shell cases, which PySCF solved with RKS and then
+    /// wrote in the same two-channel shape.
+    pub unrestricted: bool,
+    pub atoms: Vec<RefAtom>,
+    pub nbf: usize,
+    pub n_electrons: usize,
+    pub nuclear_repulsion: f64,
+    pub energy: f64,
+    pub e_core: f64,
+    pub e_coulomb: f64,
+    pub e_xc: f64,
+    /// Orbital energies per spin channel.
+    pub mo_energies: Vec<Vec<f64>>,
+    /// Density matrix per spin channel, each flattened row-major.
+    pub density_matrix: Vec<Vec<f64>>,
+    pub spin_squared: f64,
+    pub energy_grid_level_3: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenShellReferences {
+    pub systems: Vec<OpenShellReference>,
+    pub atoms: Vec<OpenShellReference>,
+}
+
+impl OpenShellReferences {
+    /// Every entry, molecules and atoms alike.
+    pub fn all(&self) -> impl Iterator<Item = &OpenShellReference> {
+        self.systems.iter().chain(&self.atoms)
+    }
+
+    pub fn get(&self, key: &str) -> &OpenShellReference {
+        self.all().find(|s| s.key == key).unwrap_or_else(|| panic!("no reference {key:?}"))
+    }
+}
+
+impl OpenShellReference {
+    /// The geometry with the charge and multiplicity PySCF was given, so the
+    /// engine solves for exactly the same state.
+    pub fn molecule(&self) -> Molecule {
+        let atoms = self.atoms.iter().map(|a| Atom { z: a.z, pos: a.pos }).collect();
+        let mut molecule = Molecule::new(atoms).expect("reference geometry must be valid");
+        molecule.charge = self.charge;
+        molecule.multiplicity = self.multiplicity;
+        assert_eq!(
+            molecule.spin_occupation(),
+            Some((self.n_alpha, self.n_beta)),
+            "{}: electron counts disagree with the reference",
+            self.key
+        );
+        molecule
+    }
+
+    /// One spin channel's reference density matrix.
+    pub fn density(&self, channel: usize) -> nalgebra::DMatrix<f64> {
+        nalgebra::DMatrix::from_row_slice(self.nbf, self.nbf, &self.density_matrix[channel])
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct XcUnpolarized {
     pub rho: f64,

@@ -7,9 +7,10 @@
 use dft_core::bonding::{self, DensityChannel};
 use dft_core::constants::ANGSTROM_PER_BOHR;
 use dft_core::density::{self, DensityGrid, GridSpec};
+use dft_core::driver::{self, DriverOptions, SpinState};
 use dft_core::grid::GridQuality;
 use dft_core::marching::{self, Side};
-use dft_core::scf::{self, ScfOptions, ScfResult, System};
+use dft_core::scf::{ScfResult, System};
 use dft_core::{element, Molecule};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -68,6 +69,16 @@ struct EnergyComponents {
 struct ScfOutput {
     converged: bool,
     iterations: usize,
+    /// The spin multiplicity the engine settled on, and the charge it used.
+    ///
+    /// Diagnostics, not interface: requirement F4 keeps both off the screen.
+    /// They are here so a developer can confirm from the console that O2 really
+    /// was treated as a triplet, and so phase 5 can hold the state fixed across
+    /// an optimisation.
+    multiplicity: u32,
+    charge: i32,
+    /// How many spin states were solved before settling on this one.
+    attempts: usize,
     /// Total energy in Hartree.
     energy: f64,
     components: EnergyComponents,
@@ -93,6 +104,8 @@ struct ScfOutput {
 pub struct Calculation {
     system: System,
     result: ScfResult,
+    state: SpinState,
+    attempts: usize,
     /// One sampled lattice per channel, each built on its first request and kept
     /// for the threshold changes that follow.
     total: Option<DensityGrid>,
@@ -106,6 +119,9 @@ impl Calculation {
         let output = ScfOutput {
             converged: self.result.converged,
             iterations: self.result.iterations,
+            multiplicity: self.state.multiplicity,
+            charge: self.state.charge,
+            attempts: self.attempts,
             energy: self.result.energy,
             components: EnergyComponents {
                 core: self.result.components.core,
@@ -272,7 +288,18 @@ impl IsoMesh {
     }
 }
 
-/// Runs a restricted Kohn-Sham LDA single point on a geometry given in Angstrom.
+/// Wall-clock seconds the automatic spin search may spend before giving up on
+/// the states it has not tried yet.
+///
+/// It bounds only the search, never the first calculation, which always runs to
+/// its own iteration limit: a caller that gets nothing back has nothing to draw.
+/// Cancelling a calculation outright is the worker's job and is done by
+/// terminating it, since a single-threaded WebAssembly computation cannot be
+/// interrupted from outside.
+const SEARCH_BUDGET_SECONDS: f64 = 60.0;
+
+/// Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
+/// the charge and spin state itself (requirement F4).
 ///
 /// Non-convergence comes back through `summary().converged`, never as a thrown
 /// error: the UI turns it into an animation rather than a message
@@ -280,10 +307,20 @@ impl IsoMesh {
 #[wasm_bindgen(js_name = scf)]
 pub fn scf(z: &[u8], xyz_angstrom: &[f64]) -> Result<Calculation, JsValue> {
     let molecule = build_molecule(z, xyz_angstrom)?;
-    let system = System::build(molecule, GridQuality::Medium)
+    let mut system = System::build(molecule, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
-    let result = scf::run_restricted(&system, &ScfOptions::default());
-    Ok(Calculation { system, result, total: None, bonding: None })
+    let deadline = js_sys::Date::now() + SEARCH_BUDGET_SECONDS * 1000.0;
+    let outcome = driver::solve(&mut system, &DriverOptions::default(), &mut || {
+        js_sys::Date::now() < deadline
+    });
+    Ok(Calculation {
+        system,
+        result: outcome.result,
+        state: outcome.state,
+        attempts: outcome.attempts.len(),
+        total: None,
+        bonding: None,
+    })
 }
 
 fn build_molecule(z: &[u8], xyz_angstrom: &[f64]) -> Result<Molecule, JsValue> {

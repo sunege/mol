@@ -11,6 +11,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 dft-core = { path = "../dft-core" }
 wasm-bindgen = "0.2"
+# Only for `Date::now`: the engine takes a wall-clock budget as a closure
+# because `std::time` does not exist on wasm32-unknown-unknown.
+js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"

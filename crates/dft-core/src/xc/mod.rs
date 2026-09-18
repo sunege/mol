@@ -8,6 +8,10 @@
 //! E_xc      = sum_i w_i rho_i eps_xc(rho_i)
 //! V_xc_mu_nu = sum_i w_i v_xc(rho_i) phi_mu(r_i) phi_nu(r_i)
 //! ```
+//!
+//! The unrestricted case is the same expression with two densities and two
+//! potentials; the functional itself is spin-polarised throughout, so only the
+//! assembly differs.
 
 pub mod lda;
 
@@ -33,25 +37,106 @@ pub struct XcResult {
     pub n_electrons: f64,
 }
 
+/// The same for a spin-polarised density: one potential per spin channel.
+#[derive(Debug, Clone)]
+pub struct UnrestrictedXcResult {
+    pub energy: f64,
+    pub potential_alpha: DMatrix<f64>,
+    pub potential_beta: DMatrix<f64>,
+    /// `integral (rho_alpha + rho_beta) dr`, the total electron count.
+    pub n_electrons: f64,
+}
+
 /// Exchange-correlation energy and potential for a spin-restricted density
 /// matrix (the total density, so `rho_alpha = rho_beta = rho/2`).
-pub fn restricted(
-    basis: &BasisSet,
-    grid: &MolecularGrid,
-    density: &DMatrix<f64>,
-) -> XcResult {
+pub fn restricted(basis: &BasisSet, grid: &MolecularGrid, density: &DMatrix<f64>) -> XcResult {
     let n = basis.n_functions();
     debug_assert_eq!(density.nrows(), n);
 
     let mut potential = DMatrix::zeros(n, n);
     let mut energy = 0.0;
     let mut n_electrons = 0.0;
-
-    // Column `j` holds every basis function evaluated at point `j` of the block,
-    // which is what makes each column contiguous and each product a gemm.
-    let mut values = vec![0.0; n * BLOCK];
     let mut scaled = DMatrix::zeros(n, BLOCK);
 
+    for_each_block(basis, grid, |phi, weights| {
+        let count = weights.len();
+        // D phi, so that rho_j is the dot product of column j with phi's.
+        let weighted = density * phi;
+        let mut block_scaled = scaled.view_mut((0, 0), (n, count));
+        for j in 0..count {
+            let rho = column_dot(&phi, &weighted, j).max(0.0);
+            let (exc, v) = lda::lda_restricted(rho);
+            energy += weights[j] * rho * exc;
+            n_electrons += weights[j] * rho;
+            let factor = weights[j] * v;
+            for mu in 0..n {
+                block_scaled[(mu, j)] = factor * phi[(mu, j)];
+            }
+        }
+        potential.gemm(1.0, &block_scaled, &phi.transpose(), 1.0);
+    });
+
+    XcResult { energy, potential, n_electrons }
+}
+
+/// Exchange-correlation energy and both potentials for a pair of spin density
+/// matrices, each holding the electrons of one spin.
+pub fn unrestricted(
+    basis: &BasisSet,
+    grid: &MolecularGrid,
+    alpha: &DMatrix<f64>,
+    beta: &DMatrix<f64>,
+) -> UnrestrictedXcResult {
+    let n = basis.n_functions();
+    debug_assert_eq!(alpha.nrows(), n);
+    debug_assert_eq!(beta.nrows(), n);
+
+    let mut potential_alpha = DMatrix::zeros(n, n);
+    let mut potential_beta = DMatrix::zeros(n, n);
+    let mut energy = 0.0;
+    let mut n_electrons = 0.0;
+    let mut scaled_alpha = DMatrix::zeros(n, BLOCK);
+    let mut scaled_beta = DMatrix::zeros(n, BLOCK);
+
+    for_each_block(basis, grid, |phi, weights| {
+        let count = weights.len();
+        let weighted_alpha = alpha * phi;
+        let weighted_beta = beta * phi;
+        let mut block_alpha = scaled_alpha.view_mut((0, 0), (n, count));
+        let mut block_beta = scaled_beta.view_mut((0, 0), (n, count));
+        for j in 0..count {
+            let rho_alpha = column_dot(&phi, &weighted_alpha, j).max(0.0);
+            let rho_beta = column_dot(&phi, &weighted_beta, j).max(0.0);
+            let point = lda::lda(rho_alpha, rho_beta);
+            let rho = rho_alpha + rho_beta;
+            energy += weights[j] * rho * point.exc;
+            n_electrons += weights[j] * rho;
+            let factor_alpha = weights[j] * point.v_alpha;
+            let factor_beta = weights[j] * point.v_beta;
+            for mu in 0..n {
+                block_alpha[(mu, j)] = factor_alpha * phi[(mu, j)];
+                block_beta[(mu, j)] = factor_beta * phi[(mu, j)];
+            }
+        }
+        potential_alpha.gemm(1.0, &block_alpha, &phi.transpose(), 1.0);
+        potential_beta.gemm(1.0, &block_beta, &phi.transpose(), 1.0);
+    });
+
+    UnrestrictedXcResult { energy, potential_alpha, potential_beta, n_electrons }
+}
+
+/// Walks the grid in blocks, handing each block's basis values and weights to
+/// `consume`.
+///
+/// Column `j` of the block holds every basis function evaluated at point `j`,
+/// which is what makes each column contiguous and each product a gemm.
+fn for_each_block(
+    basis: &BasisSet,
+    grid: &MolecularGrid,
+    mut consume: impl FnMut(DMatrixView<f64>, &[f64]),
+) {
+    let n = basis.n_functions();
+    let mut values = vec![0.0; n * BLOCK];
     let mut start = 0;
     while start < grid.len() {
         let count = BLOCK.min(grid.len() - start);
@@ -59,32 +144,17 @@ pub fn restricted(
             basis.evaluate_into(grid.points[start + j], &mut values[j * n..(j + 1) * n]);
         }
         let phi = DMatrixView::from_slice(&values[..n * count], n, count);
-        // D phi, so that rho_j is the dot product of column j with phi's.
-        let weighted = density * phi;
-
-        let mut block_scaled = scaled.view_mut((0, 0), (n, count));
-        for j in 0..count {
-            let mut rho = 0.0;
-            for mu in 0..n {
-                rho += phi[(mu, j)] * weighted[(mu, j)];
-            }
-            // Numerical noise can push the density slightly negative in the far
-            // tail; the functional is only defined for rho >= 0.
-            let rho = rho.max(0.0);
-            let weight = grid.weights[start + j];
-            let (exc, v) = lda::lda_restricted(rho);
-            energy += weight * rho * exc;
-            n_electrons += weight * rho;
-            let factor = weight * v;
-            for mu in 0..n {
-                block_scaled[(mu, j)] = factor * phi[(mu, j)];
-            }
-        }
-        potential.gemm(1.0, &block_scaled, &phi.transpose(), 1.0);
+        consume(phi, &grid.weights[start..start + count]);
         start += count;
     }
+}
 
-    XcResult { energy, potential, n_electrons }
+/// `sum_mu phi[mu, j] * weighted[mu, j]`, the density at point `j` of a block.
+///
+/// Numerical noise can push this slightly negative in the far tail; the
+/// functional is only defined for a non-negative density, so callers clamp.
+fn column_dot(phi: &DMatrixView<f64>, weighted: &DMatrix<f64>, j: usize) -> f64 {
+    (0..phi.nrows()).map(|mu| phi[(mu, j)] * weighted[(mu, j)]).sum()
 }
 
 #[cfg(test)]
@@ -143,6 +213,62 @@ mod tests {
                 lda::lda_restricted(rho.max(0.0)).1 * phi[mu] * phi[nu]
             });
             assert_relative_eq!(result.potential[(mu, nu)], expected, max_relative = 1e-10);
+        }
+    }
+
+    #[test]
+    fn splitting_a_density_evenly_reproduces_the_restricted_result() {
+        // rho_alpha = rho_beta = rho/2 is exactly what `restricted` assumes, so
+        // the two assemblies must agree to the last bit for a closed shell.
+        let mol = Molecule::from_angstrom(&[(7, [0.0; 3]), (1, [0.0, 0.0, 1.01])]).unwrap();
+        let basis = BasisSet::sto3g(&mol).unwrap();
+        let grid = grid::build(&mol, GridQuality::Coarse);
+        let n = basis.n_functions();
+        let density = DMatrix::identity(n, n) * 0.7;
+        let half = &density * 0.5;
+
+        let closed = restricted(&basis, &grid, &density);
+        let open = unrestricted(&basis, &grid, &half, &half);
+        assert_relative_eq!(open.energy, closed.energy, max_relative = 1e-12);
+        assert_relative_eq!(open.n_electrons, closed.n_electrons, max_relative = 1e-12);
+        assert_relative_eq!(open.potential_alpha, closed.potential, epsilon = 1e-12);
+        // Both channels see the same density, so both potentials are the same.
+        assert_relative_eq!(open.potential_beta, closed.potential, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn polarising_a_density_lowers_the_energy_and_splits_the_potentials() {
+        // Moving electrons into one channel at fixed total density is what the
+        // spin-polarised functional is for: exchange is more negative when the
+        // electrons are aligned, so the energy has to fall.
+        let mol = Molecule::from_angstrom(&[(8, [0.0; 3]), (8, [0.0, 0.0, 1.208])]).unwrap();
+        let basis = BasisSet::sto3g(&mol).unwrap();
+        let grid = grid::build(&mol, GridQuality::Coarse);
+        let n = basis.n_functions();
+        let total = DMatrix::identity(n, n) * 0.9;
+        let balanced = unrestricted(&basis, &grid, &(&total * 0.5), &(&total * 0.5));
+        let polarised = unrestricted(&basis, &grid, &(&total * 0.65), &(&total * 0.35));
+
+        assert!(
+            polarised.energy < balanced.energy,
+            "polarising raised E_xc from {} to {}",
+            balanced.energy,
+            polarised.energy
+        );
+        // The same electrons either way, so the grid must count the same number.
+        assert_relative_eq!(polarised.n_electrons, balanced.n_electrons, max_relative = 1e-12);
+        // The channel holding more electrons gets the deeper potential.
+        let trace_alpha = polarised.potential_alpha.trace();
+        let trace_beta = polarised.potential_beta.trace();
+        assert!(trace_alpha < trace_beta, "{trace_alpha} vs {trace_beta}");
+        for i in 0..n {
+            for j in 0..n {
+                assert_relative_eq!(
+                    polarised.potential_alpha[(i, j)],
+                    polarised.potential_alpha[(j, i)],
+                    epsilon = 1e-14
+                );
+            }
         }
     }
 

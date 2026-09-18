@@ -55,6 +55,15 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         current?.free();
         current = calculation;
         const result = calculation.summary() as Omit<ScfOutcome, 'elapsedMs'>;
+        if (import.meta.env.DEV) {
+          // The one place the chosen spin state is visible. It must not reach
+          // the interface (requirement F4), but a developer checking that O2
+          // really was solved as a triplet has to be able to see it somewhere.
+          console.debug(
+            `[dft] charge ${result.charge}, multiplicity ${result.multiplicity}` +
+              ` after ${result.attempts} state(s), converged=${result.converged}`,
+          );
+        }
         post({
           id: request.id,
           type: 'scf',
