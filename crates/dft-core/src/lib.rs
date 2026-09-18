@@ -8,15 +8,21 @@
 //! engine can be exercised with `cargo test` on the host.
 
 pub mod basis;
+pub mod bonding;
 pub mod constants;
+pub mod density;
 pub mod element;
 pub mod grid;
 pub mod integrals;
+pub mod marching;
 pub mod molecule;
 pub mod scf;
 pub mod xc;
 
 pub use basis::{BasisError, BasisSet, Shell};
+pub use bonding::DensityChannel;
+pub use density::{DensityGrid, GridSpec};
 pub use grid::GridQuality;
+pub use marching::Mesh;
 pub use molecule::{Atom, GeometryError, Molecule};
 pub use scf::{run_restricted, ScfOptions, ScfResult, System};

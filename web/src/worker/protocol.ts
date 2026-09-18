@@ -6,7 +6,9 @@
  * while a new geometry is being submitted, for example).
  *
  * Coordinates crossing this boundary are always in Angstrom and energies always
- * in Hartree; the engine converts to Bohr internally.
+ * in Hartree; the engine converts to Bohr internally. Densities are the one
+ * thing left in engine units - electrons per cubic Bohr - because they are only
+ * ever a threshold the user slides, never a length on screen.
  */
 
 export interface ElementInfo {
@@ -53,13 +55,74 @@ export interface ScfOutcome {
   elapsedMs: number;
 }
 
+/**
+ * Which electrons a surface is asked for.
+ *
+ * `bonding` is a request, not an answer: the engine picks how to show where the
+ * bonds are, because only it knows whether the molecule has a pi system. What it
+ * chose comes back in {@link IsoMesh.channel}.
+ */
+export type DensityRequest = 'total' | 'bonding';
+
+/**
+ * What a surface actually shows.
+ *
+ * - `total` — every electron. Never negative.
+ * - `pi` — the orbitals that stick out of a planar molecule's plane, which is
+ *   its pi system. A density, so also never negative.
+ * - `deformation` — the molecule's density minus the free atoms it is built
+ *   from, which is where forming the bonds moved the electrons to and from.
+ *   Signed, and the only channel with a negative surface.
+ */
+export type DensityChannel = 'total' | 'pi' | 'deformation';
+
+/** One closed surface, in the layout a GPU vertex buffer wants. */
+export interface SurfaceGeometry {
+  /** Three coordinates per vertex, in Angstrom. */
+  positions: Float32Array;
+  /** Unit normals pointing out of the enclosed region, three per vertex. */
+  normals: Float32Array;
+  /** Three vertex indices per triangle. */
+  indices: Uint32Array;
+}
+
+/**
+ * The triangulated level set of one density channel.
+ *
+ * The density grid stays in the worker: a threshold change re-runs marching
+ * cubes over a density that is already sampled and sends back only the meshes,
+ * which is a few milliseconds instead of a few seconds.
+ */
+export interface IsoMesh {
+  /** What the engine drew, which for a `bonding` request it chose itself. */
+  channel: DensityChannel;
+  /** The level cut, in electrons per cubic Bohr. */
+  isoLevel: number;
+  /** Where the density is above `+isoLevel`. */
+  positive: SurfaceGeometry;
+  /** Where it is below `-isoLevel`. Empty unless the channel is signed. */
+  negative: SurfaceGeometry;
+  /**
+   * Largest sample on the lattice. Levels above it produce nothing, which is a
+   * normal answer and not an error.
+   */
+  densityMax: number;
+  /** Most negative sample, or zero for a channel that cannot go negative. */
+  densityMin: number;
+  /** Wall-clock milliseconds the worker spent producing these meshes. */
+  elapsedMs: number;
+}
+
 export type WorkerRequest =
   | { id: number; type: 'elements' }
-  | { id: number; type: 'scf'; z: Uint8Array; xyz: Float64Array };
+  | { id: number; type: 'scf'; z: Uint8Array; xyz: Float64Array }
+  /** Cuts the density of the last `scf` request at a new level. */
+  | { id: number; type: 'isosurface'; channel: DensityRequest; isoLevel: number };
 
 export type WorkerResponse =
   /** Emitted once, unsolicited, when the WASM module has finished loading. */
   | { id: 0; type: 'ready' }
   | { id: number; type: 'elements'; elements: ElementInfo[] }
   | { id: number; type: 'scf'; result: ScfOutcome }
+  | { id: number; type: 'mesh'; mesh: IsoMesh }
   | { id: number; type: 'error'; message: string };

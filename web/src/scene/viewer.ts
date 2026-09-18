@@ -12,7 +12,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { findBonds } from './bonds';
-import type { ElementInfo } from '../worker/protocol';
+import type { ElementInfo, IsoMesh, SurfaceGeometry } from '../worker/protocol';
 
 export interface SceneAtom {
   z: number;
@@ -23,12 +23,41 @@ export interface SceneAtom {
 /** Spheres are drawn well inside their van der Waals radius so bonds stay visible. */
 const SPHERE_SCALE = 0.32;
 const BOND_RADIUS = 0.09;
+/**
+ * The isosurface is drawn around the atoms, so it has to be see-through enough
+ * for them to stay visible through it.
+ */
+const ISOSURFACE_OPACITY = 0.42;
+/**
+ * Colours of the two halves of a signed density. Only the deformation density
+ * has both: blue is where forming the molecule gathered electrons, red where it
+ * took them away. An ordinary density only ever uses the first.
+ */
+const POSITIVE_COLOR = 0x5fa8ff;
+const NEGATIVE_COLOR = 0xff6b6b;
 /** Pointer travel below this many pixels counts as a click, not a drag. */
 const CLICK_SLOP_PX = 4;
 
 export type PlaceHandler = (position: [number, number, number]) => void;
 export type MoveHandler = (index: number, position: [number, number, number]) => void;
 export type SelectHandler = (index: number | null) => void;
+
+/** Shared settings of both density surfaces; only the colour differs. */
+function isosurfaceMaterial(color: number): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.25,
+    metalness: 0.0,
+    transparent: true,
+    opacity: ISOSURFACE_OPACITY,
+    // The surface wraps the molecule, so the camera sees its inside as well as
+    // its outside; without this the far half would be culled away.
+    side: THREE.DoubleSide,
+    // Sorting transparent triangles per frame is not worth it here: leaving the
+    // depth buffer alone lets the atoms inside show through from any angle.
+    depthWrite: false,
+  });
+}
 
 export class MoleculeViewer {
   #renderer: THREE.WebGLRenderer;
@@ -37,6 +66,8 @@ export class MoleculeViewer {
   #controls: OrbitControls;
   #atomGroup = new THREE.Group();
   #bondGroup = new THREE.Group();
+  #positiveSurface: THREE.Mesh;
+  #negativeSurface: THREE.Mesh;
   #highlight: THREE.Mesh;
   #elements = new Map<number, ElementInfo>();
   #atoms: SceneAtom[] = [];
@@ -51,6 +82,8 @@ export class MoleculeViewer {
   #cylinderGeometry = new THREE.CylinderGeometry(1, 1, 1, 16);
   #atomMaterials = new Map<number, THREE.MeshStandardMaterial>();
   #bondMaterial = new THREE.MeshStandardMaterial({ color: 0x9aa4b2, roughness: 0.5 });
+  #positiveMaterial = isosurfaceMaterial(POSITIVE_COLOR);
+  #negativeMaterial = isosurfaceMaterial(NEGATIVE_COLOR);
 
   // Pointer gesture state.
   #raycaster = new THREE.Raycaster();
@@ -99,7 +132,21 @@ export class MoleculeViewer {
     );
     this.#highlight.visible = false;
 
-    this.#scene.add(this.#atomGroup, this.#bondGroup, this.#highlight);
+    this.#positiveSurface = new THREE.Mesh(new THREE.BufferGeometry(), this.#positiveMaterial);
+    this.#negativeSurface = new THREE.Mesh(new THREE.BufferGeometry(), this.#negativeMaterial);
+    for (const surface of [this.#positiveSurface, this.#negativeSurface]) {
+      surface.visible = false;
+      // Drawn after the opaque atoms and bonds, which transparency needs.
+      surface.renderOrder = 1;
+    }
+
+    this.#scene.add(
+      this.#atomGroup,
+      this.#bondGroup,
+      this.#positiveSurface,
+      this.#negativeSurface,
+      this.#highlight,
+    );
 
     // Capture phase, so an atom hit can switch OrbitControls off before it
     // starts an orbit gesture on the same pointerdown.
@@ -141,6 +188,49 @@ export class MoleculeViewer {
     this.#syncAtomMeshes();
     this.#syncBondMeshes();
     this.#updateHighlight();
+  }
+
+  /**
+   * Replaces the electron-density surfaces, or clears them with `null`.
+   *
+   * A signed density fills both: the second one is the region the density falls
+   * below the negative of the threshold, drawn in the other colour. An ordinary
+   * density leaves it empty.
+   */
+  setIsosurface(mesh: IsoMesh | null) {
+    this.#setSurface(this.#positiveSurface, mesh?.positive ?? null);
+    this.#setSurface(this.#negativeSurface, mesh?.negative ?? null);
+  }
+
+  /**
+   * Swaps one surface's geometry. The mesh and its material are kept, since only
+   * the vertex count changes with the threshold, and the old geometry is
+   * disposed rather than left to the garbage collector: its buffers live on the
+   * GPU, which JavaScript's collector knows nothing about.
+   */
+  #setSurface(target: THREE.Mesh, surface: SurfaceGeometry | null) {
+    const previous = target.geometry;
+    if (!surface || surface.indices.length === 0) {
+      target.visible = false;
+      // Nothing to release when it is already empty, which it is every time the
+      // user drags an atom around with the surfaces switched off.
+      if (previous.getAttribute('position')) {
+        target.geometry = new THREE.BufferGeometry();
+        previous.dispose();
+      }
+      return;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(surface.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(surface.normals, 3));
+    geometry.setIndex(new THREE.BufferAttribute(surface.indices, 1));
+    // Needed for frustum culling; the engine gives no bounding box of its own.
+    geometry.computeBoundingSphere();
+
+    target.geometry = geometry;
+    target.visible = true;
+    previous.dispose();
   }
 
   #materialFor(z: number): THREE.MeshStandardMaterial {
@@ -361,10 +451,14 @@ export class MoleculeViewer {
 
     this.#atomGroup.clear();
     this.#bondGroup.clear();
+    this.#positiveSurface.geometry.dispose();
+    this.#negativeSurface.geometry.dispose();
     this.#sphereGeometry.dispose();
     this.#cylinderGeometry.dispose();
     for (const material of this.#atomMaterials.values()) material.dispose();
     this.#bondMaterial.dispose();
+    this.#positiveMaterial.dispose();
+    this.#negativeMaterial.dispose();
     (this.#highlight.material as THREE.Material).dispose();
     this.#controls.dispose();
     this.#renderer.dispose();

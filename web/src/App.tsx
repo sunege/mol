@@ -4,15 +4,31 @@ import { probeWebGl, type WebGlProbe } from './scene/webgl';
 import { DftWorkerClient } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
 import { PeriodicPicker } from './components/PeriodicPicker';
-import type { ElementInfo, ScfOutcome } from './worker/protocol';
+import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
+import type {
+  DensityChannel,
+  DensityRequest,
+  ElementInfo,
+  IsoMesh,
+  ScfOutcome,
+} from './worker/protocol';
 import './App.css';
 
 /**
- * Phase 2: build a molecule by hand, then run a real Kohn-Sham calculation on it.
+ * Phase 3: build a molecule by hand, run a real Kohn-Sham calculation on it,
+ * and look at the electron density that comes out.
  *
  * The calculation is started explicitly rather than on every edit: benzene takes
  * seconds, so running it while the user drags an atom would be worse than
  * useless. From phase 5 the geometry optimisation takes over and drives itself.
+ *
+ * The density surface is a second, much cheaper round trip over the same
+ * converged calculation, which is what lets the threshold slider stay live.
+ *
+ * Two things can be drawn from that density: every electron, or just the ones
+ * that made the bonds. Which surface the second one turns out to be is the
+ * engine's decision - it depends on whether the molecule has a pi system - so
+ * the UI asks for "bonding" and reads back what it got.
  */
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -28,12 +44,34 @@ export default function App() {
   const [computing, setComputing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [webgl, setWebgl] = useState<WebGlProbe | null>(null);
+  const [showDensity, setShowDensity] = useState(true);
+  const [channel, setChannel] = useState<DensityRequest>('total');
+  // A level per channel, so switching back and forth keeps each where it was.
+  const [levels, setLevels] = useState<Record<DensityRequest, number>>({
+    total: ISO_RANGES.total.initial,
+    bonding: ISO_RANGES.bonding.initial,
+  });
+  const [mesh, setMesh] = useState<IsoMesh | null>(null);
+  const [meshing, setMeshing] = useState(false);
+  const isoLevel = levels[channel];
 
   // Identifies the calculation whose result is still wanted. Cancelling or
   // editing bumps it, so a reply that arrives afterwards is ignored instead of
   // overwriting the state of a newer request.
   const requestRef = useRef(0);
   const inFlightRef = useRef(false);
+
+  // Whether the worker is still holding a converged calculation to cut surfaces
+  // from. A ref rather than state: the isosurface pump reads it from inside a
+  // running loop, where a stale render's copy would be wrong.
+  const hasDensityRef = useRef(false);
+  // Isosurface requests are coalesced. The worker is single-threaded, so
+  // queueing every level a slider drag passes through would leave the surface
+  // running seconds behind the pointer; instead one request is in flight and
+  // the newest level waits its turn, replacing any older one that was waiting.
+  const wantedRef = useRef<{ channel: DensityRequest; level: number } | null>(null);
+  const meshInFlightRef = useRef(false);
+  const meshRequestRef = useRef(0);
 
   const cancelCalculation = useCallback(() => {
     // Replacing the worker is not free, so only do it when something is actually
@@ -43,6 +81,8 @@ export default function App() {
     // the client terminates the worker and spawns a fresh one.
     inFlightRef.current = false;
     requestRef.current += 1;
+    // The worker being replaced takes the converged calculation with it.
+    hasDensityRef.current = false;
     clientRef.current?.cancelAll();
     setComputing(false);
   }, []);
@@ -56,6 +96,12 @@ export default function App() {
   const invalidateResult = useCallback(() => {
     setResult(null);
     setError(null);
+    // The worker's copy of the density belongs to the old geometry, so the
+    // surface on screen is stale whether or not the worker survives.
+    hasDensityRef.current = false;
+    wantedRef.current = null;
+    meshRequestRef.current += 1;
+    setMesh(null);
     cancelCalculation();
   }, [cancelCalculation]);
 
@@ -173,7 +219,72 @@ export default function App() {
     if (presetId && elementsReady) viewerRef.current?.frameAll();
   }, [presetId, elementsReady]);
 
+  useEffect(() => {
+    viewerRef.current?.setIsosurface(showDensity ? mesh : null);
+  }, [mesh, showDensity]);
+
   // --- engine --------------------------------------------------------------
+
+  /**
+   * Draws whatever level is wanted, then whatever level became wanted while
+   * that was happening, until there is nothing left to catch up on.
+   */
+  const pumpIsosurface = useCallback(async () => {
+    const client = clientRef.current;
+    if (!client || meshInFlightRef.current) return;
+    if (wantedRef.current === null || !hasDensityRef.current) return;
+
+    meshInFlightRef.current = true;
+    setMeshing(true);
+    try {
+      while (wantedRef.current !== null && hasDensityRef.current) {
+        const wanted = wantedRef.current;
+        wantedRef.current = null;
+        const token = ++meshRequestRef.current;
+        try {
+          const next = await client.isosurface(wanted.channel, wanted.level);
+          if (meshRequestRef.current === token) setMesh(next);
+        } catch {
+          // The worker was replaced, or there is no calculation to cut. Neither
+          // is something to put in front of the user: the surface just goes.
+          if (meshRequestRef.current === token) setMesh(null);
+        }
+      }
+    } finally {
+      meshInFlightRef.current = false;
+      setMeshing(false);
+    }
+  }, []);
+
+  const requestIsosurface = useCallback(
+    (wanted: DensityRequest, level: number) => {
+      wantedRef.current = { channel: wanted, level };
+      void pumpIsosurface();
+    },
+    [pumpIsosurface],
+  );
+
+  // A new threshold, a different channel, or switching the surface back on all
+  // ask for a fresh mesh. A finished calculation does the same from its own
+  // handler, where the density first becomes available.
+  useEffect(() => {
+    if (showDensity && hasDensityRef.current) requestIsosurface(channel, isoLevel);
+  }, [channel, isoLevel, showDensity, requestIsosurface]);
+
+  /**
+   * Switching channel drops the surface on screen rather than leaving it up
+   * while the new density is sampled: the two are drawn in different colours and
+   * mean different things, so the stale one would be read as the new one.
+   */
+  const selectChannel = useCallback((next: DensityRequest) => {
+    setChannel((current) => {
+      if (current !== next) {
+        meshRequestRef.current += 1;
+        setMesh(null);
+      }
+      return next;
+    });
+  }, []);
 
   const calculate = useCallback(() => {
     const client = clientRef.current;
@@ -193,6 +304,10 @@ export default function App() {
         inFlightRef.current = false;
         setComputing(false);
         setResult(outcome);
+        // The worker is now holding a density; show it without making the user
+        // ask, so placing atoms and seeing the cloud is one action.
+        hasDensityRef.current = true;
+        if (showDensity) requestIsosurface(channel, isoLevel);
       })
       .catch((e: Error) => {
         if (requestRef.current !== token) return;
@@ -200,7 +315,7 @@ export default function App() {
         setComputing(false);
         setError(describeEngineError(e.message));
       });
-  }, [atoms]);
+  }, [atoms, showDensity, channel, isoLevel, requestIsosurface]);
 
   // --- keyboard ------------------------------------------------------------
 
@@ -246,7 +361,7 @@ export default function App() {
 
       <aside className="panel">
         <h1>分子シミュレータ</h1>
-        <p className="phase">Phase 2 — SCF 一点計算</p>
+        <p className="phase">Phase 3 — 電子密度等値面</p>
 
         <h2>配置する元素</h2>
         <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
@@ -304,6 +419,41 @@ export default function App() {
           </button>
         </div>
 
+        <h2>電子密度</h2>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={showDensity}
+            onChange={(event) => setShowDensity(event.target.checked)}
+          />
+          電子の雲を表示する
+        </label>
+        <div className="row">
+          <button
+            type="button"
+            className={channel === 'total' ? 'active' : ''}
+            disabled={!showDensity}
+            onClick={() => selectChannel('total')}
+          >
+            すべての電子
+          </button>
+          <button
+            type="button"
+            className={channel === 'bonding' ? 'active' : ''}
+            disabled={!showDensity}
+            onClick={() => selectChannel('bonding')}
+          >
+            結合に寄与する電子
+          </button>
+        </div>
+        <IsoLevelSlider
+          value={isoLevel}
+          range={ISO_RANGES[channel]}
+          onChange={(level) => setLevels((prev) => ({ ...prev, [channel]: level }))}
+          disabled={!showDensity || result === null}
+        />
+        <p className="hint">{explainChannel(channel, mesh)}</p>
+
         <dl>
           <dt>原子数</dt>
           <dd>{atoms.length}</dd>
@@ -329,6 +479,8 @@ export default function App() {
           <dd>{result ? `${result.iterations} 回` : '—'}</dd>
           <dt>計算時間</dt>
           <dd>{result ? `${(result.elapsedMs / 1000).toFixed(2)} 秒` : '—'}</dd>
+          <dt>等値面</dt>
+          <dd>{describeMesh(result, mesh, meshing)}</dd>
           <dt>WebGL</dt>
           <dd>
             {webgl === null
@@ -343,6 +495,49 @@ export default function App() {
       </aside>
     </div>
   );
+}
+
+/**
+ * What the isosurface readout says, in the states it can be in.
+ *
+ * An empty mesh is one of them: a threshold above the densest point of the
+ * molecule has no surface to draw, which is an answer rather than a failure.
+ */
+function describeMesh(
+  result: ScfOutcome | null,
+  mesh: IsoMesh | null,
+  meshing: boolean,
+): string {
+  if (result === null) return '—';
+  if (meshing && mesh === null) return '生成中…';
+  if (mesh === null) return '—';
+  const faces = [mesh.positive, mesh.negative]
+    .filter((surface) => surface.indices.length > 0)
+    .map((surface) => (surface.indices.length / 3).toLocaleString());
+  if (faces.length === 0) return 'しきい値が高すぎます';
+  return `${faces.join(' + ')} 面 · ${Math.round(mesh.elapsedMs)} ms`;
+}
+
+/**
+ * The line under the slider, which has to explain what is on screen without
+ * naming a single orbital or functional (requirement F4).
+ *
+ * The bonding channel needs two explanations because the engine answers it two
+ * different ways, so the text follows what came back rather than what was asked
+ * for, and says nothing specific until the first surface arrives.
+ */
+function explainChannel(request: DensityRequest, mesh: IsoMesh | null): string {
+  const shown: DensityChannel | null = mesh?.channel ?? null;
+  if (request === 'total') {
+    return 'しきい値を下げると分子全体を包む形に、上げると原子核や結合のまわりに残ります。';
+  }
+  if (shown === 'pi') {
+    return '平らな分子なので、面から上下にはみ出している電子だけを表示しています。二重結合や環がある分子で、結合がどこに広がっているかが見えます。';
+  }
+  if (shown === 'deformation') {
+    return '原子がばらばらだったときと比べて、電子が濃くなった場所（青）と薄くなった場所（赤）です。青が結合のできたところにあたります。';
+  }
+  return '原子が結びついたことで動いた電子だけを表示します。';
 }
 
 /**

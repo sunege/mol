@@ -7,7 +7,14 @@
  * molecule mid-calculation, at the cost of re-initialising the module (a few
  * milliseconds).
  */
-import type { ElementInfo, ScfOutcome, WorkerRequest, WorkerResponse } from './protocol';
+import type {
+  DensityRequest,
+  ElementInfo,
+  IsoMesh,
+  ScfOutcome,
+  WorkerRequest,
+  WorkerResponse,
+} from './protocol';
 
 type Pending = {
   resolve: (response: WorkerResponse) => void;
@@ -101,7 +108,30 @@ export class DftWorkerClient {
     return response.result;
   }
 
-  /** Aborts every in-flight computation by replacing the worker. */
+  /**
+   * Triangulates one channel of the last [`scf`] call's density at `isoLevel`,
+   * in electrons per cubic Bohr.
+   *
+   * The density stays in the worker, so this is a mesh rebuild rather than a
+   * new calculation. It rejects when no calculation is loaded, which happens
+   * after `cancelAll` replaces the worker.
+   */
+  async isosurface(channel: DensityRequest, isoLevel: number): Promise<IsoMesh> {
+    const response = await this.#send<Extract<WorkerResponse, { type: 'mesh' }>>((id) => ({
+      id,
+      type: 'isosurface',
+      channel,
+      isoLevel,
+    }));
+    return response.mesh;
+  }
+
+  /**
+   * Aborts every in-flight computation by replacing the worker.
+   *
+   * The converged calculation the worker was holding goes with it, so an
+   * isosurface cannot be drawn again until the next `scf`.
+   */
   cancelAll() {
     this.#worker?.terminate();
     this.#rejectAll(new Error('cancelled'));

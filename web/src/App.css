@@ -132,3 +132,42 @@
     max-height: 50vh;
   }
 }
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.toggle input {
+  accent-color: #3f8cff;
+  cursor: pointer;
+}
+
+.iso-slider {
+  margin-top: 12px;
+}
+
+.iso-slider input[type='range'] {
+  width: 100%;
+  accent-color: #3f8cff;
+}
+
+.iso-slider input[type='range']:disabled {
+  opacity: 0.35;
+}
+
+.iso-slider-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-size: 0.7rem;
+  color: #6b7686;
+}
+
+.iso-slider-value {
+  font-variant-numeric: tabular-nums;
+  color: #9aa4b2;
+}

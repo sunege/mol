@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PRESETS, toWorkerArrays } from '../molecules/presets';
-import type { ScfOutcome, WorkerRequest, WorkerResponse } from './protocol';
+import type { IsoMesh, ScfOutcome, WorkerRequest, WorkerResponse } from './protocol';
 
 /**
  * Messages cross the worker boundary through the structured clone algorithm, so
@@ -8,6 +8,12 @@ import type { ScfOutcome, WorkerRequest, WorkerResponse } from './protocol';
  * that could silently degrade - a plain array would still "work" but would make
  * every geometry a copy of numbers rather than a buffer.
  */
+const emptySurface = () => ({
+  positions: new Float32Array(0),
+  normals: new Float32Array(0),
+  indices: new Uint32Array(0),
+});
+
 describe('worker protocol', () => {
   it('keeps geometry as typed arrays through a structured clone', () => {
     const water = PRESETS.find((p) => p.id === 'h2o')!;
@@ -53,6 +59,88 @@ describe('worker protocol', () => {
       cloned.result.energy,
       7,
     );
+  });
+
+  it('keeps a mesh in the layout a vertex buffer wants', () => {
+    // One triangle, which is enough to pin the element types down. Anything but
+    // a Float32Array here would mean a copy on every upload to the GPU, and
+    // anything but a Uint32Array would cap a surface at 65536 vertices - well
+    // under what benzene needs at a low threshold.
+    const mesh: IsoMesh = {
+      channel: 'total',
+      isoLevel: 0.05,
+      positive: {
+        positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+        normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        indices: new Uint32Array([0, 1, 2]),
+      },
+      negative: emptySurface(),
+      densityMax: 27.54,
+      densityMin: 0,
+      elapsedMs: 3.5,
+    };
+    const cloned = structuredClone({ id: 9, type: 'mesh', mesh } as WorkerResponse);
+    if (cloned.type !== 'mesh') throw new Error('unreachable');
+    expect(cloned.mesh.positive.positions).toBeInstanceOf(Float32Array);
+    expect(cloned.mesh.positive.normals).toBeInstanceOf(Float32Array);
+    expect(cloned.mesh.positive.indices).toBeInstanceOf(Uint32Array);
+    expect([...cloned.mesh.positive.indices]).toEqual([0, 1, 2]);
+    expect(cloned.mesh.isoLevel).toBe(0.05);
+    // An unsigned channel leaves the second surface empty rather than absent,
+    // so the viewer has one shape to handle rather than two.
+    expect(cloned.mesh.negative.indices.length).toBe(0);
+  });
+
+  it('carries both halves of a signed density', () => {
+    // Only the deformation density has a negative side, and losing it would
+    // silently turn "electrons left here" into nothing at all.
+    const mesh: IsoMesh = {
+      channel: 'deformation',
+      isoLevel: 0.02,
+      positive: {
+        positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+        normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        indices: new Uint32Array([0, 1, 2]),
+      },
+      negative: {
+        positions: new Float32Array([0, 0, 2, 1, 0, 2, 0, 1, 2]),
+        normals: new Float32Array([0, 0, -1, 0, 0, -1, 0, 0, -1]),
+        indices: new Uint32Array([0, 2, 1]),
+      },
+      densityMax: 0.31,
+      densityMin: -0.25,
+      elapsedMs: 6,
+    };
+    const cloned = structuredClone({ id: 11, type: 'mesh', mesh } as WorkerResponse);
+    if (cloned.type !== 'mesh') throw new Error('unreachable');
+    expect(cloned.mesh.channel).toBe('deformation');
+    expect(cloned.mesh.densityMin).toBeLessThan(0);
+    expect([...cloned.mesh.negative.indices]).toEqual([0, 2, 1]);
+    expect(cloned.mesh.negative.positions[2]).toBe(2);
+  });
+
+  it('treats a threshold above the whole density as an empty mesh, not an error', () => {
+    const mesh: IsoMesh = {
+      channel: 'total',
+      isoLevel: 0.5,
+      positive: emptySurface(),
+      negative: emptySurface(),
+      densityMax: 0.27,
+      densityMin: 0,
+      elapsedMs: 1,
+    };
+    const cloned = structuredClone({ id: 10, type: 'mesh', mesh } as WorkerResponse);
+    if (cloned.type !== 'mesh') throw new Error('unreachable');
+    expect(cloned.mesh.positive.indices.length).toBe(0);
+    expect(cloned.mesh.isoLevel).toBeGreaterThan(cloned.mesh.densityMax);
+  });
+
+  it('asks for a channel and a threshold without resending the geometry', () => {
+    // The point of keeping the density in the worker: a threshold change is a
+    // number, not a molecule. The channel is a request rather than an answer -
+    // only the engine knows whether this molecule has a pi system.
+    const request: WorkerRequest = { id: 8, type: 'isosurface', channel: 'bonding', isoLevel: 0.02 };
+    expect(structuredClone(request)).toEqual(request);
   });
 
   it('reports a failed geometry as an error response, not a thrown value', () => {
