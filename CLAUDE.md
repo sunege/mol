@@ -142,6 +142,18 @@ P3 の実装を踏まえた注意点:
   孤立原子の 1s カスプの差）。等値面の意味がある範囲はスライダーの下半分で、
   上のほうへ動かすと核まわりの赤い小球だけが残る。これは量の性質であって不具合ではない。
 
+### P4 を始める前に要るもの
+
+- **開殻の参照値がまだ 1 つも無い。** `tests/data/scf_*.json` は全部 RKS（閉殻）で、
+  `gen_reference.py` の `scf_reference` も `dft.RKS` 固定。O₂ 三重項・二重項ラジカル・
+  開殻原子の SVWN5/STO-3G エネルギーは **`scripts/gen_reference.py` に UKS 経路を足して
+  生成する**。規約どおり記憶から書かない。`build_mol(..., spin=n)` は既にある。
+- **スピン分極 LDA は既にできている。** `xc::lda::lda(rho_alpha, rho_beta)` があり、
+  `tests/data/xc_lda.json` の `polarized` 節で libxc と 1 点ずつ照合済み（P3 以前に
+  P4 を見越して入れてある）。P4 で要るのは汎関数ではなく、
+  `xc::restricted` に対応する UKS 版のグリッド組み立てと SCF ループのほう。
+- **PySCF は `.venv` に導入済み**（`.venv/bin/python scripts/gen_reference.py`）。
+
 ### P3 の実測（ブラウザ、release + wasm-opt -O3）
 
 初回の等値面（ρ サンプリング込み）: H₂O 0.12〜0.23 秒 / ベンゼン 1.0〜1.3 秒。
