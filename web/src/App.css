@@ -1,0 +1,134 @@
+.app {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  height: 100vh;
+  width: 100vw;
+}
+
+.viewport {
+  position: relative;
+  min-width: 0;
+  /* The canvas must never paint outside its grid cell, whatever size the
+     renderer gives it. */
+  overflow: hidden;
+}
+
+.viewport canvas {
+  display: block;
+  touch-action: none;
+}
+
+.panel {
+  padding: 20px 18px;
+  background: #151a21;
+  border-left: 1px solid #262d38;
+  overflow-y: auto;
+}
+
+.panel h1 {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.panel h2 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7c8798;
+  margin: 22px 0 8px;
+}
+
+.phase {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  color: #7c8798;
+}
+
+.hint {
+  margin: 10px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.6;
+  color: #6b7686;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.row button {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  border-radius: 6px;
+  border: 1px solid #2d3644;
+  background: #1c222c;
+  color: #d6dde8;
+  cursor: pointer;
+}
+
+.row button:hover:not(:disabled) {
+  border-color: #3f8cff;
+}
+
+.row button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.row button.active {
+  background: #1d3a66;
+  border-color: #3f8cff;
+}
+
+.panel dl {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.panel dt {
+  color: #7c8798;
+  margin-top: 10px;
+}
+
+.panel dd {
+  margin: 2px 0 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  color: #ff7a7a;
+}
+
+.webgl-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  padding: 24px;
+  margin: 0;
+  text-align: center;
+  color: #7c8798;
+  font-size: 0.85rem;
+  max-width: 420px;
+  margin-inline: auto;
+}
+
+.webgl-error .hint {
+  color: #5d6675;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+  }
+
+  .panel {
+    border-left: none;
+    border-top: 1px solid #262d38;
+    max-height: 50vh;
+  }
+}

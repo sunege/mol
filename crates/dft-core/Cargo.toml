@@ -1,0 +1,12 @@
+[package]
+name = "dft-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Molecular DFT engine (integrals, SCF, gradients) targeting small non-periodic systems"
+
+[dependencies]
+nalgebra = { version = "0.33", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+approx = "0.5"

@@ -1,0 +1,40 @@
+.periodic {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 3px;
+}
+
+.periodic .cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid #2d3644;
+  border-radius: 5px;
+  background: #1c222c;
+  color: #d6dde8;
+  cursor: pointer;
+  line-height: 1.1;
+}
+
+.periodic .cell:hover {
+  border-color: var(--element-color);
+}
+
+.periodic .cell.active {
+  background: #1d3a66;
+  border-color: #3f8cff;
+}
+
+.periodic .z {
+  font-size: 0.5rem;
+  color: #6b7686;
+}
+
+.periodic .symbol {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--element-color);
+}

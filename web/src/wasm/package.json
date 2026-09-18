@@ -1,0 +1,17 @@
+{
+  "name": "dft-wasm",
+  "type": "module",
+  "description": "WebAssembly bridge between the browser worker and dft-core",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "dft_wasm_bg.wasm",
+    "dft_wasm.js",
+    "dft_wasm.d.ts"
+  ],
+  "main": "dft_wasm.js",
+  "types": "dft_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

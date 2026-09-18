@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The WASM artifact is committed to the repository so Vercel only has to run
+# Vite: its build image has no Rust toolchain.
+permissions:
+  contents: write
+
+jobs:
+  rust:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  wasm:
+    name: wasm-pack build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+      - run: npm run build:wasm
+
+      # On a pull request the committed artifact must already match the source.
+      - name: Check committed artifact is current
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! git diff --quiet -- web/src/wasm; then
+            echo "web/src/wasm is stale. Run 'npm run build:wasm' and commit the result." >&2
+            git diff --stat -- web/src/wasm >&2
+            exit 1
+          fi
+
+      # On main, refresh it automatically.
+      - name: Commit refreshed artifact
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet -- web/src/wasm; then
+            echo "Artifact already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/src/wasm
+          git commit -m "chore: rebuild WASM artifact"
+          git push
+
+  web:
+    name: build + test web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run build
+      - run: npm test --workspace web -- --run
