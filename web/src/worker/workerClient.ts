@@ -7,7 +7,7 @@
  * molecule mid-calculation, at the cost of re-initialising the module (a few
  * milliseconds).
  */
-import type { ElementInfo, WorkerRequest, WorkerResponse } from './protocol';
+import type { ElementInfo, ScfOutcome, WorkerRequest, WorkerResponse } from './protocol';
 
 type Pending = {
   resolve: (response: WorkerResponse) => void;
@@ -84,12 +84,21 @@ export class DftWorkerClient {
     return response.elements;
   }
 
-  /** Nuclear repulsion energy in Hartree for a geometry in Angstrom. */
-  async nuclearRepulsion(z: Uint8Array, xyz: Float64Array): Promise<number> {
-    const response = await this.#send<
-      Extract<WorkerResponse, { type: 'nuclearRepulsion' }>
-    >((id) => ({ id, type: 'nuclearRepulsion', z, xyz }));
-    return response.energy;
+  /**
+   * Single-point Kohn-Sham calculation for a geometry in Angstrom.
+   *
+   * A molecule that fails to converge resolves normally with
+   * `converged: false`; the promise only rejects when the geometry itself
+   * cannot be handled, or when the worker is replaced by `cancelAll`.
+   */
+  async scf(z: Uint8Array, xyz: Float64Array): Promise<ScfOutcome> {
+    const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>((id) => ({
+      id,
+      type: 'scf',
+      z,
+      xyz,
+    }));
+    return response.result;
   }
 
   /** Aborts every in-flight computation by replacing the worker. */

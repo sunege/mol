@@ -2,12 +2,9 @@
 /* eslint-disable */
 
 /**
- * Nuclear repulsion energy in Hartree for a geometry given in Angstrom.
- *
- * Present mainly to prove the worker/WASM round trip end to end; the SCF
- * entry point lands in the next phase.
+ * Runs a restricted Kohn-Sham LDA single point on a geometry given in Angstrom.
  */
-export function nuclearRepulsion(z: Uint8Array, xyz_angstrom: Float64Array): number;
+export function scf(z: Uint8Array, xyz_angstrom: Float64Array): any;
 
 /**
  * Installs a panic hook that reports Rust panics to the browser console.
@@ -24,7 +21,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly nuclearRepulsion: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly scf: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly start: () => void;
     readonly supportedElements: () => [number, number, number];
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

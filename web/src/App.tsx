@@ -4,16 +4,15 @@ import { probeWebGl, type WebGlProbe } from './scene/webgl';
 import { DftWorkerClient } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
 import { PeriodicPicker } from './components/PeriodicPicker';
-import type { ElementInfo } from './worker/protocol';
+import type { ElementInfo, ScfOutcome } from './worker/protocol';
 import './App.css';
 
-/** Requests are debounced by this much so dragging an atom does not flood the worker. */
-const ENERGY_DEBOUNCE_MS = 120;
-
 /**
- * Phase 1: build a molecule by hand. Atom placement, dragging and deletion are
- * live; the readout is still only the nuclear repulsion energy, which the SCF
- * replaces in the next phase.
+ * Phase 2: build a molecule by hand, then run a real Kohn-Sham calculation on it.
+ *
+ * The calculation is started explicitly rather than on every edit: benzene takes
+ * seconds, so running it while the user drags an atom would be worse than
+ * useless. From phase 5 the geometry optimisation takes over and drives itself.
  */
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -25,9 +24,40 @@ export default function App() {
   const [elements, setElements] = useState<ElementInfo[]>([]);
   const [activeZ, setActiveZ] = useState(6);
   const [selected, setSelected] = useState<number | null>(null);
-  const [repulsion, setRepulsion] = useState<number | null>(null);
+  const [result, setResult] = useState<ScfOutcome | null>(null);
+  const [computing, setComputing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [webgl, setWebgl] = useState<WebGlProbe | null>(null);
+
+  // Identifies the calculation whose result is still wanted. Cancelling or
+  // editing bumps it, so a reply that arrives afterwards is ignored instead of
+  // overwriting the state of a newer request.
+  const requestRef = useRef(0);
+  const inFlightRef = useRef(false);
+
+  const cancelCalculation = useCallback(() => {
+    // Replacing the worker is not free, so only do it when something is actually
+    // running - every edit comes through here.
+    if (!inFlightRef.current) return;
+    // A single-threaded WASM calculation cannot be interrupted from outside, so
+    // the client terminates the worker and spawns a fresh one.
+    inFlightRef.current = false;
+    requestRef.current += 1;
+    clientRef.current?.cancelAll();
+    setComputing(false);
+  }, []);
+
+  /**
+   * Every edit invalidates the last result and abandons a calculation that is
+   * still running for the old geometry. Called from the edit handlers rather
+   * than from an effect on `atoms`, so the molecule and the readout change in
+   * the same render.
+   */
+  const invalidateResult = useCallback(() => {
+    setResult(null);
+    setError(null);
+    cancelCalculation();
+  }, [cancelCalculation]);
 
   // --- edit operations -----------------------------------------------------
 
@@ -36,14 +66,19 @@ export default function App() {
       setAtoms((prev) => [...prev, { z: activeZ, pos }]);
       setPresetId(null);
       setSelected(null);
+      invalidateResult();
     },
-    [activeZ],
+    [activeZ, invalidateResult],
   );
 
-  const moveAtom = useCallback((index: number, pos: [number, number, number]) => {
-    setAtoms((prev) => prev.map((atom, i) => (i === index ? { ...atom, pos } : atom)));
-    setPresetId(null);
-  }, []);
+  const moveAtom = useCallback(
+    (index: number, pos: [number, number, number]) => {
+      setAtoms((prev) => prev.map((atom, i) => (i === index ? { ...atom, pos } : atom)));
+      setPresetId(null);
+      invalidateResult();
+    },
+    [invalidateResult],
+  );
 
   const deleteSelected = useCallback(() => {
     setSelected((index) => {
@@ -52,13 +87,15 @@ export default function App() {
       setPresetId(null);
       return null;
     });
-  }, []);
+    invalidateResult();
+  }, [invalidateResult]);
 
   const clearAll = useCallback(() => {
     setAtoms([]);
     setPresetId(null);
     setSelected(null);
-  }, []);
+    invalidateResult();
+  }, [invalidateResult]);
 
   // The viewer is created once, so it calls through a ref that always holds the
   // current handlers rather than the ones captured at mount.
@@ -138,34 +175,31 @@ export default function App() {
 
   // --- engine --------------------------------------------------------------
 
-  useEffect(() => {
+  const calculate = useCallback(() => {
     const client = clientRef.current;
-    if (!client) return;
-    if (atoms.length === 0) {
-      setRepulsion(null);
-      setError(null);
-      return;
-    }
-
-    let stale = false;
-    const timer = setTimeout(() => {
-      const { z, xyz } = toWorkerArrays(atoms);
-      client
-        .nuclearRepulsion(z, xyz)
-        .then((energy) => {
-          if (stale) return;
-          setRepulsion(energy);
-          setError(null);
-        })
-        .catch((e: Error) => {
-          if (!stale) setError(describeEngineError(e.message));
-        });
-    }, ENERGY_DEBOUNCE_MS);
-
-    return () => {
-      stale = true;
-      clearTimeout(timer);
-    };
+    if (!client || atoms.length === 0) return;
+    const { z, xyz } = toWorkerArrays(atoms);
+    const token = ++requestRef.current;
+    inFlightRef.current = true;
+    setComputing(true);
+    // Drop the previous answer immediately: leaving it on screen next to
+    // "計算中…" reads as though it belonged to the run in progress.
+    setResult(null);
+    setError(null);
+    client
+      .scf(z, xyz)
+      .then((outcome) => {
+        if (requestRef.current !== token) return;
+        inFlightRef.current = false;
+        setComputing(false);
+        setResult(outcome);
+      })
+      .catch((e: Error) => {
+        if (requestRef.current !== token) return;
+        inFlightRef.current = false;
+        setComputing(false);
+        setError(describeEngineError(e.message));
+      });
   }, [atoms]);
 
   // --- keyboard ------------------------------------------------------------
@@ -212,7 +246,7 @@ export default function App() {
 
       <aside className="panel">
         <h1>分子シミュレータ</h1>
-        <p className="phase">Phase 1 — 原子配置</p>
+        <p className="phase">Phase 2 — SCF 一点計算</p>
 
         <h2>配置する元素</h2>
         <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
@@ -250,6 +284,7 @@ export default function App() {
                 setPresetId(preset.id);
                 setAtoms(preset.atoms);
                 setSelected(null);
+                invalidateResult();
               }}
             >
               {preset.label}
@@ -257,10 +292,43 @@ export default function App() {
           ))}
         </div>
 
-        <h2>エンジン出力</h2>
+        <h2>計算</h2>
+        <div className="row">
+          <button
+            type="button"
+            className={computing ? '' : 'active'}
+            onClick={computing ? cancelCalculation : calculate}
+            disabled={atoms.length === 0}
+          >
+            {computing ? '中止' : '計算する'}
+          </button>
+        </div>
+
         <dl>
           <dt>原子数</dt>
           <dd>{atoms.length}</dd>
+          <dt>状態</dt>
+          <dd>
+            {error ? (
+              <span className="error">{error}</span>
+            ) : computing ? (
+              '計算中…'
+            ) : result === null ? (
+              '—'
+            ) : result.converged ? (
+              '完了'
+            ) : (
+              // Phase 4 replaces this with the diverging-molecule animation; it
+              // is deliberately not phrased as an error.
+              '収束しませんでした'
+            )}
+          </dd>
+          <dt>全エネルギー</dt>
+          <dd>{result ? `${result.energy.toFixed(6)} Ha` : '—'}</dd>
+          <dt>反復</dt>
+          <dd>{result ? `${result.iterations} 回` : '—'}</dd>
+          <dt>計算時間</dt>
+          <dd>{result ? `${(result.elapsedMs / 1000).toFixed(2)} 秒` : '—'}</dd>
           <dt>WebGL</dt>
           <dd>
             {webgl === null
@@ -271,27 +339,18 @@ export default function App() {
                   ? '利用不可（GPU 無効）'
                   : '非対応'}
           </dd>
-          <dt>核間反発エネルギー</dt>
-          <dd>
-            {error ? (
-              <span className="error">{error}</span>
-            ) : repulsion === null ? (
-              atoms.length === 0 ? (
-                '—'
-              ) : (
-                '計算中…'
-              )
-            ) : (
-              `${repulsion.toFixed(6)} Ha`
-            )}
-          </dd>
         </dl>
       </aside>
     </div>
   );
 }
 
-/** Turns an engine-side geometry rejection into something readable. */
+/**
+ * Turns an engine-side geometry rejection into something readable.
+ *
+ * Only geometries the engine refuses to accept reach here. A calculation that
+ * runs but does not converge is not an error and never comes through this path.
+ */
 function describeEngineError(message: string): string {
   if (message.includes('CoincidentAtoms')) return '原子が重なっています';
   if (message.includes('UnsupportedElement')) return '対応していない元素です';

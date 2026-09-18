@@ -1,7 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
-export const nuclearRepulsion: (a: number, b: number, c: number, d: number) => [number, number, number];
+export const scf: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const start: () => void;
 export const supportedElements: () => [number, number, number];
 export const __wbindgen_free: (a: number, b: number, c: number) => void;

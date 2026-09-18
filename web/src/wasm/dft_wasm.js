@@ -1,24 +1,21 @@
 /* @ts-self-types="./dft_wasm.d.ts" */
 
 /**
- * Nuclear repulsion energy in Hartree for a geometry given in Angstrom.
- *
- * Present mainly to prove the worker/WASM round trip end to end; the SCF
- * entry point lands in the next phase.
+ * Runs a restricted Kohn-Sham LDA single point on a geometry given in Angstrom.
  * @param {Uint8Array} z
  * @param {Float64Array} xyz_angstrom
- * @returns {number}
+ * @returns {any}
  */
-export function nuclearRepulsion(z, xyz_angstrom) {
+export function scf(z, xyz_angstrom) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.nuclearRepulsion(ptr0, len0, ptr1, len1);
+    const ret = wasm.scf(ptr0, len0, ptr1, len1);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
-    return ret[0];
+    return takeFromExternrefTable0(ret[0]);
 }
 
 /**
@@ -43,6 +40,10 @@ export function supportedElements() {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg_Error_67e7344beaa85059: function(arg0, arg1) {
+            const ret = Error(getStringFromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg___wbindgen_throw_5d9e815e6fdf150f: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
@@ -90,6 +91,11 @@ function __wbg_get_imports() {
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_generic_0000000000000003: function(arg0) {
+            // Cast intrinsic for `U64 -> Externref`.
+            const ret = BigInt.asUintN(64, arg0);
             return ret;
         },
         __wbindgen_init_externref_table: function() {

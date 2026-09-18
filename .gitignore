@@ -14,5 +14,8 @@ web/dist
 # Vercel
 .vercel
 
+# PySCF virtualenv for scripts/gen_reference.py
+.venv
+
 # Machine-local Claude Code permissions
 .claude/settings.local.json
