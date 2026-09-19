@@ -9,6 +9,8 @@
 - 設計計画: `~/.claude/plans/tidy-munching-sedgewick.md`
 - **経緯・実測・却下した案: [docs/dev-notes.md](docs/dev-notes.md)**。自動では読み込まれない。
   触る領域の節だけ読むこと。下の規約の「なぜ」と数字はすべてそこにある。
+- **v2 の計画と進捗: [docs/plan-v2.md](docs/plan-v2.md)**（講義向け: P8 観測モード → P9 記録 →
+  P10 並列探索）。v2 の作業はこのファイルの「進捗」の最初の未完了タスクから始める。
 
 ## スコープ（v1 で固定）
 
@@ -127,7 +129,8 @@ web/src/wasm/      build:wasm の生成物（コミットする）
 
 ## 状態と今後
 
-- P0〜P7 完了、Vercel デプロイ済み。Firefox での手動 E2E の結果は未記録。
+- P0〜P7 完了、Vercel デプロイ済み。Firefox での手動 E2E の結果は未記録（P8 の確認で一緒に行う）。
+- **v2 計画済み（2026-09-20）、未着手。** 次は P8-1。WebGPU は採らないと決めた（理由は plan-v2.md）。
 - 拡張候補（詳細は dev-notes「P6 以降に残したもの」）: XC グリッド重み微分を実装して最適化を
   Medium に戻す（ベンゼン最適化の 1〜2 割）、マルチスレッド化（COOP/COEP + rayon、nightly 依存）、
   `OPTIMIZE_BUDGET_SECONDS`（1800 秒）の見直し、6-31G* / PBE への差し替え。
