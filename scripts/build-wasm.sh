@@ -2,9 +2,14 @@
 # Builds the browser engine into web/src/wasm/, the artifact that is committed
 # (Vercel's build image has no Rust toolchain; see CLAUDE.md).
 #
-# CI rebuilds the artifact on every pull request and fails if the bytes differ
-# from what was committed, so the build has to come out the same on any machine.
-# Three things would otherwise make it depend on who ran it:
+# The artifact that ships is CI's, built on Linux: CI rebuilds it on every push
+# to main and every pull request and commits its own wherever the bytes differ.
+# A build on a Mac is the same program but never the same bytes - its data
+# section comes out in a different order, most likely because the per-crate
+# hashes cargo derives differ between host platforms - so committing one is
+# fine, and CI will replace it. What this script does make reproducible is
+# everything that depends on the machine rather than the platform, so that two
+# builds on the same platform agree byte for byte:
 #
 # * Panic messages carry the source path of the dependency they come from, and
 #   for crates.io dependencies that path starts with the builder's CARGO_HOME

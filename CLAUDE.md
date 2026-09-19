@@ -24,7 +24,7 @@
 npm run dev          # Vite 開発サーバ (5173)
 npm run build        # tsc -b && vite build → web/dist
 npm test             # vitest (web)
-npm run build:wasm   # scripts/build-wasm.sh → web/src/wasm/（生成物はコミットする。どこでビルドしても同じバイトになる）
+npm run build:wasm   # scripts/build-wasm.sh → web/src/wasm/（生成物はコミットする。出荷されるのは CI（Linux）が作り直したもの）
 cargo test           # dft-core / dft-wasm
 cargo run --release --example profile -- benzene --optimize   # ネイティブの所要時間の内訳
 ```
@@ -90,7 +90,7 @@ crates/dft-wasm/   wasm-bindgen ラッパー。単位変換とシリアライズ
 .cargo/config.toml wasm32 向けに simd128 を有効にする（wasm-opt 側は --enable-simd）
 scripts/           gen_reference.py — 上の「生成物」をすべて作る唯一の場所
                    build-wasm.sh — web/src/wasm/ を作る唯一の手順（npm run build:wasm。再現性の理由は規約）
-rust-toolchain.toml Rust 1.98.1 に固定（CI も同じ版。生成物の再現性のため）
+rust-toolchain.toml Rust 1.98.1 に固定（CI も同じ版。Linux のビルドどうしを一致させるため）
 web/src/worker/    protocol.ts（UI↔Worker の契約）, dft.worker.ts, workerClient.ts,
                    engineSupport.ts（SIMD の有無の判定と、動かないブラウザへの案内）,
                    engine.test.ts（コミット済みの .wasm を vitest から直接呼ぶ）
@@ -115,7 +115,7 @@ web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
   戻すときは `cp`（`-p` なし）か、戻したあとに `touch` すること。
   疑わしいときは**定数がバイナリに入っているか直接見る**のが早い:
   `python3 -c "import struct,pathlib; w=pathlib.Path('web/src/wasm/dft_wasm_bg.wasm').read_bytes(); print(w.count(struct.pack('<d', 1800000.0)))"`
-- **`web/src/wasm/` はコミットする。** Vercel のビルド環境に Rust ツールチェーンが無いため。CI は PR で生成物の鮮度を検証し、main では自動で再生成してコミットする。
+- **`web/src/wasm/` はコミットする。** Vercel のビルド環境に Rust ツールチェーンが無いため。CI は main への push でも PR でも Linux で作り直し、コミットされたものとバイトが違えばそのブランチに「chore: rebuild WASM artifact」をコミットする（フォークからの PR だけは push できないので失敗させる）。push のあとは bot のコミットを `git pull` で取り込むこと。
 - **π/σ の判定は対称性であって経験則ではない。** 分子平面での鏡映は Kohn-Sham 演算子と
   可換なので、各軌道は厳密にその固有関数になる（ベンゼンで ⟨σ̂⟩ = ±1.000000）。
   判定は基底での反射行列 U を作って `Cᵀ S U C` の対角を見る。U は単項式を展開して
@@ -221,18 +221,37 @@ web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
   `ready` 前の `onerror` も同じ扱いで、`workerClient` は保留中も以後もすべての要求を
   `EngineUnavailableError` で失敗させる（P6 までは `ready` を永久に待ち、画面が空の周期表の
   まま黙って固まっていた）。
-- **`web/src/wasm/` はどこでビルドしても同じバイトにする。** CI は PR ごとに作り直して
-  バイト比較するので、ビルドした人に依存するものを入れない:
+- **出荷される `.wasm` は CI（Linux）が作ったもの。Mac のビルドとはバイトが一致しない。**
+  P7 で「どこでも同じバイト」にしたつもりが、確かめたのは macOS の中だけだった。最初の CI が
+  作り直した版（`f3b6eb3`）は、サイズ・文字列・命令列は同じで、データ領域でパニック位置の
+  記録（16 バイト）の並び順が違い、それを指す `i32.const` が 39 箇所違っていた。機能は同一
+  （両方でベンゼンを最適化してエネルギー小数 10 桁・歩数・最大力・進捗の段階まで一致）。
+  原因は推定で、cargo がクレートごとに作るハッシュに、ホスト向けにビルドされる proc-macro
+  （serde・wasm-bindgen のマクロ）経由でホストの違いが入り、リンク時の並びが変わるのだと
+  考えている。安定版の cargo で揃える手段は無い。だから CI は比較して落とすのではなく、
+  作り直してコミットする（上の規約）。同じ OS の中で一致させるための手当ては残してある:
   1. 依存 crate のパニック位置に `CARGO_HOME` の絶対パスが入る（P6 までの成果物には
-     `/Users/konya/.cargo/registry/...` が 13 箇所あり、CI の検査は必ず落ちる状態だった）。
-     `scripts/build-wasm.sh` が `--remap-path-prefix` で `/cargo` に置き換える。cargo の
-     `trim-paths` は 1.98 ではまだ unstable。
-  2. 標準ライブラリのパスに rustc のコミットが入る → `rust-toolchain.toml` と CI で 1.98.1 に固定。
+     `/Users/konya/.cargo/registry/...` が 13 箇所あった）。`scripts/build-wasm.sh` が
+     `--remap-path-prefix` で `/cargo` に置き換える。cargo の `trim-paths` は 1.98 ではまだ unstable。
+  2. 標準ライブラリのパスに rustc のコミットが入る → `rust-toolchain.toml` と CI で 1.98.1 に固定
+     （固定しないと Rust のリリースのたびに CI が成果物を作り直してコミットする）。
   3. wasm-opt の版は wasm-pack が決める → CI の wasm-pack を 0.15.0 に固定。
+  macOS 上で「別ディレクトリへのコピー + 空の `CARGO_HOME`」から作り直すと 5 ファイルとも一致する。
   **rustflags は `RUSTFLAGS` で渡さない。** `.cargo/config.toml` の `+simd128` を置き換えて
   しまい、SIMD 無しのバイナリが黙ってできる（`--config` で渡した配列は連結される）。
   空の `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS=""` は上書きにならず無視される（実測）。
-  検証は「別ディレクトリへのコピー + 空の `CARGO_HOME`」からのビルドで 5 ファイルとも一致。
+- **Vercel の Root Directory はリポジトリ直下（空）にする。** 設定は直下の `vercel.json`
+  （`npm run build` → `web/dist`、`.wasm` の Content-Type、`/assets` の immutable キャッシュ）で、
+  Root Directory が直下でないと読まれない。P7 の最初のデプロイは Root Directory が `web` より
+  下になっていて、`npm` が上の `web/package.json` を見つけてビルドし `web/dist` を作ったのに、
+  Vercel は Root Directory の下の `dist` を探して「No Output Directory named "dist"」で落ちた。
+  直下なら `vercel.json` がダッシュボードの Override より優先される（手元で確認）。
+  正しい構成のログには `> mol@0.1.0 build` → `> npm run build --workspace web` が出る。
+- **Vercel のビルドは手元で再現できる（ログイン不要）。** リポジトリを別の場所に clone し、
+  `.vercel/project.json` に `{"projectId":"x","orgId":"y","settings":{"rootDirectory":…,
+  "framework":…,"installCommand":…,"buildCommand":…,"outputDirectory":…}}` を書いて
+  `npx vercel@<ログに出ている版> build --yes` を走らせる。ログの形（「Running "install" command」
+  が出るか、`> mol@0.1.0 build` が出るか）で設定の上書きの有無まで見分けられる。
 - **性能は同じ条件で前後を並べて測る。** このマシン（i5-5287U）のネイティブ計測は同じバイナリでも
   ±30% ぶれるので、判断は複数回の最小値か、`sample` / CPU プロファイルの比率で行う。
   WASM は内訳がネイティブと違う（ネイティブで速い `gemm` や `exp`・`cbrt` が WASM では
@@ -304,7 +323,7 @@ web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
 | P4 | 自動スピン・電荷決定（UKS、探索の状態機械、level shift）+ 非収束時の発散アニメーション | 完了 |
 | P5 | 解析的勾配（Pulay 含む）+ 構造最適化アニメーション | 完了 |
 | P6 | 性能（ERI 微分の密度縮約、XC のスクリーニングとキャッシュ、探索グリッド、SIMD） | 完了 |
-| **P7** | **仕上げ（待ち時間の見せ方、SIMD 非対応ブラウザの案内、再現可能な WASM ビルド）** | **実装済み・手動 E2E と CI / Vercel の初回確認待ち** |
+| **P7** | **仕上げ（待ち時間の見せ方、SIMD 非対応ブラウザの案内、WASM ビルドの固定と CI での作り直し）** | **実装済み・手動 E2E と Vercel の再デプロイ確認待ち** |
 
 各フェーズ終了時点で Vercel にデプロイ可能な状態を保つ。
 
@@ -490,8 +509,10 @@ P5 はベンゼン一点 16.4 秒、H₂O 最適化 4.8 秒、CH₄ 最適化 11
   止まっていた → 0 秒。同じ関数・同じ入力なので値はビット単位で同じ
   （`the_reported_forces_are_those_of_the_final_structure` が `to_bits()` で比較）。
 - **SIMD 非対応は「検出して案内」**（ユーザー判断）。比較した 3 案と実測は下の表。
-- **生成物の再現性**（規約参照）。P6 までの CI の PR 検査は、ローカルでビルドした成果物に対して
-  必ず落ちる状態だった（絶対パス・`stable` の rustc・`latest` の wasm-pack）。
+- **生成物と CI**（規約参照）。P6 までの CI の PR 検査は、ローカルでビルドした成果物に対して
+  必ず落ちる状態だった（絶対パス・`stable` の rustc・`latest` の wasm-pack）。P7 で同じ OS の
+  中では一致するようにしたが、最初の CI の実行で Mac と Linux では一致しないことが分かり、
+  PR でも作り直してコミットする形に変えた。
 - **wasm-pack のリポジトリは `wasm-bindgen/wasm-pack` に移った**（旧 `rustwasm/wasm-pack` の URL は
   リダイレクトされる）。CI の `jetli/wasm-pack-action@v0.4.0` は旧 URL から取るが、v0.15.0 の
   `x86_64-unknown-linux-musl` は取れることを確認した。
@@ -540,11 +561,9 @@ JS グルーは同一）:
 ### P7 で残したもの
 
 - **手動 E2E（Firefox、ユーザー）。** 3D の見た目と、進捗カードが分子に重なる具合。
-- **CI の初回実行。** リモートが無く、この環境からは走らせていない。Linux でも成果物が一致する
-  ことは、PR の「Check committed artifact is current」が通って初めて確定する（macOS 上で
-  パス・`CARGO_HOME` を変えた再ビルドでは一致済み）。落ちたら差分のバイナリに残っている
-  文字列（`strings` で見る）から原因を探す。
-- **Vercel での確認。** デプロイ先の URL で `.wasm` の Content-Type と、ベンゼンの所要時間。
+- **Vercel の再デプロイ（ユーザー）。** Root Directory を直下にしてから、デプロイ先の URL で
+  `.wasm` の Content-Type と、ベンゼンの所要時間。
+- **PR での作り直しコミット**は、まだ一度も PR で走らせていない（main への push では動いた）。
 - 任意: 重み微分・マルチスレッド化・`OPTIMIZE_BUDGET_SECONDS` の見直し（「P6 以降に残したもの」）。
 
 ### P3・P4 の実装メモ

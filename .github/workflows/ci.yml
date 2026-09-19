@@ -8,11 +8,21 @@ on:
 # The WASM artifact is committed to the repository so Vercel only has to run
 # Vite: its build image has no Rust toolchain.
 #
-# Checking that artifact on a pull request means rebuilding it here and
-# comparing bytes, which only works if the build is the same everywhere. The
-# Rust version (rust-toolchain.toml) and the wasm-pack version (which decides
-# wasm-opt's) are pinned below for that reason, and scripts/build-wasm.sh keeps
-# the builder's home directory out of the binary. Bump them together.
+# The artifact that ships is the one built here, on Linux. A build on a Mac is
+# the same program - same code, same strings, same results to the last digit -
+# but its data section is laid out in a different order (most likely because
+# the per-crate hashes cargo derives differ between host platforms), so its
+# bytes never match this one. So the wasm job rebuilds on every push to main
+# and every pull request and commits the result wherever it differs, rather
+# than failing the check.
+#
+# The Rust version (rust-toolchain.toml) and the wasm-pack version (which
+# decides wasm-opt's) are pinned so that two Linux builds do match, and
+# scripts/build-wasm.sh keeps the builder's home directory out of the binary.
+# Bump the versions together.
+#
+# A push made with GITHUB_TOKEN starts no new workflow run, so the refreshing
+# commit is not checked again; it changes nothing but web/src/wasm.
 permissions:
   contents: write
 
@@ -33,6 +43,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A pull request is otherwise checked out as a detached merge commit;
+          # the branch itself is what a refreshed artifact can be pushed to.
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
@@ -43,23 +57,25 @@ jobs:
           version: v0.15.0
       - run: npm run build:wasm
 
-      # On a pull request the committed artifact must already match the source.
-      - name: Check committed artifact is current
-        if: github.event_name == 'pull_request'
-        run: |
-          if ! git diff --quiet -- web/src/wasm; then
-            echo "web/src/wasm is stale. Run 'npm run build:wasm' and commit the result." >&2
-            git diff --stat -- web/src/wasm >&2
-            exit 1
-          fi
-
-      # On main, refresh it automatically.
+      # Whatever was committed - a Mac build, or one from before the last
+      # change to the Rust source - is replaced by this build, on main and on a
+      # pull request's branch alike.
       - name: Commit refreshed artifact
-        if: github.event_name == 'push'
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
         run: |
           if git diff --quiet -- web/src/wasm; then
             echo "Artifact already up to date."
             exit 0
+          fi
+          git diff --stat -- web/src/wasm
+          # The token cannot push to a fork, so there the only thing left to
+          # do is to say so.
+          if [ "$EVENT" = pull_request ] && [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "web/src/wasm differs from the Linux build, and a fork cannot be updated from here." >&2
+            exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
