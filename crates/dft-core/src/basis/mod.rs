@@ -242,13 +242,24 @@ impl Shell {
     }
 }
 
-fn powi(x: f64, n: u8) -> f64 {
+pub(crate) fn powi(x: f64, n: u8) -> f64 {
     match n {
         0 => 1.0,
         1 => x,
         2 => x * x,
         _ => x.powi(n as i32),
     }
+}
+
+/// Shells on one nucleus with identical exponents. See [`BasisSet::groups`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellGroup {
+    /// Indices into [`BasisSet::shells`], in basis order.
+    pub shells: Vec<usize>,
+    /// The atom the group sits on.
+    pub center: usize,
+    /// Highest angular momentum among the members.
+    pub max_l: u8,
 }
 
 /// All shells of a molecule, in the order that fixes basis-function indices:
@@ -342,6 +353,38 @@ impl BasisSet {
     /// Highest angular momentum present, which sizes the integral scratch space.
     pub fn max_angular_momentum(&self) -> u8 {
         self.shells.iter().map(|s| s.l).max().unwrap_or(0)
+    }
+
+    /// The shells grouped by what they share: a nucleus and an identical set of
+    /// exponents. STO-3G's 2s and 2p (and 3s and 3p) are one group each.
+    ///
+    /// Every Gaussian of a group is the same function up to its polynomial
+    /// prefactor, so anything computed per primitive - a Gaussian product for
+    /// the integrals, `exp(-a r^2)` on the grid - is computed once per group
+    /// rather than once per shell. Groups are listed in the order of their
+    /// first shell.
+    pub fn groups(&self) -> Vec<ShellGroup> {
+        let mut groups: Vec<ShellGroup> = Vec::new();
+        for (index, shell) in self.shells.iter().enumerate() {
+            let existing = groups.iter_mut().find(|group| {
+                let first = &self.shells[group.shells[0]];
+                first.center == shell.center
+                    && first.origin == shell.origin
+                    && first.exponents == shell.exponents
+            });
+            match existing {
+                Some(group) => {
+                    group.shells.push(index);
+                    group.max_l = group.max_l.max(shell.l);
+                }
+                None => groups.push(ShellGroup {
+                    shells: vec![index],
+                    center: shell.center,
+                    max_l: shell.l,
+                }),
+            }
+        }
+        groups
     }
 
     /// Evaluates every basis function at `point` (Bohr) into `out`, which must

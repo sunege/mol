@@ -9,20 +9,26 @@
 //! V_xc_mu_nu = sum_i w_i v_xc(rho_i) phi_mu(r_i) phi_nu(r_i)
 //! ```
 //!
+//! Each block only carries the basis functions that are not negligible on it
+//! (see [`blocks`]); the density matrix is cut down to those rows and columns,
+//! the products are formed at that size (see [`kernels`]), and the result is
+//! added back into the full matrix. On benzene's fine grid that leaves out a
+//! quarter of all the basis values, and the products shrink with the square.
+//!
 //! The unrestricted case is the same expression with two densities and two
 //! potentials; the functional itself is spin-polarised throughout, so only the
 //! assembly differs.
 
+mod blocks;
+mod kernels;
 pub mod lda;
 
-use nalgebra::{DMatrix, DMatrixView};
+use nalgebra::DMatrix;
 
 use crate::basis::BasisSet;
 use crate::grid::MolecularGrid;
-
-/// Grid points per block. Big enough for the matrix products to pay off, small
-/// enough that the basis-value block stays in cache.
-const BLOCK: usize = 128;
+pub use blocks::BasisOnGrid;
+use blocks::{BlockBasis, BLOCK, SCREENING};
 
 /// Exchange-correlation energy, its potential matrix, and the electron count the
 /// grid produced.
@@ -50,31 +56,42 @@ pub struct UnrestrictedXcResult {
 /// Exchange-correlation energy and potential for a spin-restricted density
 /// matrix (the total density, so `rho_alpha = rho_beta = rho/2`).
 pub fn restricted(basis: &BasisSet, grid: &MolecularGrid, density: &DMatrix<f64>) -> XcResult {
-    let n = basis.n_functions();
-    debug_assert_eq!(density.nrows(), n);
+    restricted_on(&BasisOnGrid::new(basis, grid), grid, density)
+}
 
+/// The same with the basis already evaluated on the grid - what an SCF uses,
+/// evaluating once and iterating many times.
+pub fn restricted_on(
+    on_grid: &BasisOnGrid,
+    grid: &MolecularGrid,
+    density: &DMatrix<f64>,
+) -> XcResult {
+    let n = density.nrows();
     let mut potential = DMatrix::zeros(n, n);
     let mut energy = 0.0;
     let mut n_electrons = 0.0;
-    let mut scaled = DMatrix::zeros(n, BLOCK);
+    let mut work = Workspace::default();
 
-    for_each_block(basis, grid, |phi, weights| {
-        let count = weights.len();
-        // D phi, so that rho_j is the dot product of column j with phi's.
-        let weighted = density * phi;
-        let mut block_scaled = scaled.view_mut((0, 0), (n, count));
+    for block in on_grid.blocks() {
+        let (m, count) = (block.functions.len(), block.count);
+        let weights = &grid.weights[block.start..block.start + count];
+        work.densities(0, density, block.functions, block.values, count);
+        let scaled = &mut work.scaled[0];
+        grow(scaled, m * count);
         for j in 0..count {
-            let rho = column_dot(&phi, &weighted, j).max(0.0);
+            let column = j * m..(j + 1) * m;
+            let rho = work.rho[0][j].max(0.0);
             let (exc, v) = lda::lda_restricted(rho);
             energy += weights[j] * rho * exc;
             n_electrons += weights[j] * rho;
             let factor = weights[j] * v;
-            for mu in 0..n {
-                block_scaled[(mu, j)] = factor * phi[(mu, j)];
+            for (target, &value) in scaled[column.clone()].iter_mut().zip(&block.values[column]) {
+                *target = factor * value;
             }
         }
-        potential.gemm(1.0, &block_scaled, &phi.transpose(), 1.0);
-    });
+        let (scaled, scratch) = (&work.scaled[0], &mut work.block);
+        add_product(&mut potential, block.runs, scaled, block.values, m, count, scratch);
+    }
 
     XcResult { energy, potential, n_electrons }
 }
@@ -87,40 +104,59 @@ pub fn unrestricted(
     alpha: &DMatrix<f64>,
     beta: &DMatrix<f64>,
 ) -> UnrestrictedXcResult {
-    let n = basis.n_functions();
-    debug_assert_eq!(alpha.nrows(), n);
+    unrestricted_on(&BasisOnGrid::new(basis, grid), grid, alpha, beta)
+}
+
+/// The same with the basis already evaluated on the grid.
+pub fn unrestricted_on(
+    on_grid: &BasisOnGrid,
+    grid: &MolecularGrid,
+    alpha: &DMatrix<f64>,
+    beta: &DMatrix<f64>,
+) -> UnrestrictedXcResult {
+    let n = alpha.nrows();
     debug_assert_eq!(beta.nrows(), n);
 
     let mut potential_alpha = DMatrix::zeros(n, n);
     let mut potential_beta = DMatrix::zeros(n, n);
     let mut energy = 0.0;
     let mut n_electrons = 0.0;
-    let mut scaled_alpha = DMatrix::zeros(n, BLOCK);
-    let mut scaled_beta = DMatrix::zeros(n, BLOCK);
+    let mut work = Workspace::default();
 
-    for_each_block(basis, grid, |phi, weights| {
-        let count = weights.len();
-        let weighted_alpha = alpha * phi;
-        let weighted_beta = beta * phi;
-        let mut block_alpha = scaled_alpha.view_mut((0, 0), (n, count));
-        let mut block_beta = scaled_beta.view_mut((0, 0), (n, count));
+    for block in on_grid.blocks() {
+        let (m, count) = (block.functions.len(), block.count);
+        let weights = &grid.weights[block.start..block.start + count];
+        work.densities(0, alpha, block.functions, block.values, count);
+        work.densities(1, beta, block.functions, block.values, count);
+        for scaled in &mut work.scaled {
+            grow(scaled, m * count);
+        }
         for j in 0..count {
-            let rho_alpha = column_dot(&phi, &weighted_alpha, j).max(0.0);
-            let rho_beta = column_dot(&phi, &weighted_beta, j).max(0.0);
+            let column = j * m..(j + 1) * m;
+            let values = &block.values[column.clone()];
+            let rho_alpha = work.rho[0][j].max(0.0);
+            let rho_beta = work.rho[1][j].max(0.0);
             let point = lda::lda(rho_alpha, rho_beta);
             let rho = rho_alpha + rho_beta;
             energy += weights[j] * rho * point.exc;
             n_electrons += weights[j] * rho;
             let factor_alpha = weights[j] * point.v_alpha;
             let factor_beta = weights[j] * point.v_beta;
-            for mu in 0..n {
-                block_alpha[(mu, j)] = factor_alpha * phi[(mu, j)];
-                block_beta[(mu, j)] = factor_beta * phi[(mu, j)];
+            let [scaled_alpha, scaled_beta] = &mut work.scaled;
+            for ((a, b), &value) in scaled_alpha[column.clone()]
+                .iter_mut()
+                .zip(&mut scaled_beta[column.clone()])
+                .zip(values)
+            {
+                *a = factor_alpha * value;
+                *b = factor_beta * value;
             }
         }
-        potential_alpha.gemm(1.0, &block_alpha, &phi.transpose(), 1.0);
-        potential_beta.gemm(1.0, &block_beta, &phi.transpose(), 1.0);
-    });
+        let ([scaled_alpha, scaled_beta], scratch) = (&work.scaled, &mut work.block);
+        let values = block.values;
+        add_product(&mut potential_alpha, block.runs, scaled_alpha, values, m, count, scratch);
+        add_product(&mut potential_beta, block.runs, scaled_beta, values, m, count, scratch);
+    }
 
     UnrestrictedXcResult { energy, potential_alpha, potential_beta, n_electrons }
 }
@@ -157,131 +193,200 @@ pub fn unrestricted_gradient(
     beta: &DMatrix<f64>,
     n_atoms: usize,
 ) -> Vec<[f64; 3]> {
-    let n = basis.n_functions();
-    debug_assert_eq!(alpha.nrows(), n);
-    debug_assert_eq!(beta.nrows(), n);
-
-    // sum_g w_g v_sigma(r_g) (d_k phi_mu)(r_g) phi_nu(r_g), one per direction
-    // and spin. Not symmetric: only the bra is differentiated.
-    let mut weighted_alpha: [DMatrix<f64>; 3] =
-        std::array::from_fn(|_| DMatrix::zeros(n, n));
-    let mut weighted_beta: [DMatrix<f64>; 3] = std::array::from_fn(|_| DMatrix::zeros(n, n));
-
-    let mut values = vec![0.0; n * BLOCK];
-    let mut dx = vec![0.0; n * BLOCK];
-    let mut dy = vec![0.0; n * BLOCK];
-    let mut dz = vec![0.0; n * BLOCK];
-    let mut scaled = DMatrix::zeros(n, BLOCK);
-    let mut factors_alpha = vec![0.0; BLOCK];
-    let mut factors_beta = vec![0.0; BLOCK];
-
-    let mut start = 0;
-    while start < grid.len() {
-        let count = BLOCK.min(grid.len() - start);
-        for j in 0..count {
-            let point = grid.points[start + j];
-            let range = j * n..(j + 1) * n;
-            basis.evaluate_into(point, &mut values[range.clone()]);
-            basis.evaluate_gradient_into(
-                point,
-                &mut dx[range.clone()],
-                &mut dy[range.clone()],
-                &mut dz[range],
-            );
-        }
-        let phi = DMatrixView::from_slice(&values[..n * count], n, count);
-        let phi_t = phi.transpose();
-        let gradients = [
-            DMatrixView::from_slice(&dx[..n * count], n, count),
-            DMatrixView::from_slice(&dy[..n * count], n, count),
-            DMatrixView::from_slice(&dz[..n * count], n, count),
-        ];
-        let weights = &grid.weights[start..start + count];
-
-        let phi_alpha = alpha * phi;
-        let phi_beta = beta * phi;
-        for j in 0..count {
-            let rho_alpha = column_dot(&phi, &phi_alpha, j).max(0.0);
-            let rho_beta = column_dot(&phi, &phi_beta, j).max(0.0);
-            let point = lda::lda(rho_alpha, rho_beta);
-            factors_alpha[j] = weights[j] * point.v_alpha;
-            factors_beta[j] = weights[j] * point.v_beta;
-        }
-
-        for k in 0..3 {
-            for (factors, target) in [
-                (&factors_alpha, &mut weighted_alpha[k]),
-                (&factors_beta, &mut weighted_beta[k]),
-            ] {
-                let mut block = scaled.view_mut((0, 0), (n, count));
-                for j in 0..count {
-                    for mu in 0..n {
-                        block[(mu, j)] = factors[j] * gradients[k][(mu, j)];
-                    }
-                }
-                target.gemm(1.0, &block, &phi_t, 1.0);
-            }
-        }
-        start += count;
-    }
-
-    let centers = basis.function_centers();
-    let mut gradient = vec![[0.0; 3]; n_atoms];
-    for mu in 0..n {
-        let atom = centers[mu];
-        for k in 0..3 {
-            let mut sum = 0.0;
-            for nu in 0..n {
-                sum += alpha[(mu, nu)] * weighted_alpha[k][(mu, nu)]
-                    + beta[(mu, nu)] * weighted_beta[k][(mu, nu)];
-            }
-            gradient[atom][k] -= 2.0 * sum;
-        }
-    }
-    gradient
+    gradient_screened(basis, grid, &[alpha, beta], n_atoms, SCREENING)
 }
 
-/// The same for a spin-restricted density, where both channels hold half of it.
+/// The same for a spin-restricted density: one channel holding both spins.
+///
+/// Both spins see the same potential and hold half the density each, so the
+/// sum over spins collapses to the total density with `v_xc` once - half the
+/// work of running the unrestricted expression on two identical halves.
 pub fn restricted_gradient(
     basis: &BasisSet,
     grid: &MolecularGrid,
     density: &DMatrix<f64>,
     n_atoms: usize,
 ) -> Vec<[f64; 3]> {
-    let half = density * 0.5;
-    unrestricted_gradient(basis, grid, &half, &half, n_atoms)
+    gradient_screened(basis, grid, &[density], n_atoms, SCREENING)
 }
 
-/// Walks the grid in blocks, handing each block's basis values and weights to
-/// `consume`.
+/// `densities` is `[total]` for a restricted calculation, `[alpha, beta]` for an
+/// unrestricted one.
 ///
-/// Column `j` of the block holds every basis function evaluated at point `j`,
-/// which is what makes each column contiguous and each product a gemm.
-fn for_each_block(
+/// The expression above never needs a matrix: its inner sum over `nu` is
+/// `(D phi)_mu` at the grid point, which the density at that point is built
+/// from anyway. So each block contributes
+///
+/// ```text
+/// -2 sum_g f_g (d_k phi_mu)(r_g) (D phi)_mu(r_g)      for each mu on the block
+/// ```
+///
+/// with `f_g = w_g v_xc(r_g)`: a pass over the block's values rather than a
+/// product of two of them.
+fn gradient_screened(
     basis: &BasisSet,
     grid: &MolecularGrid,
-    mut consume: impl FnMut(DMatrixView<f64>, &[f64]),
-) {
+    densities: &[&DMatrix<f64>],
+    n_atoms: usize,
+    threshold: f64,
+) -> Vec<[f64; 3]> {
     let n = basis.n_functions();
-    let mut values = vec![0.0; n * BLOCK];
-    let mut start = 0;
-    while start < grid.len() {
-        let count = BLOCK.min(grid.len() - start);
-        for j in 0..count {
-            basis.evaluate_into(grid.points[start + j], &mut values[j * n..(j + 1) * n]);
+    debug_assert!(densities.iter().all(|d| d.nrows() == n));
+    let restricted = densities.len() == 1;
+
+    let centers = basis.function_centers();
+    let mut gradient = vec![[0.0; 3]; n_atoms];
+    let mut blocks = BlockBasis::new(basis, threshold);
+    let mut work = Workspace::default();
+    let mut factors = [vec![0.0; BLOCK], vec![0.0; BLOCK]];
+    // Per function of the block, the three components summed over its points.
+    let mut per_function: Vec<[f64; 3]> = Vec::new();
+
+    for (points, weights) in grid.points.chunks(BLOCK).zip(grid.weights.chunks(BLOCK)) {
+        let m = blocks.load(points, true);
+        if m == 0 {
+            continue;
         }
-        let phi = DMatrixView::from_slice(&values[..n * count], n, count);
-        consume(phi, &grid.weights[start..start + count]);
-        start += count;
+        let count = points.len();
+        for (slot, density) in densities.iter().enumerate() {
+            work.weighted(slot, density, &blocks.functions, &blocks.values[..m * count]);
+        }
+        for j in 0..count {
+            let column = j * m..(j + 1) * m;
+            let values = &blocks.values[column.clone()];
+            if restricted {
+                let rho = dot(values, &work.products[0][column]).max(0.0);
+                factors[0][j] = weights[j] * lda::lda_restricted(rho).1;
+            } else {
+                let rho_alpha = dot(values, &work.products[0][column.clone()]).max(0.0);
+                let rho_beta = dot(values, &work.products[1][column]).max(0.0);
+                let point = lda::lda(rho_alpha, rho_beta);
+                factors[0][j] = weights[j] * point.v_alpha;
+                factors[1][j] = weights[j] * point.v_beta;
+            }
+        }
+
+        per_function.clear();
+        per_function.resize(m, [0.0; 3]);
+        for slot in 0..densities.len() {
+            let products = &work.products[slot];
+            for (j, &factor) in factors[slot][..count].iter().enumerate() {
+                if factor == 0.0 {
+                    continue;
+                }
+                let column = j * m..(j + 1) * m;
+                for k in 0..3 {
+                    let slopes = &blocks.gradient[k][column.clone()];
+                    for ((total, &slope), &product) in
+                        per_function.iter_mut().zip(slopes).zip(&products[column.clone()])
+                    {
+                        total[k] += factor * slope * product;
+                    }
+                }
+            }
+        }
+        for (&mu, total) in blocks.functions.iter().zip(&per_function) {
+            let atom = centers[mu];
+            for k in 0..3 {
+                gradient[atom][k] -= 2.0 * total[k];
+            }
+        }
+    }
+    gradient
+}
+
+/// Scratch space for one block, kept across blocks so the loop allocates
+/// nothing once it has seen its largest block.
+#[derive(Default)]
+struct Workspace {
+    /// The density matrix cut down to the block's functions.
+    density: Vec<f64>,
+    /// `D phi` for up to two densities.
+    products: [Vec<f64>; 2],
+    /// The density at each point of the block, for up to two densities.
+    rho: [Vec<f64>; 2],
+    /// Weighted basis values (or derivatives) for up to two channels.
+    scaled: [Vec<f64>; 2],
+    /// A block-sized product before it is added into the full matrix.
+    block: Vec<f64>,
+}
+
+impl Workspace {
+    /// The density `D` at each point of the block, stored as `rho[slot]`.
+    fn densities(
+        &mut self,
+        slot: usize,
+        density: &DMatrix<f64>,
+        functions: &[usize],
+        phi: &[f64],
+        count: usize,
+    ) {
+        let m = functions.len();
+        kernels::doubled_lower_triangle(density, functions, &mut self.density);
+        let rho = &mut self.rho[slot];
+        grow(rho, count);
+        kernels::density_at_points(&self.density, m, &phi[..m * count], count, rho);
+    }
+
+    /// `D phi` restricted to the block's functions, stored as product `slot`.
+    fn weighted(&mut self, slot: usize, density: &DMatrix<f64>, functions: &[usize], phi: &[f64]) {
+        let m = functions.len();
+        let count = phi.len() / m.max(1);
+        self.density.clear();
+        self.density.extend(
+            functions.iter().flat_map(|&nu| functions.iter().map(move |&mu| density[(mu, nu)])),
+        );
+        let product = &mut self.products[slot];
+        grow(product, m * count);
+        kernels::times_density(&self.density, m, phi, count, product);
     }
 }
 
-/// `sum_mu phi[mu, j] * weighted[mu, j]`, the density at point `j` of a block.
-///
-/// Numerical noise can push this slightly negative in the far tail; the
-/// functional is only defined for a non-negative density, so callers clamp.
-fn column_dot(phi: &DMatrixView<f64>, weighted: &DMatrix<f64>, j: usize) -> f64 {
-    (0..phi.nrows()).map(|mu| phi[(mu, j)] * weighted[(mu, j)]).sum()
+/// `target[functions, functions] += scaled phi^T` for one block, where `runs`
+/// lists the block's functions as runs of consecutive basis indices (see
+/// `BlockBasis::runs`): a few slice additions per column rather than one
+/// indexed add per entry.
+fn add_product(
+    target: &mut DMatrix<f64>,
+    runs: &[(usize, usize, usize)],
+    scaled: &[f64],
+    phi: &[f64],
+    m: usize,
+    count: usize,
+    scratch: &mut Vec<f64>,
+) {
+    grow(scratch, m * m);
+    kernels::symmetric_product(scaled, phi, m, count, scratch);
+    let n = target.nrows();
+    let full = target.as_mut_slice();
+    for &(column_start, nu_first, columns) in runs {
+        for c in 0..columns {
+            let source = &scratch[(column_start + c) * m..(column_start + c + 1) * m];
+            let destination = &mut full[(nu_first + c) * n..(nu_first + c + 1) * n];
+            for &(row_start, mu_first, rows) in runs {
+                for (d, s) in destination[mu_first..mu_first + rows]
+                    .iter_mut()
+                    .zip(&source[row_start..row_start + rows])
+                {
+                    *d += s;
+                }
+            }
+        }
+    }
+}
+
+/// Makes `buffer` at least `len` long without touching what is already there:
+/// everything a block reads it has written first.
+fn grow(buffer: &mut Vec<f64>, len: usize) {
+    if buffer.len() < len {
+        buffer.resize(len, 0.0);
+    }
+}
+
+/// `sum_i a_i b_i`.
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 #[cfg(test)]
@@ -395,6 +500,76 @@ mod tests {
                     polarised.potential_alpha[(j, i)],
                     epsilon = 1e-14
                 );
+            }
+        }
+    }
+
+    /// Screening leaves out only what is provably below `1e-14`, so the energy,
+    /// both potentials and the gradient must come out as they do with every
+    /// function kept - on a molecule big enough that a lot is screened.
+    #[test]
+    fn screening_changes_nothing_that_matters() {
+        let mut atoms = Vec::new();
+        for i in 0..6 {
+            let angle = i as f64 * std::f64::consts::PI / 3.0;
+            atoms.push((6, [1.39 * angle.cos(), 1.39 * angle.sin(), 0.0]));
+            atoms.push((1, [2.48 * angle.cos(), 2.48 * angle.sin(), 0.0]));
+        }
+        let mol = Molecule::from_angstrom(&atoms).unwrap();
+        let basis = BasisSet::sto3g(&mol).unwrap();
+        let grid = grid::build(&mol, GridQuality::Coarse);
+        let n = basis.n_functions();
+        // Not a physical density, but a full one: every pair of functions
+        // contributes, so nothing can hide behind a zero.
+        let raw = DMatrix::from_fn(n, n, |i, j| 0.05 * ((i * 5 + j * 3) as f64).cos());
+        let alpha = (&raw + raw.transpose()) * 0.5 + DMatrix::identity(n, n) * 0.4;
+        let beta = &alpha * 0.8;
+
+        let screened_basis = BasisOnGrid::with_threshold(&basis, &grid, SCREENING);
+        let full_basis = BasisOnGrid::with_threshold(&basis, &grid, 0.0);
+        let screened = unrestricted_on(&screened_basis, &grid, &alpha, &beta);
+        let full = unrestricted_on(&full_basis, &grid, &alpha, &beta);
+        let gap = (screened.energy - full.energy).abs();
+        assert!(gap < 1e-12, "{} vs {}", screened.energy, full.energy);
+        assert!((&screened.potential_alpha - &full.potential_alpha).amax() < 1e-12);
+        assert!((&screened.potential_beta - &full.potential_beta).amax() < 1e-12);
+
+        let closed = restricted_on(&screened_basis, &grid, &alpha);
+        let closed_full = restricted_on(&full_basis, &grid, &alpha);
+        assert!((closed.energy - closed_full.energy).abs() < 1e-12);
+        assert!((&closed.potential - &closed_full.potential).amax() < 1e-12);
+
+        let atoms = mol.n_atoms();
+        let g = gradient_screened(&basis, &grid, &[&alpha, &beta], atoms, SCREENING);
+        let g_full = gradient_screened(&basis, &grid, &[&alpha, &beta], atoms, 0.0);
+        for (a, b) in g.iter().zip(&g_full) {
+            for k in 0..3 {
+                assert!((a[k] - b[k]).abs() < 1e-12, "gradient {} vs {}", a[k], b[k]);
+            }
+        }
+    }
+
+    /// The restricted gradient takes the one-channel shortcut; it has to be the
+    /// unrestricted expression evaluated on two equal halves.
+    #[test]
+    fn the_restricted_gradient_is_the_unrestricted_one_on_two_halves() {
+        let mol = Molecule::from_angstrom(&[
+            (8, [0.03, -0.11, 0.17]),
+            (1, [0.21, 0.88, -0.31]),
+            (1, [-0.05, -0.62, -0.83]),
+        ])
+        .unwrap();
+        let basis = BasisSet::sto3g(&mol).unwrap();
+        let grid = grid::build(&mol, GridQuality::Coarse);
+        let n = basis.n_functions();
+        let raw = DMatrix::from_fn(n, n, |i, j| 0.1 * ((i * 3 + j * 7) as f64).sin());
+        let density = (&raw + raw.transpose()) * 0.5 + DMatrix::identity(n, n);
+        let half = &density * 0.5;
+        let closed = restricted_gradient(&basis, &grid, &density, 3);
+        let open = unrestricted_gradient(&basis, &grid, &half, &half, 3);
+        for (a, b) in closed.iter().zip(&open) {
+            for k in 0..3 {
+                assert!((a[k] - b[k]).abs() < 1e-12 * (1.0 + b[k].abs()), "{} vs {}", a[k], b[k]);
             }
         }
     }

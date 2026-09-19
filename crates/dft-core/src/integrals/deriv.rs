@@ -30,10 +30,12 @@
 
 use nalgebra::DMatrix;
 
-use super::eri::{self, build_shell_pair_derivative, quartet, Derivative, ShellPair};
-use super::md::{HermiteE, HermiteR};
+#[cfg(test)]
+use super::eri::quartet;
+use super::eri::{self, build_shell_pair_derivative, Derivative, ShellPair};
+use super::md::{hermite_count, HermiteE, HermiteR};
 use super::onee::product_centre;
-use crate::basis::BasisSet;
+use crate::basis::{BasisSet, ShellGroup};
 use crate::molecule::Molecule;
 
 /// Schwarz threshold for the two-electron derivatives.
@@ -381,6 +383,33 @@ pub fn one_electron_gradient(
 /// density matrix.
 ///
 /// LDA has no exact exchange, so this is the whole two-electron gradient.
+///
+/// # How it is organised
+///
+/// The obvious route - form each derivative integral block, then contract it
+/// with the density - is what [`two_electron_gradient_by_quartets`] does, and
+/// it is the reference this is tested against. It computes twelve integral
+/// blocks per quartet (four centres, three directions), each rebuilding the R
+/// table from scratch, and it was forty times the cost of a whole SCF on
+/// benzene.
+///
+/// Nothing needs the individual integrals, though: only their contraction with
+/// `D` on both sides. So the density goes into the Hermite coefficients first,
+///
+/// ```text
+/// Ebar_tuv(ab) = sum_(mu in a, nu in b) D_mu_nu E^(mu nu)_tuv
+/// ```
+///
+/// and likewise for the six differentiated versions of each pair. What is left
+/// per primitive quartet is one R table and two small matrix-vector products
+/// against it - the ket side contracted for the bra derivatives, the bra side
+/// for the ket derivatives - followed by twelve dot products. The integral
+/// blocks never exist.
+///
+/// All four centres are still differentiated explicitly: the ket derivatives
+/// cost one more contraction, and inferring the fourth centre from translational
+/// invariance would turn `two_electron_gradient_is_translationally_invariant`
+/// into a tautology.
 pub fn two_electron_gradient(
     basis: &BasisSet,
     molecule: &Molecule,
@@ -389,25 +418,239 @@ pub fn two_electron_gradient(
 ) -> Vec<[f64; 3]> {
     let mut gradient = vec![[0.0; 3]; molecule.n_atoms()];
 
-    let pairs = eri::shell_pairs(basis);
-    // Six derivative pairs each: two shells, three directions. Building them
-    // once is what keeps the quartet loop from rebuilding the ket's coefficients
-    // for every bra it meets.
+    let groups = basis.groups();
+    let pairs = eri::shell_pairs(basis, &groups);
+    let contracted: Vec<DensityPair> = pairs
+        .iter()
+        .map(|pair| DensityPair::new(basis, &groups, pair, density))
+        .collect();
+
+    let mut r = HermiteR::new(4 * basis.max_angular_momentum() as usize + 1);
+    let mut ket_side = vec![0.0; r.offsets().len()];
+    let mut bra_side = vec![0.0; r.offsets().len()];
+
+    for (i, bra) in contracted.iter().enumerate() {
+        for (j, ket) in contracted.iter().enumerate().take(i + 1) {
+            if pairs[i].schwarz * pairs[j].schwarz < threshold {
+                continue;
+            }
+            // Every pair already stands for its transpose (see DensityPair), so
+            // what is left of the eight-fold symmetry is bra <-> ket: an
+            // off-diagonal quartet is counted twice, and the energy carries 1/2.
+            let weight = if i == j { 0.5 } else { 1.0 };
+
+            let order = bra.order + ket.order + 1;
+            let nb = hermite_count(bra.order);
+            let nb_raised = hermite_count(bra.order + 1);
+            let nk = hermite_count(ket.order);
+            let nk_raised = hermite_count(ket.order + 1);
+
+            let mut bra_terms = [0.0; 6];
+            let mut ket_terms = [0.0; 6];
+            for (pi, p) in pairs[i].primitives.iter().enumerate() {
+                for (qi, q) in pairs[j].primitives.iter().enumerate() {
+                    let alpha = p.exponent * q.exponent / (p.exponent + q.exponent);
+                    r.compute(
+                        order,
+                        alpha,
+                        [
+                            p.centre[0] - q.centre[0],
+                            p.centre[1] - q.centre[1],
+                            p.centre[2] - q.centre[2],
+                        ],
+                    );
+                    let r0 = r.r0();
+                    let offsets = r.offsets();
+                    let prefactor = eri::quartet_prefactor(p.exponent, q.exponent);
+
+                    // The ket contracted against R, up to one order above the
+                    // bra so the bra's derivatives can be dotted into it.
+                    let ket_plain = ket.plain_signed(qi);
+                    for (a, slot) in ket_side[..nb_raised].iter_mut().enumerate() {
+                        let base = offsets[a];
+                        let mut sum = 0.0;
+                        for (b, &c) in ket_plain.iter().enumerate() {
+                            sum += c * r0[base + offsets[b]];
+                        }
+                        *slot = sum;
+                    }
+                    // And the other way round, for the ket's derivatives.
+                    let bra_plain = bra.plain(pi);
+                    for (b, slot) in bra_side[..nk_raised].iter_mut().enumerate() {
+                        let base = offsets[b];
+                        let mut sum = 0.0;
+                        for (a, &c) in bra_plain.iter().enumerate() {
+                            sum += c * r0[base + offsets[a]];
+                        }
+                        *slot = sum;
+                    }
+                    debug_assert_eq!(ket_plain.len(), nk);
+                    debug_assert_eq!(bra_plain.len(), nb);
+
+                    for x in 0..6 {
+                        bra_terms[x] += prefactor * dot_slices(bra.derivative(pi, x), &ket_side);
+                        ket_terms[x] +=
+                            prefactor * dot_slices(ket.derivative_signed(qi, x), &bra_side);
+                    }
+                }
+            }
+
+            for x in 0..6 {
+                let (shell, axis) = (x / 3, x % 3);
+                gradient[bra.centers[shell]][axis] += weight * bra_terms[x];
+                gradient[ket.centers[shell]][axis] += weight * ket_terms[x];
+            }
+        }
+    }
+    gradient
+}
+
+/// One shell pair with the density folded into its Hermite coefficients, in
+/// every form the two-electron gradient reads it.
+///
+/// A pair of two different groups also stands for its transpose - `(ba|` has
+/// the same integrals as `(ab|` and the density is symmetric - so its
+/// coefficients carry a factor of two. A pair of a group with itself already
+/// lists `(mu, nu)` and `(nu, mu)` separately and carries none.
+struct DensityPair {
+    centers: [usize; 2],
+    /// Hermite order of the undifferentiated pair.
+    order: usize,
+    /// `[primitive][hermite_count(order)]`.
+    plain: Vec<f64>,
+    /// The same with the ket's alternating sign.
+    plain_signed: Vec<f64>,
+    /// `[primitive][6][hermite_count(order + 1)]`, the six derivatives ordered
+    /// first group x, y, z, then second group x, y, z.
+    derivatives: Vec<f64>,
+    derivatives_signed: Vec<f64>,
+}
+
+impl DensityPair {
+    fn new(
+        basis: &BasisSet,
+        groups: &[ShellGroup],
+        pair: &ShellPair,
+        density: &DMatrix<f64>,
+    ) -> Self {
+        let fold = if pair.group_a == pair.group_b { 1.0 } else { 2.0 };
+        let weights: Vec<f64> =
+            pair.functions.iter().map(|&(mu, nu)| fold * density[(mu, nu)]).collect();
+
+        // sum_c D_c E_c for every primitive, from either sign convention.
+        let contract = |source: &ShellPair, signed: bool| -> Vec<f64> {
+            let nh = source.n_hermite;
+            let values = if signed { &source.signed } else { &source.hermite };
+            let mut out = vec![0.0; source.primitives.len() * nh];
+            for (primitive, target) in out.chunks_exact_mut(nh).enumerate() {
+                for (component, &weight) in weights.iter().enumerate() {
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let start = (primitive * source.n_components + component) * nh;
+                    let coefficients = &values[start..start + nh];
+                    for &k in &source.support[component] {
+                        target[k] += weight * coefficients[k];
+                    }
+                }
+            }
+            out
+        };
+
+        let n_primitives = pair.primitives.len();
+        let nh_raised = hermite_count(pair.order + 1);
+        let mut derivatives = vec![0.0; n_primitives * 6 * nh_raised];
+        let mut derivatives_signed = derivatives.clone();
+        for x in 0..6 {
+            let raised = build_shell_pair_derivative(
+                basis,
+                groups,
+                pair.group_a,
+                pair.group_b,
+                Derivative { shell: x / 3, axis: x % 3 },
+            );
+            debug_assert_eq!(raised.n_hermite, nh_raised);
+            debug_assert_eq!(raised.primitives.len(), n_primitives);
+            for (signed, target) in
+                [(false, &mut derivatives), (true, &mut derivatives_signed)]
+            {
+                let values = contract(&raised, signed);
+                for primitive in 0..n_primitives {
+                    target[(primitive * 6 + x) * nh_raised..][..nh_raised]
+                        .copy_from_slice(&values[primitive * nh_raised..][..nh_raised]);
+                }
+            }
+        }
+
+        DensityPair {
+            centers: pair.centers,
+            order: pair.order,
+            plain: contract(pair, false),
+            plain_signed: contract(pair, true),
+            derivatives,
+            derivatives_signed,
+        }
+    }
+
+    fn plain(&self, primitive: usize) -> &[f64] {
+        let nh = hermite_count(self.order);
+        &self.plain[primitive * nh..(primitive + 1) * nh]
+    }
+
+    fn plain_signed(&self, primitive: usize) -> &[f64] {
+        let nh = hermite_count(self.order);
+        &self.plain_signed[primitive * nh..(primitive + 1) * nh]
+    }
+
+    fn derivative(&self, primitive: usize, which: usize) -> &[f64] {
+        let nh = hermite_count(self.order + 1);
+        &self.derivatives[(primitive * 6 + which) * nh..][..nh]
+    }
+
+    fn derivative_signed(&self, primitive: usize, which: usize) -> &[f64] {
+        let nh = hermite_count(self.order + 1);
+        &self.derivatives_signed[(primitive * 6 + which) * nh..][..nh]
+    }
+}
+
+/// `sum_i a_i b_i` over the length of `a`.
+#[inline]
+fn dot_slices(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// The two-electron gradient the direct way: every derivative integral block
+/// formed, then contracted with the density.
+///
+/// Twelve quartets per quartet, each rebuilding R - far too slow to run, which
+/// is why [`two_electron_gradient`] does not. It stays because it is the most
+/// literal transcription of the formula, and the fast version is held to it
+/// quartet for quartet.
+#[cfg(test)]
+pub(crate) fn two_electron_gradient_by_quartets(
+    basis: &BasisSet,
+    molecule: &Molecule,
+    density: &DMatrix<f64>,
+    threshold: f64,
+) -> Vec<[f64; 3]> {
+    let mut gradient = vec![[0.0; 3]; molecule.n_atoms()];
+
+    let groups = basis.groups();
+    let pairs = eri::shell_pairs(basis, &groups);
     let derivatives: Vec<Vec<ShellPair>> = pairs
         .iter()
         .map(|pair| {
-            let mut built = Vec::with_capacity(6);
-            for shell in 0..2 {
-                for axis in 0..3 {
-                    built.push(build_shell_pair_derivative(
+            (0..6)
+                .map(|x| {
+                    build_shell_pair_derivative(
                         basis,
-                        pair.shell_a,
-                        pair.shell_b,
-                        Derivative { shell, axis },
-                    ));
-                }
-            }
-            built
+                        &groups,
+                        pair.group_a,
+                        pair.group_b,
+                        Derivative { shell: x / 3, axis: x % 3 },
+                    )
+                })
+                .collect()
         })
         .collect();
 
@@ -415,11 +658,9 @@ pub fn two_electron_gradient(
     let mut scratch = Vec::new();
     let mut block = Vec::new();
 
-    // The density of each pair's block, flattened the way `quartet` lays its
-    // output out, so the contraction below is a plain double loop.
     let densities: Vec<Vec<f64>> = pairs
         .iter()
-        .map(|pair| pair_density(basis, pair, density))
+        .map(|pair| pair.functions.iter().map(|&(mu, nu)| density[(mu, nu)]).collect())
         .collect();
 
     for (i, bra) in pairs.iter().enumerate() {
@@ -427,14 +668,12 @@ pub fn two_electron_gradient(
             if bra.schwarz * ket.schwarz < threshold {
                 continue;
             }
-            // How many terms of the unrestricted sum this quartet stands for
-            // under the eight-fold permutation symmetry. The derivative shares
-            // that symmetry: permuting the indices does not move a nucleus.
+            // How many terms of the unrestricted sum this quartet stands for.
             let mut degeneracy = 1.0;
-            if bra.shell_a != bra.shell_b {
+            if bra.group_a != bra.group_b {
                 degeneracy *= 2.0;
             }
-            if ket.shell_a != ket.shell_b {
+            if ket.group_a != ket.group_b {
                 degeneracy *= 2.0;
             }
             if i != j {
@@ -442,67 +681,28 @@ pub fn two_electron_gradient(
             }
             let weight = 0.5 * degeneracy;
 
-            let centres = [
-                basis.shells[bra.shell_a].center,
-                basis.shells[bra.shell_b].center,
-                basis.shells[ket.shell_a].center,
-                basis.shells[ket.shell_b].center,
-            ];
-            for axis in 0..3 {
-                for shell in 0..2 {
-                    // Differentiate the bra pair, then the ket pair. All four
-                    // centres are computed rather than one of them inferred from
-                    // translational invariance, which leaves that identity free
-                    // to be a test.
-                    quartet(
-                        &derivatives[i][shell * 3 + axis],
-                        ket,
-                        &mut r,
-                        &mut scratch,
-                        &mut block,
-                    );
-                    gradient[centres[shell]][axis] +=
-                        weight * contract(&block, &densities[i], &densities[j]);
+            for x in 0..6 {
+                let (shell, axis) = (x / 3, x % 3);
+                quartet(&derivatives[i][x], ket, &mut r, &mut scratch, &mut block);
+                gradient[bra.centers[shell]][axis] +=
+                    weight * contract(&block, &densities[i], &densities[j]);
 
-                    quartet(
-                        bra,
-                        &derivatives[j][shell * 3 + axis],
-                        &mut r,
-                        &mut scratch,
-                        &mut block,
-                    );
-                    gradient[centres[2 + shell]][axis] +=
-                        weight * contract(&block, &densities[i], &densities[j]);
-                }
+                quartet(bra, &derivatives[j][x], &mut r, &mut scratch, &mut block);
+                gradient[ket.centers[shell]][axis] +=
+                    weight * contract(&block, &densities[i], &densities[j]);
             }
         }
     }
     gradient
 }
 
-/// Density-matrix entries of one shell pair, in the component order
-/// [`quartet`] writes.
-fn pair_density(basis: &BasisSet, pair: &ShellPair, density: &DMatrix<f64>) -> Vec<f64> {
-    let offset_a = basis.offset(pair.shell_a);
-    let offset_b = basis.offset(pair.shell_b);
-    let nb = basis.shells[pair.shell_b].n_components();
-    (0..pair.n_components)
-        .map(|component| density[(offset_a + component / nb, offset_b + component % nb)])
-        .collect()
-}
-
 /// `sum_bra sum_ket D_bra D_ket block`.
+#[cfg(test)]
 fn contract(block: &[f64], bra: &[f64], ket: &[f64]) -> f64 {
     let mut total = 0.0;
     for (bc, &d_bra) in bra.iter().enumerate() {
-        if d_bra == 0.0 {
-            continue;
-        }
         let row = &block[bc * ket.len()..(bc + 1) * ket.len()];
-        let mut inner = 0.0;
-        for (value, &d_ket) in row.iter().zip(ket) {
-            inner += value * d_ket;
-        }
+        let inner: f64 = row.iter().zip(ket).map(|(value, d_ket)| value * d_ket).sum();
         total += d_bra * inner;
     }
     total
@@ -640,6 +840,27 @@ mod tests {
             finite_difference::max_component(&numeric) > 0.1,
             "nothing to compare against"
         );
+    }
+
+    /// The density-contracted gradient against the literal one that forms every
+    /// derivative integral first. Same quartets, same screening, a different
+    /// order of summation - so they agree to rounding, and a slip in how the
+    /// density is folded into the Hermite coefficients shows up here with the
+    /// atom and axis it hit.
+    #[test]
+    fn density_contracted_gradient_matches_the_integral_by_integral_one() {
+        let molecule = awkward();
+        for (name, basis) in [
+            ("STO-3G", BasisSet::sto3g(&molecule).unwrap()),
+            ("d shells", with_d_functions(&molecule)),
+        ] {
+            let density = probe_density(basis.n_functions());
+            let fast = two_electron_gradient(&basis, &molecule, &density, 0.0);
+            let slow = two_electron_gradient_by_quartets(&basis, &molecule, &density, 0.0);
+            let worst = max_deviation(&fast, &slow);
+            let scale = finite_difference::max_component(&slow);
+            assert!(worst < 1e-12 * scale.max(1.0), "{name}: differs by {worst:.3e}");
+        }
     }
 
     #[test]

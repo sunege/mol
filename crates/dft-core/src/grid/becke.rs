@@ -14,10 +14,17 @@ use crate::constants::BOHR_PER_ANGSTROM;
 use crate::element;
 use crate::molecule::Molecule;
 
-/// Becke's smoothing polynomial, iterated three times as the paper recommends.
-fn smooth_step(mu: f64) -> f64 {
+/// Becke's smoothing polynomial `f(f(f(mu)))`, iterated three times as the
+/// paper recommends. The cell function is `s(mu) = (1 - g(mu)) / 2`.
+fn smoothing(mu: f64) -> f64 {
     let f = |x: f64| 1.5 * x - 0.5 * x * x * x;
-    0.5 * (1.0 - f(f(f(mu))))
+    f(f(f(mu)))
+}
+
+/// Becke's step function `s(mu)`.
+#[cfg(test)]
+fn smooth_step(mu: f64) -> f64 {
+    0.5 * (1.0 - smoothing(mu))
 }
 
 /// Precomputed geometry for the cell weights of one molecule.
@@ -32,6 +39,8 @@ pub struct BeckePartition {
     /// allocated per call: `weights` runs once per grid point, tens of thousands
     /// of times per molecule.
     distance: Vec<f64>,
+    /// `s(nu_AB)` for the current point, row-major `n x n`.
+    step: Vec<f64>,
 }
 
 impl BeckePartition {
@@ -55,14 +64,27 @@ impl BeckePartition {
                 .sqrt();
                 inverse_distance[a * n + b] = 1.0 / d;
 
-                let chi = radius(molecule.atoms[a].z) / radius(molecule.atoms[b].z);
-                let u = (chi - 1.0) / (chi + 1.0);
-                // a = u / (u^2 - 1), capped at Becke's recommended 0.5.
-                let value = u / (u * u - 1.0);
-                adjustment[a * n + b] = value.clamp(-0.5, 0.5);
+                // Antisymmetric by construction: swapping the atoms inverts
+                // chi and flips the sign of u and of a. It is computed once per
+                // pair and mirrored, so the identity `weights` relies on holds
+                // exactly rather than to the last bit.
+                if a < b {
+                    let chi = radius(molecule.atoms[a].z) / radius(molecule.atoms[b].z);
+                    let u = (chi - 1.0) / (chi + 1.0);
+                    // a = u / (u^2 - 1), capped at Becke's recommended 0.5.
+                    let value = (u / (u * u - 1.0)).clamp(-0.5, 0.5);
+                    adjustment[a * n + b] = value;
+                    adjustment[b * n + a] = -value;
+                }
             }
         }
-        BeckePartition { n, inverse_distance, adjustment, distance: vec![0.0; n] }
+        BeckePartition {
+            n,
+            inverse_distance,
+            adjustment,
+            distance: vec![0.0; n],
+            step: vec![0.0; n * n],
+        }
     }
 
     /// Fills `out` with the cell weight of every atom at `point`; the values sum
@@ -86,6 +108,21 @@ impl BeckePartition {
             .sqrt();
         }
 
+        // One smoothing per unordered pair. The adjustment is antisymmetric
+        // (`a_BA = -a_AB`) and so is `mu`, so `nu_BA = -nu_AB`, and because the
+        // polynomial is odd, `s(nu_BA) = (1 + g(nu_AB)) / 2`: both halves of the
+        // pair come from one evaluation, without the cancellation of `1 - s`.
+        let step = &mut self.step;
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let mu = (distance[a] - distance[b]) * self.inverse_distance[a * n + b];
+                let nu = mu + self.adjustment[a * n + b] * (1.0 - mu * mu);
+                let g = smoothing(nu);
+                step[a * n + b] = 0.5 * (1.0 - g);
+                step[b * n + a] = 0.5 * (1.0 + g);
+            }
+        }
+
         let mut total = 0.0;
         for a in 0..n {
             let mut cell = 1.0;
@@ -93,9 +130,7 @@ impl BeckePartition {
                 if a == b {
                     continue;
                 }
-                let mu = (distance[a] - distance[b]) * self.inverse_distance[a * n + b];
-                let nu = mu + self.adjustment[a * n + b] * (1.0 - mu * mu);
-                cell *= smooth_step(nu);
+                cell *= step[a * n + b];
                 if cell == 0.0 {
                     break;
                 }

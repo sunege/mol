@@ -371,10 +371,11 @@ pub fn scf(z: &[u8], xyz_angstrom: &[f64]) -> Result<Calculation, JsValue> {
 /// tested between steps, so a step that never returns is never seen - and the
 /// real control is the 中止 button, which terminates the worker outright.
 /// All it can actually do is truncate a run that is making progress, so it is
-/// set beyond what the largest supported molecule needs: benzene relaxes in
-/// fifteen to twenty-five minutes on the fine grid today, and being cut off
-/// three minutes in would mean the button never finishes the one molecule the
-/// scope names as its upper bound.
+/// set far beyond what the largest supported molecule needs. Benzene relaxes in
+/// about fifteen seconds since phase 6 (it took fifteen to twenty-five minutes
+/// before), so there is now room to tighten this; it has been left alone because
+/// a backstop that fires on a healthy calculation is worse than one that fires
+/// late.
 const OPTIMIZE_BUDGET_SECONDS: f64 = 1800.0;
 
 /// Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
@@ -397,13 +398,19 @@ pub fn optimize(
     on_step: &js_sys::Function,
 ) -> Result<Calculation, JsValue> {
     let molecule = build_molecule(z, xyz_angstrom)?;
-    let mut system = System::build(molecule, opt::OPTIMIZER_GRID)
+    // The spin state is chosen on the grid a single point uses and only the
+    // winner is solved again on the optimiser's finer one: the choice does not
+    // depend on the grid, and every losing state tried on the fine grid was
+    // most of the first step's cost (see `driver::solve_then_refine`).
+    let fine = dft_core::grid::build(&molecule, opt::OPTIMIZER_GRID);
+    let mut system = System::build(molecule, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
 
     let search_deadline = js_sys::Date::now() + SEARCH_BUDGET_SECONDS * 1000.0;
-    let outcome = driver::solve(&mut system, &DriverOptions::default(), &mut || {
-        js_sys::Date::now() < search_deadline
-    });
+    let outcome =
+        driver::solve_then_refine(&mut system, fine, &DriverOptions::default(), &mut || {
+            js_sys::Date::now() < search_deadline
+        });
     let state = outcome.state;
     let attempts = outcome.attempts.len();
 

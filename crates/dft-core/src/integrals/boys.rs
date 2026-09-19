@@ -13,6 +13,23 @@
 //!   recursion. Upward is unstable in general because it subtracts `e^-T` from a
 //!   comparable quantity, but for `T >= 20` the two differ by many orders of
 //!   magnitude and it is accurate to machine precision.
+//!
+//! The series in the middle regime is exact but slow - near `T = 20` it runs to
+//! a hundred terms, each with a division - and every primitive quartet of every
+//! two-electron integral asks for it. So below `T = 20` the values actually
+//! handed out come from a table of the series on a grid of spacing `0.05`,
+//! carried to the requested `T` by a Taylor expansion. The expansion needs no
+//! new ingredient, because the Boys functions are each other's derivatives:
+//!
+//! ```text
+//! dF_n/dT = -F_(n+1)   =>   F_n(T_i + d) = sum_k F_(n+k)(T_i) (-d)^k / k!
+//! ```
+//!
+//! With `|d| <= 0.025` the first term left out is below `0.025^7 / 7!`, about
+//! `1e-15`, of the value. The table is computed from the series the first time
+//! it is needed, not written down, and a test holds the two together.
+
+use std::sync::OnceLock;
 
 /// Below this, `T` is indistinguishable from zero at double precision after two
 /// series terms.
@@ -27,10 +44,93 @@ const LARGE: f64 = 20.0;
 /// precision.
 const ASYMPTOTIC_TERMS: usize = 6;
 
+/// Spacing of the tabulated grid on `[0, LARGE]`.
+const TABLE_STEP: f64 = 0.05;
+
+/// Taylor terms used to move off a grid point. See the module note for why
+/// seven are enough.
+const TAYLOR_TERMS: usize = 7;
+
+/// Highest order served from the table. The integrals need `4 l_max + 1`: 5 for
+/// STO-3G's p shells, 9 once d functions arrive. Anything higher falls back to
+/// the series.
+const TABLE_MAX_ORDER: usize = 16;
+
+/// `F_0 .. F_(TABLE_MAX_ORDER + TAYLOR_TERMS - 1)` at every grid point, one row
+/// per point.
+struct Table {
+    width: usize,
+    values: Vec<f64>,
+}
+
+fn table() -> &'static Table {
+    static TABLE: OnceLock<Table> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let width = TABLE_MAX_ORDER + TAYLOR_TERMS;
+        let rows = (LARGE / TABLE_STEP).round() as usize + 1;
+        let mut values = vec![0.0; rows * width];
+        for (i, row) in values.chunks_exact_mut(width).enumerate() {
+            series_into(i as f64 * TABLE_STEP, row);
+        }
+        Table { width, values }
+    })
+}
+
 /// Fills `out` with `F_0(t) .. F_n(t)`, where `n = out.len() - 1`.
 pub fn boys_into(t: f64, out: &mut [f64]) {
     debug_assert!(!out.is_empty());
     debug_assert!(t >= 0.0, "T = alpha * R^2 is never negative");
+    let n_max = out.len() - 1;
+
+    if t > LARGE {
+        asymptotic_into(t, out);
+        return;
+    }
+    if n_max > TABLE_MAX_ORDER {
+        series_into(t, out);
+        return;
+    }
+
+    let table = table();
+    let nearest = (t / TABLE_STEP).round();
+    let row = &table.values[nearest as usize * table.width..][..table.width];
+    // (-d)^k / k!, shared by every order.
+    let step = nearest * TABLE_STEP - t;
+    let mut factors = [0.0; TAYLOR_TERMS];
+    factors[0] = 1.0;
+    for k in 1..TAYLOR_TERMS {
+        factors[k] = factors[k - 1] * step / k as f64;
+    }
+    for (n, value) in out.iter_mut().enumerate() {
+        // Smallest terms first, so the rounding of the large ones is not lost.
+        let mut sum = 0.0;
+        for k in (0..TAYLOR_TERMS).rev() {
+            sum += factors[k] * row[n + k];
+        }
+        *value = sum;
+    }
+}
+
+/// The large-`T` regime: asymptotic `F_0`, then upward recursion.
+fn asymptotic_into(t: f64, out: &mut [f64]) {
+    let n_max = out.len() - 1;
+    // F_0 = 0.5 sqrt(pi/T) - e^-T/(2T) sum_k (-1)^k (2k-1)!!/(2T)^k
+    let mut tail = 0.0;
+    let mut term = 1.0;
+    for k in 0..ASYMPTOTIC_TERMS {
+        tail += term;
+        term *= -((2 * k + 1) as f64) / (2.0 * t);
+    }
+    let exp_t = (-t).exp();
+    out[0] = 0.5 * (std::f64::consts::PI / t).sqrt() - exp_t / (2.0 * t) * tail;
+    for n in 0..n_max {
+        out[n + 1] = ((2 * n + 1) as f64 * out[n] - exp_t) / (2.0 * t);
+    }
+}
+
+/// The small- and moderate-`T` regimes, evaluated directly. Exact to rounding
+/// but slow; it builds the table and serves orders the table does not hold.
+fn series_into(t: f64, out: &mut [f64]) {
     let n_max = out.len() - 1;
 
     if t < TINY {
@@ -40,20 +140,8 @@ pub fn boys_into(t: f64, out: &mut [f64]) {
         }
         return;
     }
-
     if t > LARGE {
-        // F_0 = 0.5 sqrt(pi/T) - e^-T/(2T) sum_k (-1)^k (2k-1)!!/(2T)^k
-        let mut tail = 0.0;
-        let mut term = 1.0;
-        for k in 0..ASYMPTOTIC_TERMS {
-            tail += term;
-            term *= -((2 * k + 1) as f64) / (2.0 * t);
-        }
-        let exp_t = (-t).exp();
-        out[0] = 0.5 * (std::f64::consts::PI / t).sqrt() - exp_t / (2.0 * t) * tail;
-        for n in 0..n_max {
-            out[n + 1] = ((2 * n + 1) as f64 * out[n] - exp_t) / (2.0 * t);
-        }
+        asymptotic_into(t, out);
         return;
     }
 
@@ -136,6 +224,38 @@ mod tests {
                     "recursion broken at n={n}, T={t}"
                 );
             }
+        }
+    }
+
+    /// The table and the series it is built from, compared between grid points
+    /// - where the Taylor step is longest - for every order the table serves.
+    #[test]
+    fn the_table_reproduces_the_series_between_its_grid_points() {
+        let mut worst = 0.0f64;
+        let mut t = 0.0;
+        while t <= LARGE {
+            let mut direct = vec![0.0; TABLE_MAX_ORDER + 1];
+            let mut tabulated = direct.clone();
+            series_into(t, &mut direct);
+            boys_into(t, &mut tabulated);
+            for n in 0..=TABLE_MAX_ORDER {
+                worst = worst.max((tabulated[n] - direct[n]).abs() / direct[n]);
+            }
+            // An irrational stride, so the points land everywhere between the
+            // grid points, including the midpoints.
+            t += 0.0123456789;
+        }
+        assert!(worst < 1e-14, "table and series differ by {worst:e} relative");
+    }
+
+    #[test]
+    fn orders_beyond_the_table_fall_back_to_the_series() {
+        for &t in &[0.3, 7.0, 19.0] {
+            let mut direct = vec![0.0; TABLE_MAX_ORDER + 4];
+            let mut served = direct.clone();
+            series_into(t, &mut direct);
+            boys_into(t, &mut served);
+            assert_eq!(served, direct);
         }
     }
 

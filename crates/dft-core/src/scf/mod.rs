@@ -36,7 +36,7 @@ use crate::basis::{BasisError, BasisSet};
 use crate::grid::{self, GridQuality, MolecularGrid};
 use crate::integrals::{self, EriTensor};
 use crate::molecule::Molecule;
-use crate::xc;
+use crate::xc::{self, BasisOnGrid};
 use diis::Diis;
 use linalg::{canonical_orthogonalizer, symmetric_eigen_sorted, OVERLAP_THRESHOLD};
 
@@ -326,8 +326,18 @@ pub fn energy_and_fock(
     system: &System,
     density: &DMatrix<f64>,
 ) -> (EnergyBreakdown, DMatrix<f64>, f64) {
+    energy_and_fock_on(system, &BasisOnGrid::new(&system.basis, &system.grid), density)
+}
+
+/// [`energy_and_fock`] with the basis already evaluated on the system's grid,
+/// which is what the SCF loop does: the values are the same every iteration.
+fn energy_and_fock_on(
+    system: &System,
+    on_grid: &BasisOnGrid,
+    density: &DMatrix<f64>,
+) -> (EnergyBreakdown, DMatrix<f64>, f64) {
     let coulomb = system.eri.coulomb(density);
-    let xc = xc::restricted(&system.basis, &system.grid, density);
+    let xc = xc::restricted_on(on_grid, &system.grid, density);
     let components = EnergyBreakdown {
         core: elementwise_dot(density, &system.core),
         coulomb: 0.5 * elementwise_dot(density, &coulomb),
@@ -347,9 +357,19 @@ pub fn energy_and_fock_unrestricted(
     alpha: &DMatrix<f64>,
     beta: &DMatrix<f64>,
 ) -> (EnergyBreakdown, DMatrix<f64>, DMatrix<f64>, f64) {
+    let on_grid = BasisOnGrid::new(&system.basis, &system.grid);
+    energy_and_fock_unrestricted_on(system, &on_grid, alpha, beta)
+}
+
+fn energy_and_fock_unrestricted_on(
+    system: &System,
+    on_grid: &BasisOnGrid,
+    alpha: &DMatrix<f64>,
+    beta: &DMatrix<f64>,
+) -> (EnergyBreakdown, DMatrix<f64>, DMatrix<f64>, f64) {
     let total = alpha + beta;
     let coulomb = system.eri.coulomb(&total);
-    let xc = xc::unrestricted(&system.basis, &system.grid, alpha, beta);
+    let xc = xc::unrestricted_on(on_grid, &system.grid, alpha, beta);
     let components = EnergyBreakdown {
         core: elementwise_dot(&total, &system.core),
         coulomb: 0.5 * elementwise_dot(&total, &coulomb),
@@ -384,6 +404,7 @@ pub fn run_restricted(system: &System, options: &ScfOptions) -> ScfResult {
             .expect("a restart guess must carry one or two density matrices"),
     };
     let mut diis = Diis::new(options.diis_subspace);
+    let on_grid = BasisOnGrid::new(&system.basis, &system.grid);
 
     let mut previous_energy = f64::NAN;
     let mut iterations = 0;
@@ -394,7 +415,7 @@ pub fn run_restricted(system: &System, options: &ScfOptions) -> ScfResult {
 
     for iteration in 1..=options.max_iterations {
         iterations = iteration;
-        let (terms, current_fock, electrons) = energy_and_fock(system, &density);
+        let (terms, current_fock, electrons) = energy_and_fock_on(system, &on_grid, &density);
         components = terms;
         electrons_on_grid = electrons;
         fock = current_fock;
@@ -489,6 +510,7 @@ pub fn run_unrestricted(system: &System, options: &ScfOptions) -> ScfResult {
             .expect("a restart guess must carry one or two density matrices"),
     };
     let mut diis = Diis::new(options.diis_subspace);
+    let on_grid = BasisOnGrid::new(&system.basis, &system.grid);
 
     let n = system.n_functions();
     let mut previous_energy = f64::NAN;
@@ -502,7 +524,7 @@ pub fn run_unrestricted(system: &System, options: &ScfOptions) -> ScfResult {
     for iteration in 1..=options.max_iterations {
         iterations = iteration;
         let (terms, f_alpha, f_beta, electrons) =
-            energy_and_fock_unrestricted(system, &alpha, &beta);
+            energy_and_fock_unrestricted_on(system, &on_grid, &alpha, &beta);
         components = terms;
         electrons_on_grid = electrons;
         fock_alpha = f_alpha;

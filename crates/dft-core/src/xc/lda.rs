@@ -79,18 +79,56 @@ pub struct XcPoint {
     pub v_beta: f64,
 }
 
+/// The functional's derived constants, computed once.
+///
+/// They are cube roots of constants, and on `wasm32` a cube root is a library
+/// routine that the compiler does not fold, so writing them inline cost a call
+/// per grid point each.
+struct Constants {
+    /// `C_x` such that the exchange energy density is
+    /// `-C_x (rho_a^(4/3) + rho_b^(4/3))`.
+    exchange: f64,
+    /// `(3 / 4 pi)^(1/3)`, so that `r_s` is this over `rho^(1/3)`.
+    wigner_seitz: f64,
+    /// `2^(4/3) - 2`, the normalisation of the spin interpolation.
+    spin_denominator: f64,
+    /// `2^(1/3)`: with both spins equal, `rho^(1/3) = 2^(1/3) rho_alpha^(1/3)`.
+    cbrt_two: f64,
+}
+
+fn constants() -> &'static Constants {
+    static CONSTANTS: std::sync::OnceLock<Constants> = std::sync::OnceLock::new();
+    CONSTANTS.get_or_init(|| {
+        let wigner_seitz = (3.0 / (4.0 * std::f64::consts::PI)).cbrt();
+        Constants {
+            exchange: 1.5 * wigner_seitz,
+            wigner_seitz,
+            spin_denominator: four_thirds(2.0) - 2.0,
+            cbrt_two: 2.0f64.cbrt(),
+        }
+    })
+}
+
 /// `C_x` such that the exchange energy density is `-C_x (rho_a^(4/3) + rho_b^(4/3))`.
 fn exchange_constant() -> f64 {
-    1.5 * (3.0 / (4.0 * std::f64::consts::PI)).cbrt()
+    constants().exchange
+}
+
+/// `x^(4/3)` as `x x^(1/3)`: one cube root rather than a general power, and a
+/// little more accurate than `powf(x, 4.0 / 3.0)`, whose exponent is not quite
+/// four thirds in binary.
+fn four_thirds(x: f64) -> f64 {
+    x * x.cbrt()
 }
 
 /// Spin interpolation function and its derivative.
 fn spin_scaling(zeta: f64) -> (f64, f64) {
-    let denominator = 2.0f64.powf(4.0 / 3.0) - 2.0;
+    let denominator = constants().spin_denominator;
     let plus = (1.0 + zeta).max(0.0);
     let minus = (1.0 - zeta).max(0.0);
-    let f = (plus.powf(4.0 / 3.0) + minus.powf(4.0 / 3.0) - 2.0) / denominator;
-    let df = 4.0 / 3.0 * (plus.cbrt() - minus.cbrt()) / denominator;
+    let (plus_cbrt, minus_cbrt) = (plus.cbrt(), minus.cbrt());
+    let f = (plus * plus_cbrt + minus * minus_cbrt - 2.0) / denominator;
+    let df = 4.0 / 3.0 * (plus_cbrt - minus_cbrt) / denominator;
     (f, df)
 }
 
@@ -104,23 +142,29 @@ pub fn lda(rho_alpha: f64, rho_beta: f64) -> XcPoint {
     let beta = rho_beta.max(0.0);
 
     // --- Slater exchange -------------------------------------------------
+    // A restricted calculation always has alpha == beta, and then one cube
+    // root serves both channels.
     let cx = exchange_constant();
-    let energy_density_x = -cx * (alpha.powf(4.0 / 3.0) + beta.powf(4.0 / 3.0));
-    let vx_alpha = -4.0 / 3.0 * cx * alpha.cbrt();
-    let vx_beta = -4.0 / 3.0 * cx * beta.cbrt();
+    let alpha_cbrt = alpha.cbrt();
+    let beta_cbrt = if beta == alpha { alpha_cbrt } else { beta.cbrt() };
+    let energy_density_x = -cx * (alpha * alpha_cbrt + beta * beta_cbrt);
+    let vx_alpha = -4.0 / 3.0 * cx * alpha_cbrt;
+    let vx_beta = -4.0 / 3.0 * cx * beta_cbrt;
 
     // --- VWN5 correlation -------------------------------------------------
-    let rs = (3.0 / (4.0 * std::f64::consts::PI * rho)).cbrt();
+    let rho_cbrt = if beta == alpha { constants().cbrt_two * alpha_cbrt } else { rho.cbrt() };
+    let rs = constants().wigner_seitz / rho_cbrt;
     let zeta = ((alpha - beta) / rho).clamp(-1.0, 1.0);
 
     let (eps_p, deps_p) = PARAMAGNETIC.eval(rs);
-    let (f, df) = spin_scaling(zeta);
 
-    // The unpolarised case is by far the most common, and skipping the other two
-    // fits there also avoids their (harmless but pointless) evaluation.
+    // The unpolarised case is by far the most common, and there the spin
+    // interpolation and its derivative are exactly zero, so neither it nor the
+    // other two fits need evaluating.
     let (eps_c, deps_c_drs, deps_c_dzeta) = if zeta == 0.0 {
         (eps_p, deps_p, 0.0)
     } else {
+        let (f, df) = spin_scaling(zeta);
         let (eps_f, deps_f) = FERROMAGNETIC.eval(rs);
         let (alpha_c, dalpha_c) = SPIN_STIFFNESS.eval(rs);
         // f''(0), the curvature that makes alpha_c the spin stiffness.
@@ -215,7 +259,7 @@ mod tests {
         for rho in [1e-3, 0.1, 3.0] {
             let point = lda(rho, 0.0);
             let rs = (3.0 / (4.0 * std::f64::consts::PI * rho)).cbrt();
-            let eps_x = -exchange_constant() * rho.powf(4.0 / 3.0) / rho;
+            let eps_x = -exchange_constant() * four_thirds(rho) / rho;
             assert_relative_eq!(
                 point.exc - eps_x,
                 FERROMAGNETIC.eval(rs).0,

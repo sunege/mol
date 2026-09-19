@@ -4,20 +4,35 @@
 //! 1.7 MB), so they are computed once and reused by every SCF iteration and,
 //! later, by every geometry step that keeps the same structure.
 //!
-//! Two things keep the cost down: the eight-fold permutation symmetry, which
-//! means only `pair(pair+1)/2` values are stored and computed, and Schwarz
-//! screening, which skips a shell quartet when
-//! `sqrt((ab|ab)) * sqrt((cd|cd))` is already below the threshold.
+//! Four things keep the cost down:
+//!
+//! * the eight-fold permutation symmetry, which means only `pair(pair+1)/2`
+//!   values are stored and computed;
+//! * Schwarz screening, which skips a quartet when
+//!   `sqrt((ab|ab)) * sqrt((cd|cd))` is already below the threshold;
+//! * shell groups ([`BasisSet::groups`]): STO-3G's 2s and 2p share their
+//!   exponents, so every Gaussian product - and every R table, the expensive
+//!   part of a primitive quartet - is the same for both, and the quartet loop
+//!   runs over groups. Carbon's valence quartet is one R table where it was
+//!   sixteen;
+//! * primitive pairs whose Gaussian-product factor underflows (two tight
+//!   primitives on different atoms) are left out of their pair.
 
 use nalgebra::DMatrix;
 
-use super::md::{HermiteE, HermiteR};
+use super::md::{hermite_count, hermite_indices, HermiteE, HermiteR};
 use super::onee::product_centre;
-use crate::basis::{cartesian_powers, BasisSet};
+use crate::basis::{BasisSet, ShellGroup};
 
 /// Quartets whose Schwarz bound falls below this are skipped. Well under the
 /// SCF convergence threshold, so it cannot shift a converged energy.
 pub const DEFAULT_SCREENING: f64 = 1e-12;
+
+/// A primitive pair whose Gaussian-product factor, times its contraction
+/// coefficients and a polynomial allowance, is below this is left out of its
+/// shell pair. What it could still contribute to any integral is under `1e-14`
+/// even against the largest prefactor and R table this basis produces.
+const NEGLIGIBLE_PRIMITIVE_PAIR: f64 = 1e-22;
 
 /// All unique two-electron integrals of a basis set.
 #[derive(Debug, Clone)]
@@ -99,8 +114,6 @@ pub(crate) struct PrimitivePair {
     pub(crate) exponent: f64,
     /// Gaussian product centre.
     pub(crate) centre: [f64; 3],
-    /// Product of the two contraction coefficients.
-    pub(crate) coefficient: f64,
 }
 
 /// Which shell of a pair is differentiated, and along which axis.
@@ -123,135 +136,239 @@ pub(crate) struct Derivative {
     pub(crate) axis: usize,
 }
 
-/// Hermite data for one shell pair, built once and reused by every quartet the
-/// pair appears in.
+/// Hermite data for one pair of shell groups, built once and reused by every
+/// quartet the pair appears in.
+///
+/// Components run over every function of the first group times every function
+/// of the second. When both groups are the same this lists `(mu, nu)` and
+/// `(nu, mu)` separately, which costs a little duplicated work and keeps every
+/// consumer free of a special case.
 pub(crate) struct ShellPair {
-    pub(crate) shell_a: usize,
-    pub(crate) shell_b: usize,
-    /// `l_a + l_b`, plus one when this pair carries a derivative: the highest
-    /// Hermite index.
+    pub(crate) group_a: usize,
+    pub(crate) group_b: usize,
+    /// Atoms the two groups sit on.
+    pub(crate) centers: [usize; 2],
+    /// `l_a + l_b` (largest in each group), plus one when this pair carries a
+    /// derivative: the highest Hermite degree.
     pub(crate) order: usize,
-    /// Stride of the Hermite cube, `order + 1`.
-    pub(crate) span: usize,
-    /// Components of A times components of B.
+    /// [`hermite_count`]`(order)`: the length of one coefficient vector.
+    pub(crate) n_hermite: usize,
     pub(crate) n_components: usize,
+    /// Basis-function indices `(mu, nu)` of each component.
+    pub(crate) functions: Vec<(usize, usize)>,
     pub(crate) primitives: Vec<PrimitivePair>,
-    /// Hermite coefficients, indexed `[primitive][component][t][u][v]`.
+    /// Hermite coefficients in [`hermite_indices`] order, indexed
+    /// `[primitive][component][hermite]`, with the contraction coefficients and
+    /// the per-component normalisation already folded in.
     pub(crate) hermite: Vec<f64>,
-    /// Per-component normalisation products, indexed like the component axis.
-    pub(crate) scales: Vec<f64>,
+    /// The same, times `(-1)^(t+u+v)`: the form a pair takes as the ket, whose
+    /// Hermite Gaussians are derivatives with respect to Q rather than P.
+    pub(crate) signed: Vec<f64>,
+    /// For each component, the Hermite entries that can be non-zero at all
+    /// (`t <= l_x^a + l_x^b` and so on). An s-s component has one, a p-p
+    /// component three or four, out of the pair's full set; the quartet loop
+    /// visits only these.
+    pub(crate) support: Vec<Vec<usize>>,
     /// `sqrt(max |(ab|ab)|)`, the Schwarz bound for this pair. Zero on a
     /// derivative pair, which is never the thing screening is applied to.
     pub(crate) schwarz: f64,
 }
 
 impl ShellPair {
-    fn cube(&self) -> usize {
-        self.span * self.span * self.span
-    }
-
+    /// Coefficients of one component of one primitive.
     #[inline]
-    fn offset(&self, primitive: usize, component: usize) -> usize {
-        (primitive * self.n_components + component) * self.cube()
+    pub(crate) fn coefficients(&self, primitive: usize, component: usize) -> &[f64] {
+        let start = (primitive * self.n_components + component) * self.n_hermite;
+        &self.hermite[start..start + self.n_hermite]
     }
 }
 
-pub(crate) fn build_shell_pair(basis: &BasisSet, sa: usize, sb: usize) -> ShellPair {
-    build_pair(basis, sa, sb, None)
+pub(crate) fn build_shell_pair(
+    basis: &BasisSet,
+    groups: &[ShellGroup],
+    ga: usize,
+    gb: usize,
+) -> ShellPair {
+    build_pair(basis, groups, ga, gb, None)
 }
 
-/// The same pair with one of its two shells differentiated with respect to the
+/// The same pair with one of its two groups differentiated with respect to the
 /// nucleus it sits on.
 pub(crate) fn build_shell_pair_derivative(
     basis: &BasisSet,
-    sa: usize,
-    sb: usize,
+    groups: &[ShellGroup],
+    ga: usize,
+    gb: usize,
     deriv: Derivative,
 ) -> ShellPair {
-    build_pair(basis, sa, sb, Some(deriv))
+    build_pair(basis, groups, ga, gb, Some(deriv))
 }
 
 fn build_pair(
     basis: &BasisSet,
-    sa: usize,
-    sb: usize,
+    groups: &[ShellGroup],
+    ga: usize,
+    gb: usize,
     deriv: Option<Derivative>,
 ) -> ShellPair {
-    let a = &basis.shells[sa];
-    let b = &basis.shells[sb];
-    let powers_a = cartesian_powers(a.l);
-    let powers_b = cartesian_powers(b.l);
-    let order = (a.l + b.l) as usize + usize::from(deriv.is_some());
-    let span = order + 1;
-    let cube = span * span * span;
-    let n_components = powers_a.len() * powers_b.len();
-    // One extra order in both indices covers whichever shell is raised; the
-    // unused half costs a few coefficients and no branching in the hot loop.
+    let group_a = &groups[ga];
+    let group_b = &groups[gb];
+    let first_a = &basis.shells[group_a.shells[0]];
+    let first_b = &basis.shells[group_b.shells[0]];
+    let (max_l_a, max_l_b) = (group_a.max_l as usize, group_b.max_l as usize);
+    // One extra order in both indices covers whichever group is raised.
     let raise = usize::from(deriv.is_some());
+    let order = max_l_a + max_l_b + raise;
+    let n_hermite = hermite_count(order);
 
-    let mut primitives = Vec::with_capacity(a.n_primitives() * b.n_primitives());
-    let mut hermite = vec![0.0; a.n_primitives() * b.n_primitives() * n_components * cube];
+    // Where each (t, u, v) lands in the packed layout, and its parity.
+    let indices = hermite_indices(order);
+    let span = order + 1;
+    let mut packed = vec![usize::MAX; span * span * span];
+    for (k, &[t, u, v]) in indices.iter().enumerate() {
+        packed[(t * span + u) * span + v] = k;
+    }
 
-    for (ia, &alpha) in a.exponents.iter().enumerate() {
-        for (ib, &beta) in b.exponents.iter().enumerate() {
+    // The components: every function of A against every function of B.
+    struct Component {
+        powers_a: [u8; 3],
+        powers_b: [u8; 3],
+        shell_a: usize,
+        shell_b: usize,
+        scale: f64,
+    }
+    let mut components = Vec::new();
+    let mut functions = Vec::new();
+    for &sa in &group_a.shells {
+        let a = &basis.shells[sa];
+        for (ca, (&powers_a, &scale_a)) in a.powers.iter().zip(&a.scales).enumerate() {
+            for &sb in &group_b.shells {
+                let b = &basis.shells[sb];
+                for (cb, (&powers_b, &scale_b)) in b.powers.iter().zip(&b.scales).enumerate() {
+                    components.push(Component {
+                        powers_a,
+                        powers_b,
+                        shell_a: sa,
+                        shell_b: sb,
+                        scale: scale_a * scale_b,
+                    });
+                    functions.push((basis.offset(sa) + ca, basis.offset(sb) + cb));
+                }
+            }
+        }
+    }
+    let n_components = components.len();
+
+    // Highest Hermite index along one axis: one more where the angular
+    // momentum was raised.
+    let extent = |c: &Component, axis: usize| -> usize {
+        (c.powers_a[axis] + c.powers_b[axis]) as usize
+            + usize::from(matches!(deriv, Some(d) if d.axis == axis))
+    };
+    let support: Vec<Vec<usize>> = components
+        .iter()
+        .map(|c| {
+            let mut reach = Vec::new();
+            for t in 0..=extent(c, 0) {
+                for u in 0..=extent(c, 1) {
+                    for v in 0..=extent(c, 2) {
+                        reach.push(packed[(t * span + u) * span + v]);
+                    }
+                }
+            }
+            reach.sort_unstable();
+            reach
+        })
+        .collect();
+
+    let n_primitives = first_a.n_primitives() * first_b.n_primitives();
+    let mut primitives = Vec::with_capacity(n_primitives);
+    let mut hermite = vec![0.0; n_primitives * n_components * n_hermite];
+
+    // Largest |coefficient * scale| of each primitive over a group's members,
+    // for the cut below.
+    let reach = |group: &ShellGroup, k: usize| -> f64 {
+        group
+            .shells
+            .iter()
+            .map(|&s| {
+                let shell = &basis.shells[s];
+                let scale = shell.scales.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                shell.coefficients[k].abs() * scale
+            })
+            .fold(0.0, f64::max)
+    };
+    let separation2: f64 =
+        (0..3).map(|axis| (first_a.origin[axis] - first_b.origin[axis]).powi(2)).sum();
+    // The same allowance with or without a derivative, so that a pair and its
+    // derivatives keep exactly the same primitives.
+    let polynomial = separation2.sqrt().max(1.0).powi((max_l_a + max_l_b + 1) as i32);
+
+    for (ia, &alpha) in first_a.exponents.iter().enumerate() {
+        for (ib, &beta) in first_b.exponents.iter().enumerate() {
+            // Every Hermite coefficient of a primitive pair carries the
+            // Gaussian-product factor exp(-mu R_AB^2); for two tight primitives
+            // on different atoms (carbon 1s against carbon 1s is e^-240) the
+            // whole pair is zero in double precision, and every quartet it
+            // enters would multiply that zero through a full R table. The
+            // decision depends only on exponents and geometry, so a pair and
+            // its derivatives keep the same primitives in the same order.
+            let mu = alpha * beta / (alpha + beta);
+            let size = (-mu * separation2).exp() * reach(group_a, ia) * reach(group_b, ib);
+            if size * polynomial < NEGLIGIBLE_PRIMITIVE_PAIR {
+                continue;
+            }
             let index = primitives.len();
             primitives.push(PrimitivePair {
                 exponent: alpha + beta,
-                centre: product_centre(alpha, a.origin, beta, b.origin),
-                coefficient: a.coefficients[ia] * b.coefficients[ib],
+                centre: product_centre(alpha, first_a.origin, beta, first_b.origin),
             });
             let e: Vec<HermiteE> = (0..3)
                 .map(|axis| {
                     HermiteE::new(
-                        a.l as usize + raise,
-                        b.l as usize + raise,
+                        max_l_a + raise,
+                        max_l_b + raise,
                         alpha,
                         beta,
-                        a.origin[axis],
-                        b.origin[axis],
+                        first_a.origin[axis],
+                        first_b.origin[axis],
                     )
                 })
                 .collect();
-            for (ca, pa) in powers_a.iter().enumerate() {
-                for (cb, pb) in powers_b.iter().enumerate() {
-                    let component = ca * powers_b.len() + cb;
-                    let base = (index * n_components + component) * cube;
-                    // Expansion coefficient along one axis, carrying the
-                    // derivative when this is the axis being differentiated.
-                    let coefficient = |axis: usize, t: usize| -> f64 {
-                        let i = pa[axis] as usize;
-                        let j = pb[axis] as usize;
-                        let t = t as isize;
-                        match deriv {
-                            Some(d) if d.axis == axis && d.shell == 0 => {
-                                let up = 2.0 * alpha * e[axis].at(i + 1, j, t);
-                                let down =
-                                    if i == 0 { 0.0 } else { i as f64 * e[axis].at(i - 1, j, t) };
-                                up - down
-                            }
-                            Some(d) if d.axis == axis => {
-                                let up = 2.0 * beta * e[axis].at(i, j + 1, t);
-                                let down =
-                                    if j == 0 { 0.0 } else { j as f64 * e[axis].at(i, j - 1, t) };
-                                up - down
-                            }
-                            _ => e[axis].at(i, j, t),
+            for (component, c) in components.iter().enumerate() {
+                let weight = basis.shells[c.shell_a].coefficients[ia]
+                    * basis.shells[c.shell_b].coefficients[ib]
+                    * c.scale;
+                let base = (index * n_components + component) * n_hermite;
+                // Expansion coefficient along one axis, carrying the
+                // derivative when this is the axis being differentiated.
+                let coefficient = |axis: usize, t: usize| -> f64 {
+                    let i = c.powers_a[axis] as usize;
+                    let j = c.powers_b[axis] as usize;
+                    let t = t as isize;
+                    match deriv {
+                        Some(d) if d.axis == axis && d.shell == 0 => {
+                            let up = 2.0 * alpha * e[axis].at(i + 1, j, t);
+                            let down =
+                                if i == 0 { 0.0 } else { i as f64 * e[axis].at(i - 1, j, t) };
+                            up - down
                         }
-                    };
-                    // Highest Hermite index along one axis: one more where the
-                    // angular momentum was raised.
-                    let extent = |axis: usize| -> usize {
-                        (pa[axis] + pb[axis]) as usize
-                            + usize::from(matches!(deriv, Some(d) if d.axis == axis))
-                    };
-                    for t in 0..=extent(0) {
-                        let ex = coefficient(0, t);
-                        for u in 0..=extent(1) {
-                            let ey = coefficient(1, u);
-                            for v in 0..=extent(2) {
-                                let ez = coefficient(2, v);
-                                hermite[base + (t * span + u) * span + v] = ex * ey * ez;
-                            }
+                        Some(d) if d.axis == axis => {
+                            let up = 2.0 * beta * e[axis].at(i, j + 1, t);
+                            let down =
+                                if j == 0 { 0.0 } else { j as f64 * e[axis].at(i, j - 1, t) };
+                            up - down
+                        }
+                        _ => e[axis].at(i, j, t),
+                    }
+                };
+                for t in 0..=extent(c, 0) {
+                    let ex = weight * coefficient(0, t);
+                    for u in 0..=extent(c, 1) {
+                        let ey = coefficient(1, u);
+                        for v in 0..=extent(c, 2) {
+                            let ez = coefficient(2, v);
+                            hermite[base + packed[(t * span + u) * span + v]] = ex * ey * ez;
                         }
                     }
                 }
@@ -259,32 +376,41 @@ fn build_pair(
         }
     }
 
-    let mut scales = Vec::with_capacity(n_components);
-    for &scale_a in &a.scales {
-        for &scale_b in &b.scales {
-            scales.push(scale_a * scale_b);
-        }
-    }
+    hermite.truncate(primitives.len() * n_components * n_hermite);
+
+    let parity: Vec<f64> = indices
+        .iter()
+        .map(|&[t, u, v]| if (t + u + v) % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
+    let signed = hermite
+        .iter()
+        .enumerate()
+        .map(|(k, &value)| value * parity[k % n_hermite])
+        .collect();
 
     ShellPair {
-        shell_a: sa,
-        shell_b: sb,
+        group_a: ga,
+        group_b: gb,
+        centers: [group_a.center, group_b.center],
         order,
-        span,
+        n_hermite,
         n_components,
+        functions,
         primitives,
         hermite,
-        scales,
+        signed,
+        support,
         schwarz: 0.0,
     }
 }
 
-/// Every unique shell pair of a basis, each carrying its Schwarz bound.
-pub(crate) fn shell_pairs(basis: &BasisSet) -> Vec<ShellPair> {
-    let mut pairs = Vec::with_capacity(basis.n_shells() * (basis.n_shells() + 1) / 2);
-    for sa in 0..basis.n_shells() {
-        for sb in 0..=sa {
-            pairs.push(build_shell_pair(basis, sa, sb));
+/// Every unique pair of shell groups (`a >= b`), each carrying its Schwarz
+/// bound.
+pub(crate) fn shell_pairs(basis: &BasisSet, groups: &[ShellGroup]) -> Vec<ShellPair> {
+    let mut pairs = Vec::with_capacity(groups.len() * (groups.len() + 1) / 2);
+    for ga in 0..groups.len() {
+        for gb in 0..=ga {
+            pairs.push(build_shell_pair(basis, groups, ga, gb));
         }
     }
 
@@ -303,8 +429,15 @@ pub(crate) fn shell_pairs(basis: &BasisSet) -> Vec<ShellPair> {
     pairs
 }
 
+/// `2 pi^(5/2) / (p q sqrt(p + q))`, the factor every primitive quartet carries
+/// in front of its Hermite sum.
+#[inline]
+pub(crate) fn quartet_prefactor(p: f64, q: f64) -> f64 {
+    2.0 * std::f64::consts::PI.powf(2.5) / (p * q * (p + q).sqrt())
+}
+
 /// Contracts one quartet of shell pairs into `out`, indexed
-/// `[bra component][ket component]`, with the normalisation factors applied.
+/// `[bra component][ket component]`.
 pub(crate) fn quartet(
     bra: &ShellPair,
     ket: &ShellPair,
@@ -312,14 +445,14 @@ pub(crate) fn quartet(
     g: &mut Vec<f64>,
     out: &mut Vec<f64>,
 ) {
-    let prefactor_base = 2.0 * std::f64::consts::PI.powf(2.5);
     let order = bra.order + ket.order;
-    let bra_cube = bra.cube();
+    let nb = bra.n_hermite;
+    let nk = ket.n_hermite;
 
     out.clear();
     out.resize(bra.n_components * ket.n_components, 0.0);
     g.clear();
-    g.resize(ket.n_components * bra_cube, 0.0);
+    g.resize(ket.n_components * nb, 0.0);
 
     for (pi, p) in bra.primitives.iter().enumerate() {
         for (qi, q) in ket.primitives.iter().enumerate() {
@@ -333,63 +466,39 @@ pub(crate) fn quartet(
                     p.centre[2] - q.centre[2],
                 ],
             );
-            let prefactor = prefactor_base
-                / (p.exponent * q.exponent * (p.exponent + q.exponent).sqrt())
-                * p.coefficient
-                * q.coefficient;
+            let r0 = r.r0();
+            let offsets = r.offsets();
+            let prefactor = quartet_prefactor(p.exponent, q.exponent);
 
             // Contract the ket's Hermite coefficients against R first. That
             // turns a six-fold sum per integral into two three-fold sums.
             for kc in 0..ket.n_components {
-                let ket_base = ket.offset(qi, kc);
-                for t in 0..=bra.order {
-                    for u in 0..=(bra.order - t) {
-                        for v in 0..=(bra.order - t - u) {
-                            let mut sum = 0.0;
-                            for tau in 0..=ket.order {
-                                for nu in 0..=(ket.order - tau) {
-                                    for phi in 0..=(ket.order - tau - nu) {
-                                        let c = ket.hermite
-                                            [ket_base + (tau * ket.span + nu) * ket.span + phi];
-                                        if c == 0.0 {
-                                            continue;
-                                        }
-                                        // The ket's Hermite Gaussians are
-                                        // derivatives with respect to Q rather
-                                        // than P, hence the alternating sign.
-                                        let sign =
-                                            if (tau + nu + phi) % 2 == 0 { 1.0 } else { -1.0 };
-                                        sum += sign * c * r.get(t + tau, u + nu, v + phi);
-                                    }
-                                }
-                            }
-                            g[kc * bra_cube + (t * bra.span + u) * bra.span + v] = sum;
-                        }
+                let coefficients = &ket.signed[(qi * ket.n_components + kc) * nk..][..nk];
+                let support = &ket.support[kc];
+                let row = &mut g[kc * nb..(kc + 1) * nb];
+                for (a, slot) in row.iter_mut().enumerate() {
+                    let base = offsets[a];
+                    let mut sum = 0.0;
+                    for &b in support {
+                        sum += coefficients[b] * r0[base + offsets[b]];
                     }
+                    *slot = sum;
                 }
             }
 
             for bc in 0..bra.n_components {
-                let bra_base = bra.offset(pi, bc);
-                for kc in 0..ket.n_components {
+                let coefficients = bra.coefficients(pi, bc);
+                let support = &bra.support[bc];
+                let target = &mut out[bc * ket.n_components..(bc + 1) * ket.n_components];
+                for (kc, value) in target.iter_mut().enumerate() {
+                    let row = &g[kc * nb..(kc + 1) * nb];
                     let mut sum = 0.0;
-                    for t in 0..=bra.order {
-                        for u in 0..=(bra.order - t) {
-                            for v in 0..=(bra.order - t - u) {
-                                let idx = (t * bra.span + u) * bra.span + v;
-                                sum += bra.hermite[bra_base + idx] * g[kc * bra_cube + idx];
-                            }
-                        }
+                    for &a in support {
+                        sum += coefficients[a] * row[a];
                     }
-                    out[bc * ket.n_components + kc] += prefactor * sum;
+                    *value += prefactor * sum;
                 }
             }
-        }
-    }
-
-    for bc in 0..bra.n_components {
-        for kc in 0..ket.n_components {
-            out[bc * ket.n_components + kc] *= bra.scales[bc] * ket.scales[kc];
         }
     }
 }
@@ -415,8 +524,9 @@ pub fn compute_with_screening(basis: &BasisSet, threshold: f64) -> EriTensor {
     let mut g = Vec::new();
     let mut block = Vec::new();
 
-    // Shell pairs, each already carrying its Schwarz bound.
-    let pairs = shell_pairs(basis);
+    // Pairs of shell groups, each already carrying its Schwarz bound.
+    let groups = basis.groups();
+    let pairs = shell_pairs(basis, &groups);
 
     for (i, bra) in pairs.iter().enumerate() {
         for ket in pairs.iter().take(i + 1) {
@@ -425,22 +535,10 @@ pub fn compute_with_screening(basis: &BasisSet, threshold: f64) -> EriTensor {
                 continue;
             }
             quartet(bra, ket, &mut r, &mut g, &mut block);
-
-            let offset_a = basis.offset(bra.shell_a);
-            let offset_b = basis.offset(bra.shell_b);
-            let offset_c = basis.offset(ket.shell_a);
-            let offset_d = basis.offset(ket.shell_b);
-            let nb = basis.shells[bra.shell_b].n_components();
-            let nd = basis.shells[ket.shell_b].n_components();
-
-            for bc in 0..bra.n_components {
-                let mu = offset_a + bc / nb;
-                let nu = offset_b + bc % nb;
-                for kc in 0..ket.n_components {
-                    let lambda = offset_c + kc / nd;
-                    let sigma = offset_d + kc % nd;
-                    tensor.values[EriTensor::index(mu, nu, lambda, sigma)] =
-                        block[bc * ket.n_components + kc];
+            for (bc, &(mu, nu)) in bra.functions.iter().enumerate() {
+                let row = &block[bc * ket.n_components..(bc + 1) * ket.n_components];
+                for (&value, &(lambda, sigma)) in row.iter().zip(&ket.functions) {
+                    tensor.values[EriTensor::index(mu, nu, lambda, sigma)] = value;
                 }
             }
         }

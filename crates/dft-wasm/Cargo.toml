@@ -19,4 +19,10 @@ serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O3"]
+wasm-opt = ["-O3", "--enable-simd"]
+
+# `wasm-pack build --profiling` keeps function names (-g), so a CPU profile of
+# the WebAssembly (node --cpu-prof, or the browser's profiler) says which Rust
+# function the time went to. See CLAUDE.md for the procedure.
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = ["-O3", "--enable-simd", "-g"]

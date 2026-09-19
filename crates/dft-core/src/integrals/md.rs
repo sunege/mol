@@ -91,6 +91,30 @@ impl HermiteE {
     }
 }
 
+/// Number of Hermite indices `(t, u, v)` with `t + u + v <= order`.
+pub const fn hermite_count(order: usize) -> usize {
+    (order + 1) * (order + 2) * (order + 3) / 6
+}
+
+/// Hermite indices `(t, u, v)` with `t + u + v <= order`, listed by total
+/// degree.
+///
+/// Ordering by degree makes the list for a lower order a prefix of the list for
+/// a higher one. A shell pair's coefficients (order `L`) and those of its
+/// derivative (order `L + 1`) therefore share one layout, and "every index up to
+/// `L`" is simply the first [`hermite_count`]`(L)` entries.
+pub fn hermite_indices(order: usize) -> Vec<[usize; 3]> {
+    let mut indices = Vec::with_capacity(hermite_count(order));
+    for degree in 0..=order {
+        for t in (0..=degree).rev() {
+            for u in (0..=(degree - t)).rev() {
+                indices.push([t, u, degree - t - u]);
+            }
+        }
+    }
+    indices
+}
+
 /// Auxiliary Coulomb integrals `R^0_tuv(alpha, R)`, reusing one allocation
 /// across the whole integral loop.
 ///
@@ -100,6 +124,28 @@ pub struct HermiteR {
     stride: usize,
     buffer: Vec<f64>,
     boys: Vec<f64>,
+    /// Position of each entry of [`hermite_indices`]`(max_order)` in the
+    /// `n = 0` cube.
+    offsets: Vec<usize>,
+    /// The recursion for each total order, unrolled into steps (see
+    /// [`RecursionStep`]).
+    programs: Vec<Vec<RecursionStep>>,
+}
+
+/// One step of the recursion, `R^n_(..k..) = d_axis R^(n+1)_(..k-1..) + (k-1)
+/// R^(n+1)_(..k-2..)`, with its buffer positions worked out in advance.
+///
+/// Which entries the recursion visits, and in what order, depends only on the
+/// total order, never on the exponent or the geometry; the index arithmetic of
+/// a four-dimensional table was most of what `compute` spent its time on.
+#[derive(Debug, Clone, Copy)]
+struct RecursionStep {
+    target: u32,
+    first: u32,
+    second: u32,
+    axis: u8,
+    /// `k - 1`; zero when there is no second term.
+    weight: f64,
 }
 
 impl HermiteR {
@@ -107,11 +153,77 @@ impl HermiteR {
     /// angular momenta involved).
     pub fn new(max_order: usize) -> Self {
         let stride = max_order + 1;
+        let offsets = hermite_indices(max_order)
+            .into_iter()
+            .map(|[t, u, v]| (t * stride + u) * stride + v)
+            .collect();
+        let index = |n: usize, t: usize, u: usize, v: usize| -> u32 {
+            (((n * stride + t) * stride + u) * stride + v) as u32
+        };
+        let programs = (0..=max_order)
+            .map(|order| {
+                let mut steps = Vec::new();
+                // One Cartesian direction at a time: v, then u, then t. Every
+                // read is of an entry an earlier step wrote.
+                let mut push = |target: u32, first: u32, second: u32, axis: u8, k: usize| {
+                    steps.push(RecursionStep {
+                        target,
+                        first,
+                        second,
+                        axis,
+                        weight: k.saturating_sub(1) as f64,
+                    });
+                };
+                for v in 1..=order {
+                    for n in 0..=(order - v) {
+                        let second = if v >= 2 { index(n + 1, 0, 0, v - 2) } else { 0 };
+                        push(index(n, 0, 0, v), index(n + 1, 0, 0, v - 1), second, 2, v);
+                    }
+                }
+                for v in 0..=order {
+                    for u in 1..=(order - v) {
+                        for n in 0..=(order - u - v) {
+                            let second = if u >= 2 { index(n + 1, 0, u - 2, v) } else { 0 };
+                            push(index(n, 0, u, v), index(n + 1, 0, u - 1, v), second, 1, u);
+                        }
+                    }
+                }
+                for v in 0..=order {
+                    for u in 0..=(order - v) {
+                        for t in 1..=(order - u - v) {
+                            for n in 0..=(order - t - u - v) {
+                                let second = if t >= 2 { index(n + 1, t - 2, u, v) } else { 0 };
+                                push(index(n, t, u, v), index(n + 1, t - 1, u, v), second, 0, t);
+                            }
+                        }
+                    }
+                }
+                steps
+            })
+            .collect();
         HermiteR {
             stride,
             buffer: vec![0.0; stride * stride * stride * stride],
             boys: vec![0.0; stride],
+            offsets,
+            programs,
         }
+    }
+
+    /// Where `R^0` of each [`hermite_indices`] entry sits in [`r0`](Self::r0).
+    ///
+    /// The position of a sum of two indices is the sum of their positions, so
+    /// `R^0_(t+tau, u+nu, v+phi)` is `r0()[offsets()[i] + offsets()[j]]`. That is
+    /// what turns every contraction against R into a flat double loop.
+    #[inline]
+    pub fn offsets(&self) -> &[usize] {
+        &self.offsets
+    }
+
+    /// The `n = 0` cube from the most recent [`compute`](Self::compute).
+    #[inline]
+    pub fn r0(&self) -> &[f64] {
+        &self.buffer[..self.stride * self.stride * self.stride]
     }
 
     #[inline]
@@ -133,8 +245,27 @@ impl HermiteR {
             factor *= -2.0 * alpha;
         }
 
-        // One Cartesian direction at a time: v, then u, then t. Every read is of
-        // an entry written earlier in this call, so no clearing is needed.
+        for step in &self.programs[order] {
+            let mut value = d[step.axis as usize] * self.buffer[step.first as usize];
+            if step.weight != 0.0 {
+                value += step.weight * self.buffer[step.second as usize];
+            }
+            self.buffer[step.target as usize] = value;
+        }
+    }
+
+    /// The recursion written out loop by loop, as `compute` did before its
+    /// steps were precomputed. Kept to hold the two together.
+    #[cfg(test)]
+    fn compute_directly(&mut self, order: usize, alpha: f64, d: [f64; 3]) {
+        let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        boys_into(alpha * r2, &mut self.boys[..=order]);
+        let mut factor = 1.0;
+        for n in 0..=order {
+            let idx = self.index(n, 0, 0, 0);
+            self.buffer[idx] = factor * self.boys[n];
+            factor *= -2.0 * alpha;
+        }
         for v in 1..=order {
             for n in 0..=(order - v) {
                 let mut value = d[2] * self.buffer[self.index(n + 1, 0, 0, v - 1)];
@@ -253,6 +384,59 @@ mod tests {
             assert_relative_eq!(r.get(t[0], t[1], t[2]), first, max_relative = 1e-6);
             t[axis] = 2;
             assert_relative_eq!(r.get(t[0], t[1], t[2]), second, max_relative = 1e-5);
+        }
+    }
+
+    #[test]
+    fn hermite_indices_are_complete_unique_and_nested() {
+        for order in 0..=6 {
+            let indices = hermite_indices(order);
+            assert_eq!(indices.len(), hermite_count(order));
+            let mut seen = std::collections::HashSet::new();
+            for &[t, u, v] in &indices {
+                assert!(t + u + v <= order);
+                assert!(seen.insert((t, u, v)), "({t}, {u}, {v}) listed twice");
+            }
+            // The list for a lower order is a prefix of this one.
+            if order > 0 {
+                assert_eq!(indices[..hermite_count(order - 1)], hermite_indices(order - 1)[..]);
+            }
+        }
+    }
+
+    #[test]
+    fn offsets_add_like_the_indices_they_stand_for() {
+        let mut r = HermiteR::new(5);
+        r.compute(5, 0.9, [0.3, -0.7, 1.1]);
+        let indices = hermite_indices(5);
+        for (i, &[t, u, v]) in indices.iter().enumerate().take(hermite_count(2)) {
+            for (j, &[a, b, c]) in indices.iter().enumerate().take(hermite_count(3)) {
+                let direct = r.get(t + a, u + b, v + c);
+                let packed = r.r0()[r.offsets()[i] + r.offsets()[j]];
+                assert_eq!(direct, packed);
+            }
+        }
+    }
+
+    /// The precomputed steps are the loops they replace: same entries, same
+    /// arithmetic, same bits.
+    #[test]
+    fn the_unrolled_recursion_is_the_loop_it_replaces() {
+        for order in 0..=9 {
+            let mut unrolled = HermiteR::new(9);
+            let mut direct = HermiteR::new(9);
+            let cases = [
+                (0.7, [0.37, -0.81, 1.23]),
+                (13.0, [0.0, 0.2, -0.1]),
+                (0.05, [4.0, 1.0, -3.0]),
+            ];
+            for (alpha, d) in cases {
+                unrolled.compute(order, alpha, d);
+                direct.compute_directly(order, alpha, d);
+                for [t, u, v] in hermite_indices(order) {
+                    assert_eq!(unrolled.get(t, u, v).to_bits(), direct.get(t, u, v).to_bits());
+                }
+            }
         }
     }
 

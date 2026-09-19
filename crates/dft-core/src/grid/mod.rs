@@ -130,7 +130,63 @@ pub fn build(molecule: &Molecule, quality: GridQuality) -> MolecularGrid {
             }
         }
     }
+    sort_spatially(&mut grid);
     grid
+}
+
+/// Points per block of the exchange-correlation integration. The grid is
+/// ordered so that every run of this many consecutive points, starting from
+/// the first, is a compact cluster in space.
+pub const BLOCK: usize = 128;
+
+/// Reorders the points so that each block of [`BLOCK`] consecutive points is a
+/// small cluster in space.
+///
+/// The quadrature itself does not care about order. The exchange-correlation
+/// integration does: it works through the grid a block at a time and leaves out
+/// the basis functions that are negligible over the whole block (see
+/// `xc::blocks`). In the order the points are generated - atom by atom, sphere
+/// by sphere - a block is a strip of one sphere and can reach across the whole
+/// molecule, so almost nothing is negligible on all of it.
+///
+/// The ordering is a recursive bisection: split the points across the longest
+/// side of their bounding box, recurse into both halves. The split is placed at
+/// a multiple of [`BLOCK`], so every block except the last is exactly one leaf
+/// of the bisection and never straddles two.
+fn sort_spatially(grid: &mut MolecularGrid) {
+    // The records themselves are moved, not indices into them: the partitions
+    // below compare coordinates millions of times, and reaching them through
+    // an index was most of the cost of building the grid.
+    let mut records: Vec<([f64; 3], f64)> =
+        grid.points.iter().copied().zip(grid.weights.iter().copied()).collect();
+    bisect(&mut records);
+    grid.points = records.iter().map(|&(point, _)| point).collect();
+    grid.weights = records.iter().map(|&(_, weight)| weight).collect();
+}
+
+fn bisect(records: &mut [([f64; 3], f64)]) {
+    if records.len() <= BLOCK {
+        return;
+    }
+    let mut lower = [f64::INFINITY; 3];
+    let mut upper = [f64::NEG_INFINITY; 3];
+    for (point, _) in records.iter() {
+        for axis in 0..3 {
+            lower[axis] = lower[axis].min(point[axis]);
+            upper[axis] = upper[axis].max(point[axis]);
+        }
+    }
+    let axis = (0..3)
+        .max_by(|&a, &b| (upper[a] - lower[a]).total_cmp(&(upper[b] - lower[b])))
+        .unwrap_or(0);
+    let blocks = records.len().div_ceil(BLOCK);
+    let split = (blocks / 2) * BLOCK;
+    // Selection is deterministic for a given input, so the order - and with it
+    // every sum over the grid - is the same on every run and every platform.
+    records.select_nth_unstable_by(split, |a, b| a.0[axis].total_cmp(&b.0[axis]));
+    let (left, right) = records.split_at_mut(split);
+    bisect(left);
+    bisect(right);
 }
 
 #[cfg(test)]

@@ -1,0 +1,6 @@
+# WebAssembly SIMD (128-bit) for the browser build. Every browser the app
+# targets has had it since 2023 (Chrome 91, Firefox 89, Safari 16.4); the
+# matrix products and basis-function loops of the exchange-correlation term are
+# what it speeds up. The host build is unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

@@ -22,7 +22,8 @@
 //! number of states tried.
 
 use crate::molecule::Molecule;
-use crate::scf::{self, ScfOptions, ScfResult, System};
+use crate::grid::MolecularGrid;
+use crate::scf::{self, InitialGuess, ScfOptions, ScfResult, System};
 
 /// A charge and spin multiplicity to solve for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +190,73 @@ pub fn solve(
     let (state, result) = fallback.expect("at least one state is always possible");
     set_state(&mut system.molecule, state);
     Outcome { result, state, attempts }
+}
+
+/// Runs the search on the grid `system` was built with, then solves the state
+/// it settled on once more on `grid`, and leaves `system` on `grid`.
+///
+/// A geometry optimisation needs a finer grid than a single point (see
+/// [`crate::opt::OPTIMIZER_GRID`]), but the spin state is a property of the
+/// molecule, not of the quadrature: every test molecule - O2 and CH2 as
+/// triplets, the silicon atom through its rescue round - settles on the same
+/// state on the coarse, medium and fine grids. What does depend on the grid is
+/// the price: every state tried costs a whole SCF, and a closed-shell molecule's
+/// triplet is the slow one, with an iteration count that jumps about from grid
+/// to grid (benzene's took 11 iterations on the medium grid and 28 on the fine
+/// one). So the choice is made where a single point makes it, and only the
+/// winner is paid for at the finer grid, starting from its own converged
+/// density, which is a few iterations.
+///
+/// Nothing about the integrals changes with the grid, so `system` keeps them.
+/// If the winner does not converge again on `grid` - it has not happened, but
+/// nothing rules it out - the whole search is repeated there, which is exactly
+/// what solving on `grid` from the start would have done.
+pub fn solve_then_refine(
+    system: &mut System,
+    grid: MolecularGrid,
+    options: &DriverOptions,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Outcome {
+    let searched = solve(system, options, keep_going);
+    system.grid = grid;
+    if !searched.converged() {
+        return solve(system, options, keep_going);
+    }
+
+    // Whichever options the search needed for this state, the refinement
+    // starts next to the answer and needs nothing special; the persistent ones
+    // are the fallback, as they are in the search.
+    for scf_options in [&options.scf, &options.persistent_scf] {
+        let restart = ScfOptions {
+            initial_guess: restart_guess(&searched.result),
+            ..scf_options.clone()
+        };
+        let Some(result) = attempt(system, searched.state, &restart) else {
+            break;
+        };
+        let mut attempts = searched.attempts.clone();
+        attempts.push(Attempt {
+            state: searched.state,
+            converged: result.converged,
+            energy: result.energy,
+            iterations: result.iterations,
+        });
+        if result.converged {
+            return Outcome { result, state: searched.state, attempts };
+        }
+    }
+    solve(system, options, keep_going)
+}
+
+/// The densities of a converged calculation in the shape a restart wants: one
+/// matrix from a restricted run, alpha and beta from an unrestricted one.
+pub fn restart_guess(result: &ScfResult) -> InitialGuess {
+    match result.channels.as_slice() {
+        [alpha, beta] => {
+            InitialGuess::Previous(vec![alpha.density.clone(), beta.density.clone()])
+        }
+        _ => InitialGuess::Previous(vec![result.density.clone()]),
+    }
 }
 
 /// Solves one state, or `None` when that state is impossible for this molecule.
@@ -436,6 +504,44 @@ mod tests {
             first_pass.iter().all(|a| !a.converged),
             "the first round converged, so this no longer tests the escalation"
         );
+    }
+
+    /// The search on one grid and the winner solved again on another land on
+    /// the same state and the same energy as searching on the second grid
+    /// outright - for a triplet and for a singlet.
+    #[test]
+    fn refining_on_a_finer_grid_is_the_search_on_that_grid() {
+        for (name, molecule) in [("O2", oxygen_molecule()), ("H2O", water())] {
+            let mut direct = System::build(molecule.clone(), GridQuality::Fine).unwrap();
+            let expected = solve(&mut direct, &DriverOptions::default(), &mut always());
+
+            let mut system = System::build(molecule.clone(), GridQuality::Medium).unwrap();
+            let fine = crate::grid::build(&molecule, GridQuality::Fine);
+            let points = fine.len();
+            let refined =
+                solve_then_refine(&mut system, fine, &DriverOptions::default(), &mut always());
+
+            assert!(refined.converged(), "{name}");
+            assert_eq!(refined.state, expected.state, "{name}");
+            assert_eq!(system.grid.len(), points, "{name}: the system must end on the fine grid");
+            assert_eq!(system.molecule.multiplicity, expected.state.multiplicity);
+            // Both are converged to 1e-8 Hartree from different starting
+            // points, so they agree to about that.
+            let gap = (refined.result.energy - expected.result.energy).abs();
+            assert!(
+                gap < 1e-7,
+                "{name}: {} vs {} Ha",
+                refined.result.energy,
+                expected.result.energy
+            );
+            // And the refinement was a short one: it started next to the answer.
+            let last = refined.attempts.last().unwrap();
+            assert!(
+                last.iterations < expected.result.iterations,
+                "{name}: {} iterations",
+                last.iterations
+            );
+        }
     }
 
     #[test]

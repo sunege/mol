@@ -26,10 +26,11 @@
 
 use nalgebra::{DMatrix, DVector};
 
+use crate::driver::restart_guess;
 use crate::gradient;
 use crate::grid::GridQuality;
 use crate::molecule::Molecule;
-use crate::scf::{self, InitialGuess, ScfOptions, ScfResult, System};
+use crate::scf::{self, ScfOptions, ScfResult, System};
 
 /// The grid a geometry optimisation runs on. See the module note above.
 pub const OPTIMIZER_GRID: GridQuality = GridQuality::Fine;
@@ -284,17 +285,6 @@ fn evaluate(
     }
     let fresh = single_point(&trial, &options.scf);
     fresh.converged.then_some((trial, fresh))
-}
-
-/// The densities of a converged calculation, in the shape the restart guess
-/// wants: one matrix for a restricted run, two for an unrestricted one.
-fn restart_guess(result: &ScfResult) -> InitialGuess {
-    match result.channels.as_slice() {
-        [alpha, beta] => {
-            InitialGuess::Previous(vec![alpha.density.clone(), beta.density.clone()])
-        }
-        _ => InitialGuess::Previous(vec![result.density.clone()]),
-    }
 }
 
 fn single_point(system: &System, options: &ScfOptions) -> ScfResult {
