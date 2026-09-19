@@ -5,10 +5,14 @@ import { DftWorkerClient } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
 import { PeriodicPicker } from './components/PeriodicPicker';
 import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
+import { Elapsed, ProgressOverlay } from './components/ProgressOverlay';
+import { headline, type JobKind, type JobState } from './components/progress';
 import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
 import { hasUsableStructure } from './worker/protocol';
+import { EngineUnavailableError, engineNotice, type EngineProblem } from './worker/engineSupport';
 import type {
+  CalculationProgress,
   DensityChannel,
   DensityRequest,
   ElementInfo,
@@ -63,6 +67,13 @@ type AnimationKind = 'divergence' | 'optimization';
  * So it stops where it is, keeps that structure, and says it ran out of time -
  * because flying the molecule apart there would be saying "this cannot exist"
  * when the true statement is "the computer was too slow".
+ *
+ * While a calculation runs, a card over the molecule names the part of the work
+ * under way and counts the seconds. For benzene the first several seconds move
+ * nothing at all, and without it the screen would simply stand still. The card
+ * lasts until the first density surface is up, because that is when the answer
+ * is on screen; a calculation that does not converge drops it at once and lets
+ * the divergence speak for itself.
  */
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -77,6 +88,9 @@ export default function App() {
   const [result, setResult] = useState<ScfOutcome | null>(null);
   const [computing, setComputing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when this browser cannot run the engine at all, which is a notice in
+  // place of the app rather than an error about one calculation.
+  const [unavailable, setUnavailable] = useState<EngineProblem | null>(null);
   const [webgl, setWebgl] = useState<WebGlProbe | null>(null);
   const [showDensity, setShowDensity] = useState(true);
   const [channel, setChannel] = useState<DensityRequest>('total');
@@ -86,7 +100,12 @@ export default function App() {
     bonding: ISO_RANGES.bonding.initial,
   });
   const [mesh, setMesh] = useState<IsoMesh | null>(null);
-  const [meshing, setMeshing] = useState(false);
+  // When the surface being cut now was asked for, or null when none is.
+  const [meshingSince, setMeshingSince] = useState<number | null>(null);
+  const meshing = meshingSince !== null;
+  // The calculation the progress card describes. It outlives `computing` by the
+  // first surface, which is part of the wait as far as the user is concerned.
+  const [job, setJob] = useState<JobState | null>(null);
   // What the frame player is showing, if anything. While this is set the player
   // owns the atom positions and the effect that draws `atoms` stands aside.
   const [animation, setAnimation] = useState<AnimationKind | null>(null);
@@ -158,6 +177,7 @@ export default function App() {
     hasDensityRef.current = false;
     clientRef.current?.cancelAll();
     setComputing(false);
+    setJob(null);
     stopAnimation();
   }, [stopAnimation]);
 
@@ -191,6 +211,9 @@ export default function App() {
     wantedRef.current = null;
     meshRequestRef.current += 1;
     setMesh(null);
+    // A calculation that has finished may still be waiting for its first
+    // surface, which will not be wanted now either.
+    setJob(null);
     cancelCalculation();
   }, [cancelCalculation, stopAnimation]);
 
@@ -283,7 +306,14 @@ export default function App() {
         setElements(list);
       })
       .catch((e: Error) => {
-        if (!stale) setError(e.message);
+        if (stale) return;
+        if (e instanceof EngineUnavailableError) {
+          // The detail is for whoever is debugging; the notice is for the user.
+          console.error(e);
+          setUnavailable(e.problem);
+        } else {
+          setError(e.message);
+        }
       });
 
     return () => {
@@ -339,7 +369,7 @@ export default function App() {
     if (wantedRef.current === null || !hasDensityRef.current) return;
 
     meshInFlightRef.current = true;
-    setMeshing(true);
+    setMeshingSince(performance.now());
     try {
       while (wantedRef.current !== null && hasDensityRef.current) {
         const wanted = wantedRef.current;
@@ -353,10 +383,13 @@ export default function App() {
           // is something to put in front of the user: the surface just goes.
           if (meshRequestRef.current === token) setMesh(null);
         }
+        // The first surface after a calculation is the end of its wait,
+        // whichever way it went. A newer calculation's card is left alone.
+        setJob((current) => (current?.drawing ? null : current));
       }
     } finally {
       meshInFlightRef.current = false;
-      setMeshing(false);
+      setMeshingSince(null);
     }
   }, []);
 
@@ -412,6 +445,47 @@ export default function App() {
     player.push(...divergenceFrames(toWorkerArrays(current).xyz));
   }, []);
 
+  /**
+   * A calculation that was refused. Usually that is the geometry (two atoms on
+   * top of each other); an engine that stopped being able to start at all is a
+   * notice about the browser instead.
+   */
+  const reportFailure = useCallback((e: Error) => {
+    if (e instanceof EngineUnavailableError) {
+      console.error(e);
+      setUnavailable(e.problem);
+    } else {
+      setError(describeEngineError(e.message));
+    }
+  }, []);
+
+  /**
+   * Starts the progress card for a calculation, and returns the listener that
+   * keeps it current. Reports from a calculation that has since been replaced
+   * are dropped, the same way its answer is.
+   */
+  const beginJob = useCallback((kind: JobKind, token: number) => {
+    setJob({
+      kind,
+      startedAt: performance.now(),
+      engine: null,
+      drawsSurface: showDensity,
+      drawing: false,
+    });
+    return (progress: CalculationProgress) => {
+      if (requestRef.current !== token) return;
+      setJob((current) => current && { ...current, engine: progress });
+    };
+  }, [showDensity]);
+
+  /**
+   * The engine has answered. If a surface is coming, the card stays up until it
+   * arrives (the isosurface pump takes it down); otherwise it goes now.
+   */
+  const endJob = useCallback((surfaceComing: boolean) => {
+    setJob((current) => (current && surfaceComing ? { ...current, drawing: true } : null));
+  }, []);
+
   const calculate = useCallback(() => {
     const client = clientRef.current;
     if (!client || atoms.length === 0) return;
@@ -424,27 +498,31 @@ export default function App() {
     // "計算中…" reads as though it belonged to the run in progress.
     setResult(null);
     setError(null);
+    const onProgress = beginJob('single', token);
     client
-      .scf(z, xyz)
+      .scf(z, xyz, onProgress)
       .then((outcome) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
         setComputing(false);
         setResult(outcome);
         if (!outcome.converged) {
+          endJob(false);
           showDivergence(atoms);
           return;
         }
         // The worker is now holding a density; show it without making the user
         // ask, so placing atoms and seeing the cloud is one action.
         hasDensityRef.current = true;
+        endJob(showDensity);
         if (showDensity) requestIsosurface(channel, isoLevel);
       })
       .catch((e: Error) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
         setComputing(false);
-        setError(describeEngineError(e.message));
+        endJob(false);
+        reportFailure(e);
       });
   }, [
     atoms,
@@ -454,6 +532,9 @@ export default function App() {
     requestIsosurface,
     showDivergence,
     stopAnimation,
+    beginJob,
+    endJob,
+    reportFailure,
   ]);
 
   /**
@@ -489,12 +570,18 @@ export default function App() {
     meshRequestRef.current += 1;
     setMesh(null);
     setAnimation('optimization');
+    const onProgress = beginJob('relax', token);
 
     client
-      .optimize(z, xyz, (step) => {
-        if (requestRef.current !== token) return;
-        player.push(step.xyz);
-      })
+      .optimize(
+        z,
+        xyz,
+        (step) => {
+          if (requestRef.current !== token) return;
+          player.push(step.xyz);
+        },
+        onProgress,
+      )
       .then((outcome) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
@@ -503,6 +590,7 @@ export default function App() {
 
         const relaxed = outcome.optimization;
         if (!outcome.converged || !relaxed || !hasUsableStructure(relaxed)) {
+          endJob(false);
           showDivergence(original);
           return;
         }
@@ -519,14 +607,16 @@ export default function App() {
         if (!player.playing) finishAnimation();
 
         hasDensityRef.current = true;
+        endJob(showDensity);
         if (showDensity) requestIsosurface(channel, isoLevel);
       })
       .catch((e: Error) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
         setComputing(false);
+        endJob(false);
         stopAnimation();
-        setError(describeEngineError(e.message));
+        reportFailure(e);
       });
   }, [
     atoms,
@@ -537,6 +627,9 @@ export default function App() {
     showDivergence,
     stopAnimation,
     finishAnimation,
+    beginJob,
+    endJob,
+    reportFailure,
   ]);
 
   // --- keyboard ------------------------------------------------------------
@@ -576,7 +669,13 @@ export default function App() {
   return (
     <div className="app">
       <div className="viewport" ref={containerRef}>
-        {webgl && !webgl.ok && (
+        {unavailable && (
+          <div className="engine-unavailable" role="alert">
+            <p className="title">{engineNotice(unavailable).title}</p>
+            <p>{engineNotice(unavailable).body}</p>
+          </div>
+        )}
+        {!unavailable && webgl && !webgl.ok && (
           <div className="webgl-error">
             <p>
               このブラウザでは WebGL を初期化できないため、3D 表示は利用できません。
@@ -589,11 +688,20 @@ export default function App() {
             </p>
           </div>
         )}
+        <ProgressOverlay
+          job={job}
+          // A surface cut on its own, not as the end of a calculation: the
+          // first one for a channel. Only while nothing is on screen yet - a
+          // slider move keeps the old surface up until the new one replaces it.
+          surfaceSince={
+            job === null && showDensity && solved && mesh === null ? meshingSince : null
+          }
+        />
       </div>
 
       <aside className="panel">
         <h1>分子シミュレータ</h1>
-        <p className="phase">Phase 5 — 構造最適化</p>
+        <p className="phase">原子を置くと、落ち着く形と電子の雲を計算します</p>
 
         <h2>配置する元素</h2>
         <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
@@ -645,11 +753,15 @@ export default function App() {
             type="button"
             className={computing ? '' : 'active'}
             onClick={computing ? cancelCalculation : relax}
-            disabled={atoms.length === 0}
+            disabled={unavailable !== null || atoms.length === 0}
           >
             {computing ? '中止' : '安定な形にする'}
           </button>
-          <button type="button" onClick={calculate} disabled={computing || atoms.length === 0}>
+          <button
+            type="button"
+            onClick={calculate}
+            disabled={unavailable !== null || computing || atoms.length === 0}
+          >
             この形のまま計算
           </button>
         </div>
@@ -701,10 +813,20 @@ export default function App() {
           <dd>{atoms.length}</dd>
           <dt>状態</dt>
           <dd>
-            {error ? (
+            {unavailable ? (
+              <span className="error">このブラウザでは計算できません</span>
+            ) : error ? (
               <span className="error">{error}</span>
             ) : computing ? (
-              animation === 'optimization' ? '形を調整中…' : '計算中…'
+              job ? (
+                <>
+                  {headline(job)} · <Elapsed since={job.startedAt} />
+                </>
+              ) : animation === 'optimization' ? (
+                '形を調整中…'
+              ) : (
+                '計算中…'
+              )
             ) : solved ? (
               settled ? '完了' : '途中で終了'
             ) : (

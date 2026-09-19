@@ -93,8 +93,12 @@ export class IsoMesh {
  * Nothing here throws: a structure the engine cannot solve comes back as a
  * calculation whose `optimization.converged` is false, which the interface
  * turns into an animation rather than a message (requirement F5).
+ *
+ * `on_progress(stage, step)`, when given, is called as each part of the
+ * calculation starts (see [`stage`]). Most of the wait before the first step is
+ * in parts that move no atoms, and this is how the caller can say so.
  */
-export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Function): Calculation;
+export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Function, on_progress?: Function | null): Calculation;
 
 /**
  * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
@@ -103,8 +107,11 @@ export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Fun
  * Non-convergence comes back through `summary().converged`, never as a thrown
  * error: the UI turns it into an animation rather than a message
  * (requirement F5).
+ *
+ * `on_progress(stage, step)`, when given, is called as each part of the
+ * calculation starts (see [`stage`]).
  */
-export function scf(z: Uint8Array, xyz_angstrom: Float64Array): Calculation;
+export function scf(z: Uint8Array, xyz_angstrom: Float64Array, on_progress?: Function | null): Calculation;
 
 /**
  * Installs a panic hook that reports Rust panics to the browser console.
@@ -135,8 +142,8 @@ export interface InitOutput {
     readonly isomesh_positiveIndices: (a: number) => [number, number];
     readonly isomesh_positiveNormals: (a: number) => [number, number];
     readonly isomesh_positivePositions: (a: number) => [number, number];
-    readonly optimize: (a: number, b: number, c: number, d: number, e: any) => [number, number, number];
-    readonly scf: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly optimize: (a: number, b: number, c: number, d: number, e: any, f: number) => [number, number, number];
+    readonly scf: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly start: () => void;
     readonly supportedElements: () => [number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;

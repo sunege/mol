@@ -159,6 +159,7 @@ fn profile(name: &str, molecule: Molecule, optimize: bool) {
                 last = Instant::now();
                 true
             },
+            &mut |_| {},
         );
         println!(
             "optimize: {:?} after {} steps, E = {:.8}, total {:.2}s (build + search {:.2}s)",

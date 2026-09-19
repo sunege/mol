@@ -171,3 +171,138 @@
   font-variant-numeric: tabular-nums;
   color: #9aa4b2;
 }
+
+/* The card over the 3D view while a calculation runs. It never takes the
+   pointer: the molecule underneath stays rotatable while it waits. */
+.progress-card {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  max-width: min(320px, calc(100% - 32px));
+  padding: 10px 14px 12px;
+  border: 1px solid #2d3644;
+  border-radius: 10px;
+  background: rgb(21 26 33 / 0.88);
+  backdrop-filter: blur(4px);
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+
+.progress-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-title {
+  flex: 1;
+  color: #d6dde8;
+}
+
+.elapsed {
+  font-variant-numeric: tabular-nums;
+  color: #9aa4b2;
+  white-space: nowrap;
+}
+
+.spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #2d3644;
+  border-top-color: #3f8cff;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 3s;
+  }
+}
+
+.progress-steps {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0 0 0 20px;
+  display: grid;
+  gap: 3px;
+  color: #6b7686;
+}
+
+.progress-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-steps li.active {
+  color: #d6dde8;
+}
+
+.progress-steps li.done {
+  color: #7c8798;
+}
+
+.progress-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid #3a4454;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.progress-steps li.active .progress-mark {
+  background: #3f8cff;
+  border-color: #3f8cff;
+}
+
+.progress-steps li.done .progress-mark {
+  border-color: transparent;
+  color: #5dbb85;
+}
+
+.progress-steps li.done .progress-mark::before {
+  content: '✓';
+}
+
+.progress-detail {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: #9aa4b2;
+}
+
+/* In place of the whole app when this browser cannot run the engine. */
+.engine-unavailable {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  max-width: 460px;
+  margin-inline: auto;
+  padding: 24px;
+  text-align: center;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: #9aa4b2;
+}
+
+.engine-unavailable p {
+  margin: 0;
+}
+
+.engine-unavailable .title {
+  font-size: 1rem;
+  color: #ff9a9a;
+}

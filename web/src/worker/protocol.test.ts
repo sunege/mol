@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { PRESETS, toWorkerArrays } from '../molecules/presets';
-import { hasUsableStructure, isTerminal } from './protocol';
+import { hasUsableStructure, isTerminal, progressFromEngine } from './protocol';
 import type {
+  CalculationProgress,
   IsoMesh,
   OptimizationOutcome,
   OptimizationReason,
@@ -320,6 +321,57 @@ describe('streaming a geometry optimisation', () => {
     // already has without being told the atom count again.
     expect((cloned.optimization?.xyz.length ?? 0) % 3).toBe(0);
     expect(cloned.optimization?.converged).toBe(true);
+  });
+});
+
+/**
+ * Progress is the second kind of intermediate answer, and both calculations
+ * send it. Getting it wrong in either direction is visible: treated as terminal,
+ * it would resolve a calculation with a progress report in place of its result;
+ * dropped, the screen stands still for the seconds it exists to fill.
+ */
+describe('progress reports', () => {
+  const reports: CalculationProgress[] = [
+    { stage: 'preparing' },
+    { stage: 'searching' },
+    { stage: 'forces', step: 0 },
+    { stage: 'solving', step: 1 },
+  ];
+
+  it('is intermediate, like a step', () => {
+    for (const progress of reports) {
+      expect(isTerminal({ id: 3, type: 'progress', progress })).toBe(false);
+    }
+  });
+
+  it('survives the worker boundary as it was sent', () => {
+    for (const progress of reports) {
+      const response: WorkerResponse = { id: 12, type: 'progress', progress };
+      expect(structuredClone(response)).toEqual(response);
+    }
+  });
+
+  it('reads the names the engine uses', () => {
+    expect(progressFromEngine('preparing', 0)).toEqual({ stage: 'preparing' });
+    expect(progressFromEngine('searching', 0)).toEqual({ stage: 'searching' });
+    expect(progressFromEngine('forces', 0)).toEqual({ stage: 'forces', step: 0 });
+    expect(progressFromEngine('solving', 7)).toEqual({ stage: 'solving', step: 7 });
+  });
+
+  it('drops what it does not understand rather than guess', () => {
+    expect(progressFromEngine('triplet', 0)).toBeNull();
+    expect(progressFromEngine('', 0)).toBeNull();
+    expect(progressFromEngine('solving', -1)).toBeNull();
+    expect(progressFromEngine('forces', 1.5)).toBeNull();
+    expect(progressFromEngine('forces', Number.NaN)).toBeNull();
+  });
+
+  it('carries no spin state, charge or attempt count', () => {
+    // Requirement F4 at the boundary: the only fields a report has are the
+    // stage and, for the optimiser's two stages, which geometry it is on.
+    for (const progress of reports) {
+      for (const key of Object.keys(progress)) expect(['stage', 'step']).toContain(key);
+    }
   });
 });
 

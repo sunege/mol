@@ -2,5 +2,11 @@
 # targets has had it since 2023 (Chrome 91, Firefox 89, Safari 16.4); the
 # matrix products and basis-function loops of the exchange-correlation term are
 # what it speeds up. The host build is unaffected.
+#
+# A browser without SIMD cannot compile the module at all. The app checks for it
+# before starting the worker and says so (web/src/worker/engineSupport.ts).
+# Anything that adds rustflags for this target must append to this list - cargo
+# `--config`, as scripts/build-wasm.sh does - not set RUSTFLAGS, which would
+# replace it and quietly build without SIMD.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]

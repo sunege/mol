@@ -24,7 +24,7 @@
 npm run dev          # Vite 開発サーバ (5173)
 npm run build        # tsc -b && vite build → web/dist
 npm test             # vitest (web)
-npm run build:wasm   # wasm-pack build → web/src/wasm/（生成物はコミットする）
+npm run build:wasm   # scripts/build-wasm.sh → web/src/wasm/（生成物はコミットする。どこでビルドしても同じバイトになる）
 cargo test           # dft-core / dft-wasm
 cargo run --release --example profile -- benzene --optimize   # ネイティブの所要時間の内訳
 ```
@@ -89,11 +89,16 @@ crates/dft-core/          純Rust の計算エンジン。wasm 非依存 → car
 crates/dft-wasm/   wasm-bindgen ラッパー。単位変換とシリアライズのみ、物理を書かない
 .cargo/config.toml wasm32 向けに simd128 を有効にする（wasm-opt 側は --enable-simd）
 scripts/           gen_reference.py — 上の「生成物」をすべて作る唯一の場所
-web/src/worker/    protocol.ts（UI↔Worker の契約）, dft.worker.ts, workerClient.ts
+                   build-wasm.sh — web/src/wasm/ を作る唯一の手順（npm run build:wasm。再現性の理由は規約）
+rust-toolchain.toml Rust 1.98.1 に固定（CI も同じ版。生成物の再現性のため）
+web/src/worker/    protocol.ts（UI↔Worker の契約）, dft.worker.ts, workerClient.ts,
+                   engineSupport.ts（SIMD の有無の判定と、動かないブラウザへの案内）,
+                   engine.test.ts（コミット済みの .wasm を vitest から直接呼ぶ）
 web/src/animation/ framePlayer.ts（キュー + 再生クロック）, divergence.ts（発散演出の生成）。
                    最適化ステップも発散演出も同じキューに流れる
 web/src/scene/     viewer.ts（Three.js, 命令的）, bonds.ts, webgl.ts
-web/src/components/ PeriodicPicker.tsx, IsoLevelSlider.tsx
+web/src/components/ PeriodicPicker.tsx, IsoLevelSlider.tsx,
+                   progress.ts（進捗カードの文言。純粋関数）+ ProgressOverlay.tsx
 web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
 ```
 
@@ -205,8 +210,29 @@ web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
   ベンゼンの Fine で約 30 MB で、SCF が返れば捨てる。`System` には持たせない
   （最適化中は新旧 2 つの `System` が同時に生きるので倍になる）。
 - **ブラウザ版は WebAssembly SIMD を前提にする**（`.cargo/config.toml` の `+simd128`、
-  wasm-opt の `--enable-simd`）。Chrome 91 / Firefox 89 / Safari 16.4 以降。SIMD の無い
-  ブラウザではモジュールがコンパイルできず、アプリごと動かない。
+  wasm-opt の `--enable-simd`）。SIMD の無いブラウザではモジュールがコンパイルできないので、
+  **起動時に `engineSupport.ts` の 43 バイトの判定モジュールを `WebAssembly.validate` にかけ、
+  非対応なら Worker を作らずに案内を出す**（P7 でユーザーが「非 SIMD 版を並べて配る」より
+  こちらを選んだ）。アプリ全体の下限は **Chrome / Edge 96・Firefox 114・Safari 16.4**
+  （webassembly.org の機能表と MDN の互換データで確認。Chrome は reference-types、
+  Firefox はモジュール Worker で決まり、SIMD が効いているのは Safari だけ）。
+  判定モジュールは wasm-opt で「SIMD 有効なら妥当、MVP のみなら拒否」を確かめてある。
+  **Worker の初期化失敗も黙らせない**: Worker は `ready` の代わりに `unavailable` を送り、
+  `ready` 前の `onerror` も同じ扱いで、`workerClient` は保留中も以後もすべての要求を
+  `EngineUnavailableError` で失敗させる（P6 までは `ready` を永久に待ち、画面が空の周期表の
+  まま黙って固まっていた）。
+- **`web/src/wasm/` はどこでビルドしても同じバイトにする。** CI は PR ごとに作り直して
+  バイト比較するので、ビルドした人に依存するものを入れない:
+  1. 依存 crate のパニック位置に `CARGO_HOME` の絶対パスが入る（P6 までの成果物には
+     `/Users/konya/.cargo/registry/...` が 13 箇所あり、CI の検査は必ず落ちる状態だった）。
+     `scripts/build-wasm.sh` が `--remap-path-prefix` で `/cargo` に置き換える。cargo の
+     `trim-paths` は 1.98 ではまだ unstable。
+  2. 標準ライブラリのパスに rustc のコミットが入る → `rust-toolchain.toml` と CI で 1.98.1 に固定。
+  3. wasm-opt の版は wasm-pack が決める → CI の wasm-pack を 0.15.0 に固定。
+  **rustflags は `RUSTFLAGS` で渡さない。** `.cargo/config.toml` の `+simd128` を置き換えて
+  しまい、SIMD 無しのバイナリが黙ってできる（`--config` で渡した配列は連結される）。
+  空の `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS=""` は上書きにならず無視される（実測）。
+  検証は「別ディレクトリへのコピー + 空の `CARGO_HOME`」からのビルドで 5 ファイルとも一致。
 - **性能は同じ条件で前後を並べて測る。** このマシン（i5-5287U）のネイティブ計測は同じバイナリでも
   ±30% ぶれるので、判断は複数回の最小値か、`sample` / CPU プロファイルの比率で行う。
   WASM は内訳がネイティブと違う（ネイティブで速い `gemm` や `exp`・`cbrt` が WASM では
@@ -218,9 +244,20 @@ web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
   1 つを並進不変性から逆算するとこの検査が自明になるため。
 - **Worker の契約は `protocol.ts` が唯一の情報源。** 失敗は例外を越境させず `error` レスポンスで返す。
 - **Worker のレスポンスは「1 リクエスト = 1 応答」ではない。** 構造最適化は受理した構造ごとに
-  `step` を返し、最後に `scf` で終わる。どれが終端かは `protocol.ts` の `isTerminal()` が唯一の
+  `step` を返し、最後に `scf` で終わる。一点計算も最適化も、作業の段階が変わるたびに
+  `progress` を返す。どれが終端かは `protocol.ts` の `isTerminal()` が唯一の
   情報源で、`workerClient` はそれを見て `#pending` から消すかどうかを決める。
-  `step` は `onPartial` に流れるだけで Promise を解決しない。
+  `step` と `progress` は `onPartial` に流れるだけで Promise を解決しない
+  （`workerClient.test.ts` が偽の Worker を通して往復で確かめている）。
+- **進捗の段階名は「何に時間を使っているか」であって「何を試しているか」ではない**（F4）。
+  `preparing`（積分・グリッド）/ `searching`（電子の並び方＝スピン探索と Fine での解き直し）/
+  `forces`（step の力）/ `solving`（step の電子）の 4 つだけで、試している状態・試行回数は
+  境界を越えない。名前は `dft-wasm` の `mod stage` と `protocol.ts` の `progressFromEngine()` の
+  2 箇所に書かれていて、後者は知らない名前を黙って捨てる。ずれると進捗カードが止まるだけで
+  どこも落ちないので、`engine.test.ts` がコミット済みの `.wasm` を実際に呼んで照合している。
+  文言は `components/progress.ts` で、テストが全状態を列挙して DFT パラメータの語が出ないことを見る。
+- **`opt::relax` の `on_stage` は聞くだけ。** 戻り値は無く、結果に影響しない。`dft-core` に
+  時計は入れない（経過時間は UI が `performance.now()` で数える）。
 - **アニメーション中は viewer の所有権が `FramePlayer` にある。** App の `animation`
   （`'divergence' | 'optimization' | null`）がそのフラグで、null のときだけ
   `setMolecule(atoms)` する。**Player がキューを使い切っても終わりとは限らない**:
@@ -267,7 +304,7 @@ web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
 | P4 | 自動スピン・電荷決定（UKS、探索の状態機械、level shift）+ 非収束時の発散アニメーション | 完了 |
 | P5 | 解析的勾配（Pulay 含む）+ 構造最適化アニメーション | 完了 |
 | P6 | 性能（ERI 微分の密度縮約、XC のスクリーニングとキャッシュ、探索グリッド、SIMD） | 完了 |
-| **P7** | **仕上げ（待ち時間の見せ方、SIMD 非対応ブラウザの扱い、手動 E2E と Vercel での確認）** | **次はここ** |
+| **P7** | **仕上げ（待ち時間の見せ方、SIMD 非対応ブラウザの案内、再現可能な WASM ビルド）** | **実装済み・手動 E2E と CI / Vercel の初回確認待ち** |
 
 各フェーズ終了時点で Vercel にデプロイ可能な状態を保つ。
 
@@ -435,47 +472,80 @@ P5 はベンゼン一点 16.4 秒、H₂O 最適化 4.8 秒、CH₄ 最適化 11
 - **`OPTIMIZE_BUDGET_SECONDS`（1800 秒）** はベンゼンが 15〜25 分かかった頃の値。今は 20 秒前後で
   終わるので縮められるが、予算は健全な計算を切らないことのほうが大事なので据え置いている。
 
-### P7 への引き継ぎ
+### P7 の実装メモ
 
-設計計画の P6「性能・仕上げ」のうち、P6 では性能だけをやった。残りの仕上げと、リリース前の
-確認が P7。要件 F1〜F5 は機能としては揃っている。
+- **進捗は 4 段階＋等値面。** 実測で段階を決めた（下の表）。探索（一重項→三重項）と Fine での
+  解き直しは 1 つの「電子の並び方を探す」にまとめた。分けると `driver` にもフックが要り、
+  どれも 4 秒を超えないので経過時間が動いていれば十分。探索の中の切り替えは F4 で見せない。
+  - エンジンが知らせるのは `opt::relax` の `on_stage`（`Solving { step }` / `Forces { step }`）だけで、
+    `preparing` / `searching` は `dft-wasm` が `System::build` と探索の前に自分で知らせる。
+    `driver` の API は変えていない。
+  - UI は左上のカード（`ProgressOverlay`）とパネルの「状態」に同じ見出しと経過時間を出す。
+    カードは**最初の等値面が出るまで**残す（その時点で答えが画面に揃う）。非収束・エラー・中止・
+    編集では即座に消す（発散は絵だけで語る。F5）。チャンネルを初めて切り替えたときの ρ の
+    サンプリング（ベンゼンで約 0.8 秒）は 300 ms 経ってから「電子の雲を描いています」だけを出す
+    （スライダー操作の数 ms でちらつかせない）。
+- **最適化の最後の勾配の再計算をやめた。** `opt::finish` が最終構造の勾配をもう一度計算していた
+  （ループが既に計算済みのもの）。ベンゼンで最後の step が届いてから完了まで 1.0 秒、画面が
+  止まっていた → 0 秒。同じ関数・同じ入力なので値はビット単位で同じ
+  （`the_reported_forces_are_those_of_the_final_structure` が `to_bits()` で比較）。
+- **SIMD 非対応は「検出して案内」**（ユーザー判断）。比較した 3 案と実測は下の表。
+- **生成物の再現性**（規約参照）。P6 までの CI の PR 検査は、ローカルでビルドした成果物に対して
+  必ず落ちる状態だった（絶対パス・`stable` の rustc・`latest` の wasm-pack）。
+- **wasm-pack のリポジトリは `wasm-bindgen/wasm-pack` に移った**（旧 `rustwasm/wasm-pack` の URL は
+  リダイレクトされる）。CI の `jetli/wasm-pack-action@v0.4.0` は旧 URL から取るが、v0.15.0 の
+  `x86_64-unknown-linux-musl` は取れることを確認した。
+- **要件定義書の基底関数スレッド**は、9/18 に返信済みで未クローズだった。ユーザーの了承を得て
+  実装結果を追記し、クローズした（2026-09-19）。
+- ページの `<title>`（`web` のまま）と `lang`、パネルの「Phase 5 — 構造最適化」を直した。
+- **Browser ペインで App を再マウントして確かめる方法**: Fast Refresh はマウント時の effect を
+  再実行しないので、`WebAssembly.validate` などを差し替えた後に、ページ内で
+  `/src/App.tsx` を `import()` して別の `createRoot` に描く（React は `main.tsx` と同じ
+  `?v=` 付きの URL から取ること。別インスタンスだとフックが壊れる）。アプリに検証用の口は足していない。
 
-1. **待ち時間の見せ方（計画の「ローディング演出」）。** 計算中の表示はいま「計算中…」
-   「形を調整中…」だけ。ベンゼン最適化では最初の `step` が届くまで約 6 秒（Node）、何も動かない
-   （探索 + Fine での解き直し + 0 歩目の勾配）。一点計算は約 3.5 秒、等値面の初回は ρ の
-   サンプリングで約 1 秒（P3 の実測）。設計計画のプロトコル案にあった段階通知（`status`）は
-   実装されていない。
-   - 段階と経過時間を出す。**DFT パラメータは出さない**（F4）: 「三重項を試しています」
-     「多重度 3」は不可。「電子の並び方を探しています」のような言い方にする。
-     `ScfOutcome` の `multiplicity` / `charge` / `attempts` が診断用なのと同じ線引き。
-   - エンジン側の口はもうある: `driver::solve` / `solve_then_refine` の `keep_going`
-     （2 回目以降の試行の前に呼ばれる）、`opt::relax` の `on_step`。進捗を渡すなら同じ形で
-     クロージャを足す。**`dft-core` に時計や wasm を持ち込まない**（規約）。
-   - Worker の契約は `protocol.ts` が唯一の情報源。新しいメッセージは非終端として
-     `isTerminal()` に入れ、`workerClient` の `onPartial` 経路に流す。`step` が
-     `onPartial` に流れて Promise を解決しないのと同じ扱い。vitest の往復テストを足す。
-   - 中止（`worker.terminate()`）と「時間切れ」「回数の上限」の表示（F5 の区別）を壊さないこと。
-2. **SIMD 非対応ブラウザ。** P6 から `.wasm` は SIMD 必須で、非対応ブラウザでは
-   モジュールのコンパイルに失敗して何も起きない。起動時に SIMD を含む小さなモジュールを
-   `WebAssembly.validate` で調べて案内を出すのが最小。非 SIMD 版を並べて配る手もあるが、
-   ビルド・CI・Vercel の設定が倍になる（SIMD の効果はベンゼン最適化で約 1 割）。どちらにするかは
-   ユーザーに確認すること。
-3. **手動 E2E（Firefox。WebGL が要るのでユーザーに依頼する）。** 設計計画の手動 E2E に
-   P6 以降の確認を足したもの:
-   - H₂O プリセット → 「安定な形にする」→ 緩和アニメーション → 等値面 → 閾値スライダー
-   - 原子を不自然に重ねる → エラーではなく発散アニメーション
-   - 計算中に原子を足す → すぐ中止され、次の計算が走る
-   - ベンゼンの「安定な形にする」の計算時間（パネル表示）を P6 の実測と比べる
-   - O₂ が三重項として扱われる（dev ビルドの `console.debug`）
-4. **Vercel と CI。** `npm run build` の成果物で `.wasm` が `application/wasm` で配られ、SIMD 版が
-   本番で動くこと。CI の wasm ジョブが `.cargo/config.toml` の `+simd128` と wasm-opt の
-   `--enable-simd` で通ること（CI は `wasm-pack` を latest で入れる）。
-5. **要件定義書の未回答コメント。** 基底関数の行に「STO-3G と 6-31G* のどちらを既定にするか」
-   という質問スレッドが開いたまま残っている。実装は STO-3G で確定済み（設計計画の
-   確定事項）。設計計画では「実装開始時に返信してクローズ」となっていたが、されていない。
-   ドキュメントへの書き込みになるので、返信する前にユーザーに確認すること。
-6. **任意（届かなかったもの・P6 以降に残したもの）。** 重み微分を実装して最適化を Medium に戻す、
-   マルチスレッド化、`OPTIMIZE_BUDGET_SECONDS` の見直し。詳細は「P6 以降に残したもの」。
+### P7 の実測
+
+ベンゼン「安定な形にする」の段階ごとの時刻（Node = `--target nodejs` の release、ブラウザ =
+Browser ペイン表示中）:
+
+| 段階 | Node | ブラウザ |
+| --- | --- | --- |
+| 下準備（Medium の積分・グリッド + Fine のグリッド） | 0 → 1.1 秒 | 0 → 1.8 秒 |
+| 電子の並び方を探す（Medium で探索 + Fine で解き直し） | 1.1 → 5.1 秒 | 1.8 → 5.6 秒 |
+| 最初の力 | 5.1 → 6.9 秒 | 5.6 → 7.0 秒 |
+| 1 歩（電子 ≈ 2 秒 → 力 ≈ 1 秒） × 3 | 6.9 → 16.0 秒 | 7.0 → 14.7 秒 |
+| 最後の step → 完了 | **1.0 秒 → 0 秒** | — |
+| 最初の等値面 | — | +0.9 秒 |
+
+一点計算（ベンゼン）は下準備 0.6 秒 + 探索 2.9 秒。表示が 4 秒以上止まる区間はない。
+収束後のエネルギー・最大力は前後で表示桁まで同じ（−227.26432894 Ha、3.4466e-5 Ha/Å）。
+
+SIMD あり/なし（Node、3 回の最小値。`-C target-feature=-simd128` で作った版は SIMD 命令 0 個、
+JS グルーは同一）:
+
+| | SIMD | 非 SIMD |
+| --- | --- | --- |
+| ベンゼン 最適化 | 16.6 秒 | 17.4 秒 |
+| ベンゼン 一点 | 4.0 秒 | 4.4 秒 |
+| CH₄ 最適化 | 2.4 秒 | 2.5 秒 |
+| H₂O 最適化 | 1.2 秒 | 1.1 秒 |
+
+非 SIMD 版を並べて救えるのは Safari 15.0〜16.3 だけ（Chrome は reference-types で 96、Firefox は
+モジュール Worker で 114 が先に効く）で、その Safari で three.js / React 19 / esnext の構文が
+動くかは確かめられない。ビルド・CI が倍になり、.wasm の変更ごとに約 300 KB × 2 が履歴に積まれる。
+
+本番ビルド（`web/dist` を `vite preview`、launch.json の `mol-preview`）で `.wasm` が
+`application/wasm` で配られ、ベンゼンが 3 歩・−227.264329 Ha で収束することを確認した。
+
+### P7 で残したもの
+
+- **手動 E2E（Firefox、ユーザー）。** 3D の見た目と、進捗カードが分子に重なる具合。
+- **CI の初回実行。** リモートが無く、この環境からは走らせていない。Linux でも成果物が一致する
+  ことは、PR の「Check committed artifact is current」が通って初めて確定する（macOS 上で
+  パス・`CARGO_HOME` を変えた再ビルドでは一致済み）。落ちたら差分のバイナリに残っている
+  文字列（`strings` で見る）から原因を探す。
+- **Vercel での確認。** デプロイ先の URL で `.wasm` の Content-Type と、ベンゼンの所要時間。
+- 任意: 重み微分・マルチスレッド化・`OPTIMIZE_BUDGET_SECONDS` の見直し（「P6 以降に残したもの」）。
 
 ### P3・P4 の実装メモ
 

@@ -9,9 +9,12 @@
 
 mod common;
 
+use std::cell::RefCell;
+
 use common::GradientReferences;
+use dft_core::gradient;
 use dft_core::molecule::{Atom, Molecule};
-use dft_core::opt::{self, bond_angle, bond_length, Options, Status, OPTIMIZER_GRID};
+use dft_core::opt::{self, bond_angle, bond_length, Options, Stage, Status, OPTIMIZER_GRID};
 use dft_core::scf::System;
 
 /// Bohr. The two optimisers stop on the same force threshold but not at
@@ -25,11 +28,27 @@ const ANGLE_TOLERANCE: f64 = 0.5;
 fn relax(molecule: Molecule) -> (opt::Relaxation, Vec<Vec<f64>>) {
     let system = System::build(molecule, OPTIMIZER_GRID).unwrap();
     let mut trajectory = Vec::new();
-    let relaxation = opt::relax(system, &Options::default(), None, &mut |step| {
-        trajectory.push(step.positions.to_vec());
-        true
-    });
+    let relaxation = opt::relax(
+        system,
+        &Options::default(),
+        None,
+        &mut |step| {
+            trajectory.push(step.positions.to_vec());
+            true
+        },
+        &mut |_| {},
+    );
     (relaxation, trajectory)
+}
+
+/// Three atoms dropped roughly where a user thinks they go.
+fn distorted_water() -> Molecule {
+    Molecule::from_angstrom(&[
+        (8, [0.03, -0.11, 0.17]),
+        (1, [0.21, 0.88, -0.31]),
+        (1, [-0.05, -0.62, -0.83]),
+    ])
+    .unwrap()
 }
 
 fn water_reference() -> Molecule {
@@ -107,13 +126,7 @@ fn methane_relaxes_to_the_structure_pyscf_finds() {
 fn a_distorted_start_reaches_the_same_minimum() {
     let references: GradientReferences = common::load("gradients.json");
     let reference = references.relaxed("h2o");
-    let distorted = Molecule::from_angstrom(&[
-        (8, [0.03, -0.11, 0.17]),
-        (1, [0.21, 0.88, -0.31]),
-        (1, [-0.05, -0.62, -0.83]),
-    ])
-    .unwrap();
-    let (relaxation, trajectory) = relax(distorted);
+    let (relaxation, trajectory) = relax(distorted_water());
 
     assert_eq!(relaxation.status, Status::Converged, "{} steps", relaxation.steps);
     let relaxed = &relaxation.system.molecule;
@@ -142,10 +155,16 @@ fn a_distorted_start_reaches_the_same_minimum() {
 fn accepted_steps_only_ever_lower_the_energy() {
     let system = System::build(water_reference(), OPTIMIZER_GRID).unwrap();
     let mut energies = Vec::new();
-    let relaxation = opt::relax(system, &Options::default(), None, &mut |step| {
-        energies.push(step.energy);
-        true
-    });
+    let relaxation = opt::relax(
+        system,
+        &Options::default(),
+        None,
+        &mut |step| {
+            energies.push(step.energy);
+            true
+        },
+        &mut |_| {},
+    );
     assert_eq!(relaxation.status, Status::Converged);
     for pair in energies.windows(2) {
         assert!(
@@ -168,10 +187,16 @@ fn accepted_steps_only_ever_lower_the_energy() {
 fn the_callback_can_stop_it() {
     let system = System::build(water_reference(), OPTIMIZER_GRID).unwrap();
     let mut seen = 0;
-    let relaxation = opt::relax(system, &Options::default(), None, &mut |_| {
-        seen += 1;
-        seen < 2
-    });
+    let relaxation = opt::relax(
+        system,
+        &Options::default(),
+        None,
+        &mut |_| {
+            seen += 1;
+            seen < 2
+        },
+        &mut |_| {},
+    );
     assert_eq!(relaxation.status, Status::Interrupted);
     assert_eq!(seen, 2);
     // Interrupted or not, there is a converged calculation to draw.
@@ -190,7 +215,7 @@ fn running_out_of_steps_is_reported_rather_than_thrown() {
     .unwrap();
     let system = System::build(distorted, OPTIMIZER_GRID).unwrap();
     let options = Options { max_steps: 2, ..Options::default() };
-    let relaxation = opt::relax(system, &options, None, &mut |_| true);
+    let relaxation = opt::relax(system, &options, None, &mut |_| true, &mut |_| {});
     assert_eq!(relaxation.status, Status::MaxSteps);
     assert_eq!(relaxation.steps, 2);
 }
@@ -216,10 +241,16 @@ fn an_unsolved_starting_point_stops_before_moving_anything() {
 
     let before = system.molecule.clone();
     let mut emitted = 0;
-    let relaxation = opt::relax(system, &Options::default(), Some(start), &mut |_| {
-        emitted += 1;
-        true
-    });
+    let relaxation = opt::relax(
+        system,
+        &Options::default(),
+        Some(start),
+        &mut |_| {
+            emitted += 1;
+            true
+        },
+        &mut |_| {},
+    );
     assert_eq!(relaxation.status, opt::Status::ScfFailed);
     assert_eq!(relaxation.steps, 0);
     assert_eq!(emitted, 0, "a structure with no electrons has no frames to show");
@@ -240,7 +271,8 @@ fn oxygen_relaxes_as_a_triplet_throughout() {
     let start = bond_length(&stretched, 0, 1);
 
     let system = System::build(stretched, OPTIMIZER_GRID).unwrap();
-    let relaxation = opt::relax(system, &Options::default(), None, &mut |_| true);
+    let relaxation =
+        opt::relax(system, &Options::default(), None, &mut |_| true, &mut |_| {});
 
     assert_eq!(relaxation.status, Status::Converged, "{} steps", relaxation.steps);
     assert!(relaxation.result.is_unrestricted(), "the triplet was solved restricted");
@@ -269,7 +301,112 @@ fn an_already_relaxed_structure_converges_immediately() {
         })
         .collect();
     let system = System::build(Molecule::new(atoms).unwrap(), OPTIMIZER_GRID).unwrap();
-    let relaxation = opt::relax(system, &Options::default(), None, &mut |_| true);
+    let relaxation =
+        opt::relax(system, &Options::default(), None, &mut |_| true, &mut |_| {});
     assert_eq!(relaxation.status, Status::Converged);
     assert_eq!(relaxation.steps, 0, "a relaxed structure was moved anyway");
+}
+
+/// What a relaxation told its caller, in the order it said it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Event {
+    Stage(Stage),
+    Step(usize),
+}
+
+/// Relaxes a molecule, recording the stages and the steps as one sequence.
+fn relax_recording(molecule: Molecule, stop_after: usize) -> (opt::Relaxation, Vec<Event>) {
+    let system = System::build(molecule, OPTIMIZER_GRID).unwrap();
+    // Two closures write to the same list, so neither can own it.
+    let events = RefCell::new(Vec::new());
+    let relaxation = opt::relax(
+        system,
+        &Options::default(),
+        None,
+        &mut |step| {
+            events.borrow_mut().push(Event::Step(step.index));
+            step.index + 1 < stop_after
+        },
+        &mut |stage| events.borrow_mut().push(Event::Stage(stage)),
+    );
+    (relaxation, events.into_inner())
+}
+
+/// The stages are what the interface shows while the atoms stand still, so each
+/// has to be announced before the work it names, and every step the animation
+/// receives has to have been announced on the way: its electrons, then its
+/// forces, then the step. A trial that raised the energy and was shortened is
+/// solved again under the same index; nothing else repeats.
+#[test]
+fn every_step_is_announced_before_it_is_computed() {
+    let (relaxation, events) = relax_recording(distorted_water(), usize::MAX);
+    assert_eq!(relaxation.status, Status::Converged);
+
+    // No calculation was handed in, so the starting structure is solved first.
+    assert_eq!(
+        events[..3],
+        [
+            Event::Stage(Stage::Solving { step: 0 }),
+            Event::Stage(Stage::Forces { step: 0 }),
+            Event::Step(0)
+        ]
+    );
+    let steps: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Step(index) => Some(*index),
+            Event::Stage(_) => None,
+        })
+        .collect();
+    assert_eq!(steps, (0..=relaxation.steps).collect::<Vec<_>>());
+
+    for (i, event) in events.iter().enumerate() {
+        match *event {
+            // The forces are the last thing before a step goes out, and only an
+            // accepted geometry gets them.
+            Event::Step(index) => {
+                assert_eq!(events[i - 1], Event::Stage(Stage::Forces { step: index }), "at {i}");
+            }
+            Event::Stage(Stage::Forces { step }) => {
+                assert_eq!(events.get(i + 1), Some(&Event::Step(step)), "at {i}");
+            }
+            // A trial is either tried again shorter, accepted, or the last thing
+            // the optimiser did before deciding it was already at the bottom.
+            Event::Stage(Stage::Solving { step }) => {
+                let next = events.get(i + 1).copied();
+                assert!(
+                    next.is_none()
+                        || next == Some(Event::Stage(Stage::Solving { step }))
+                        || next == Some(Event::Stage(Stage::Forces { step })),
+                    "at {i}: {next:?} after solving step {step}"
+                );
+            }
+        }
+    }
+}
+
+/// The force a relaxation reports at the end is the force at the structure it
+/// ends on. The optimiser has always computed it by then - it is what the last
+/// step was taken from - and hands that over rather than computing it again, so
+/// the value must be exactly what computing it again gives, to the bit.
+#[test]
+fn the_reported_forces_are_those_of_the_final_structure() {
+    // Converged, and stopped by the caller after the second structure.
+    for stop_after in [usize::MAX, 2] {
+        let (relaxation, _) = relax_recording(distorted_water(), stop_after);
+        assert!(relaxation.result.converged);
+        let expected = gradient::energy_gradient(&relaxation.system, &relaxation.result);
+        assert_eq!(
+            relaxation.max_force.to_bits(),
+            gradient::max_force(&expected).to_bits(),
+            "{:?}",
+            relaxation.status
+        );
+        assert_eq!(
+            relaxation.rms_force.to_bits(),
+            gradient::rms_force(&expected).to_bits(),
+            "{:?}",
+            relaxation.status
+        );
+    }
 }

@@ -1,0 +1,7 @@
+# The committed WebAssembly artifact has to come out byte for byte the same
+# wherever it is built (CI checks it on every pull request), and the standard
+# library's paths inside it carry the rustc version. Change this together with
+# the version in .github/workflows/ci.yml, and rebuild the artifact.
+[toolchain]
+channel = "1.98.1"
+targets = ["wasm32-unknown-unknown"]

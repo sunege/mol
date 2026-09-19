@@ -337,17 +337,59 @@ impl IsoMesh {
 /// interrupted from outside.
 const SEARCH_BUDGET_SECONDS: f64 = 60.0;
 
+/// The parts of a calculation long enough to be worth naming while they run.
+///
+/// Reported to the caller's `on_progress(stage, step)` as each one starts. The
+/// names say what the time is being spent on and nothing about how: which spin
+/// states the search tries, and how many, stays inside the engine like every
+/// other DFT parameter (requirement F4).
+mod stage {
+    /// Integrals and integration grid for the structure as given.
+    pub const PREPARING: &str = "preparing";
+    /// Finding how the electrons arrange themselves: the spin search, and for an
+    /// optimisation the chosen state solved again on the finer grid.
+    pub const SEARCHING: &str = "searching";
+    /// Electrons at a geometry the optimiser is trying; `step` is its index.
+    pub const SOLVING: &str = "solving";
+    /// Forces on the nuclei of geometry `step`; zero is the structure as given.
+    pub const FORCES: &str = "forces";
+}
+
+/// Tells the caller which part of the calculation is starting.
+///
+/// Only a report: a listener that throws is ignored rather than allowed to stop
+/// the calculation, because nothing about the answer depends on it.
+fn report(on_progress: Option<&js_sys::Function>, stage: &str, step: usize) {
+    if let Some(callback) = on_progress {
+        let _ = callback.call2(
+            &JsValue::NULL,
+            &JsValue::from_str(stage),
+            &JsValue::from_f64(step as f64),
+        );
+    }
+}
+
 /// Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
 /// the charge and spin state itself (requirement F4).
 ///
 /// Non-convergence comes back through `summary().converged`, never as a thrown
 /// error: the UI turns it into an animation rather than a message
 /// (requirement F5).
+///
+/// `on_progress(stage, step)`, when given, is called as each part of the
+/// calculation starts (see [`stage`]).
 #[wasm_bindgen(js_name = scf)]
-pub fn scf(z: &[u8], xyz_angstrom: &[f64]) -> Result<Calculation, JsValue> {
+pub fn scf(
+    z: &[u8],
+    xyz_angstrom: &[f64],
+    on_progress: Option<js_sys::Function>,
+) -> Result<Calculation, JsValue> {
+    let on_progress = on_progress.as_ref();
     let molecule = build_molecule(z, xyz_angstrom)?;
+    report(on_progress, stage::PREPARING, 0);
     let mut system = System::build(molecule, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+    report(on_progress, stage::SEARCHING, 0);
     let deadline = js_sys::Date::now() + SEARCH_BUDGET_SECONDS * 1000.0;
     let outcome = driver::solve(&mut system, &DriverOptions::default(), &mut || {
         js_sys::Date::now() < deadline
@@ -391,13 +433,20 @@ const OPTIMIZE_BUDGET_SECONDS: f64 = 1800.0;
 /// Nothing here throws: a structure the engine cannot solve comes back as a
 /// calculation whose `optimization.converged` is false, which the interface
 /// turns into an animation rather than a message (requirement F5).
+///
+/// `on_progress(stage, step)`, when given, is called as each part of the
+/// calculation starts (see [`stage`]). Most of the wait before the first step is
+/// in parts that move no atoms, and this is how the caller can say so.
 #[wasm_bindgen(js_name = optimize)]
 pub fn optimize(
     z: &[u8],
     xyz_angstrom: &[f64],
     on_step: &js_sys::Function,
+    on_progress: Option<js_sys::Function>,
 ) -> Result<Calculation, JsValue> {
+    let on_progress = on_progress.as_ref();
     let molecule = build_molecule(z, xyz_angstrom)?;
+    report(on_progress, stage::PREPARING, 0);
     // The spin state is chosen on the grid a single point uses and only the
     // winner is solved again on the optimiser's finer one: the choice does not
     // depend on the grid, and every losing state tried on the fine grid was
@@ -406,6 +455,7 @@ pub fn optimize(
     let mut system = System::build(molecule, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
 
+    report(on_progress, stage::SEARCHING, 0);
     let search_deadline = js_sys::Date::now() + SEARCH_BUDGET_SECONDS * 1000.0;
     let outcome =
         driver::solve_then_refine(&mut system, fine, &DriverOptions::default(), &mut || {
@@ -442,6 +492,10 @@ pub fn optimize(
                 return false;
             }
             js_sys::Date::now() < deadline
+        },
+        &mut |current: opt::Stage| match current {
+            opt::Stage::Solving { step } => report(on_progress, stage::SOLVING, step),
+            opt::Stage::Forces { step } => report(on_progress, stage::FORCES, step),
         },
     );
 

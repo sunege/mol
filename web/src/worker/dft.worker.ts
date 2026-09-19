@@ -15,6 +15,10 @@
  * computation is synchronous and blocks this worker's message loop, but
  * `postMessage` is not - the frames reach the UI thread while the next step is
  * still being solved, which is what lets a slow molecule still animate.
+ *
+ * The same goes for `progress`: the engine says which part of the work it is
+ * starting, and that is posted as it happens, so the interface can name the
+ * wait while the atoms stand still.
  */
 import init, {
   supportedElements,
@@ -23,6 +27,7 @@ import init, {
   type Calculation,
 } from '../wasm/dft_wasm.js';
 import wasmUrl from '../wasm/dft_wasm_bg.wasm?url';
+import { progressFromEngine } from './protocol';
 import type {
   DensityChannel,
   ElementInfo,
@@ -44,9 +49,24 @@ interface RawStep {
 const post = (message: WorkerResponse, transfer: Transferable[] = []) =>
   self.postMessage(message, transfer);
 
-const ready = init({ module_or_path: wasmUrl }).then(() => {
-  post({ id: 0, type: 'ready' });
-});
+/** The engine's progress callback, posting each report under the request's id. */
+const reportProgress = (id: number) => (stage: string, step: number) => {
+  const progress = progressFromEngine(stage, step);
+  if (progress) post({ id, type: 'progress', progress });
+};
+
+// A module that cannot be loaded - a browser without WebAssembly SIMD, a failed
+// download - is reported rather than left to hang: the client would otherwise
+// wait for `ready` forever, and every request with it.
+const ready = init({ module_or_path: wasmUrl }).then(
+  () => post({ id: 0, type: 'ready' }),
+  (error: unknown) =>
+    post({
+      id: 0,
+      type: 'unavailable',
+      message: error instanceof Error ? error.message : String(error),
+    }),
+);
 
 /**
  * The most recent converged calculation, which the isosurface requests draw
@@ -71,7 +91,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         // Timed here rather than in Rust: `std::time::Instant` is not available
         // on wasm32-unknown-unknown.
         const started = performance.now();
-        const calculation = scf(request.z, request.xyz);
+        const calculation = scf(request.z, request.xyz, reportProgress(request.id));
         current?.free();
         current = calculation;
         const result = calculation.summary() as Omit<ScfOutcome, 'elapsedMs'>;
@@ -93,24 +113,29 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       }
       case 'optimize': {
         const started = performance.now();
-        const calculation = optimize(request.z, request.xyz, (raw: RawStep) => {
-          // A fresh array each time, so it can be transferred rather than
-          // copied; the worker has no use for it afterwards.
-          const xyz = new Float32Array(raw.xyz);
-          post(
-            {
-              id: request.id,
-              type: 'step',
-              step: {
-                step: raw.step,
-                xyz,
-                energy: raw.energy,
-                maxForce: raw.maxForce,
+        const calculation = optimize(
+          request.z,
+          request.xyz,
+          (raw: RawStep) => {
+            // A fresh array each time, so it can be transferred rather than
+            // copied; the worker has no use for it afterwards.
+            const xyz = new Float32Array(raw.xyz);
+            post(
+              {
+                id: request.id,
+                type: 'step',
+                step: {
+                  step: raw.step,
+                  xyz,
+                  energy: raw.energy,
+                  maxForce: raw.maxForce,
+                },
               },
-            },
-            [xyz.buffer],
-          );
-        });
+              [xyz.buffer],
+            );
+          },
+          reportProgress(request.id),
+        );
         current?.free();
         current = calculation;
         const result = calculation.summary() as Omit<ScfOutcome, 'elapsedMs'>;

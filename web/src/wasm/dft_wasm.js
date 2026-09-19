@@ -204,17 +204,22 @@ if (Symbol.dispose) IsoMesh.prototype[Symbol.dispose] = IsoMesh.prototype.free;
  * Nothing here throws: a structure the engine cannot solve comes back as a
  * calculation whose `optimization.converged` is false, which the interface
  * turns into an animation rather than a message (requirement F5).
+ *
+ * `on_progress(stage, step)`, when given, is called as each part of the
+ * calculation starts (see [`stage`]). Most of the wait before the first step is
+ * in parts that move no atoms, and this is how the caller can say so.
  * @param {Uint8Array} z
  * @param {Float64Array} xyz_angstrom
  * @param {Function} on_step
+ * @param {Function | null} [on_progress]
  * @returns {Calculation}
  */
-export function optimize(z, xyz_angstrom, on_step) {
+export function optimize(z, xyz_angstrom, on_step, on_progress) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.optimize(ptr0, len0, ptr1, len1, on_step);
+    const ret = wasm.optimize(ptr0, len0, ptr1, len1, on_step, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress));
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -228,16 +233,20 @@ export function optimize(z, xyz_angstrom, on_step) {
  * Non-convergence comes back through `summary().converged`, never as a thrown
  * error: the UI turns it into an animation rather than a message
  * (requirement F5).
+ *
+ * `on_progress(stage, step)`, when given, is called as each part of the
+ * calculation starts (see [`stage`]).
  * @param {Uint8Array} z
  * @param {Float64Array} xyz_angstrom
+ * @param {Function | null} [on_progress]
  * @returns {Calculation}
  */
-export function scf(z, xyz_angstrom) {
+export function scf(z, xyz_angstrom, on_progress) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.scf(ptr0, len0, ptr1, len1);
+    const ret = wasm.scf(ptr0, len0, ptr1, len1, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress));
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -275,6 +284,10 @@ function __wbg_get_imports() {
         },
         __wbg_call_6bcf8d3e20937e46: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = arg0.call(arg1, arg2);
+            return ret;
+        }, arguments); },
+        __wbg_call_7bbd9cceba9949ad: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+            const ret = arg0.call(arg1, arg2, arg3);
             return ret;
         }, arguments); },
         __wbg_error_757e9472f8410341: function(arg0, arg1) {
@@ -422,6 +435,10 @@ function handleError(f, args) {
         const idx = addToExternrefTable0(e);
         wasm.__wbindgen_exn_store(idx);
     }
+}
+
+function isLikeNone(x) {
+    return x === undefined || x === null;
 }
 
 function passArray8ToWasm0(arg, malloc) {

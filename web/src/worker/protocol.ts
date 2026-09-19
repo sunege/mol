@@ -12,6 +12,12 @@
  * up, so a molecule that takes a second per step is still moving on screen while
  * it is being solved.
  *
+ * Both calculations also say what they are doing while nothing moves: a
+ * `progress` as each part of the work starts. Before the first step of a large
+ * molecule there are several seconds of it - the integrals, the search for how
+ * the electrons arrange themselves, the first forces - and without these the
+ * screen would simply stand still.
+ *
  * Coordinates crossing this boundary are always in Angstrom and energies always
  * in Hartree; the engine converts to Bohr internally. Densities are the one
  * thing left in engine units - electrons per cubic Bohr - because they are only
@@ -96,6 +102,57 @@ export interface OptimizationStep {
   energy: number;
   /** Largest force component, in Hartree per Angstrom. */
   maxForce: number;
+}
+
+/**
+ * The part of a calculation the engine has just started on.
+ *
+ * Named for what the time is spent on, never for how: which spin states the
+ * search tries and how many of them there are stay inside the engine, like
+ * every other DFT parameter (requirement F4). The interface can say "working
+ * out how the electrons arrange themselves" and nothing more specific, because
+ * nothing more specific crosses this boundary.
+ *
+ * - `preparing` — the integrals and the integration grid of the structure as
+ *   placed. Moves nothing and decides nothing, but costs about a second for
+ *   benzene.
+ * - `searching` — finding the arrangement of electrons the molecule settles
+ *   into, which for a relaxation includes solving it once more on the finer
+ *   grid the optimiser uses. The longest wait before anything moves.
+ * - `forces` — the forces on the nuclei of geometry `step`. Step zero is the
+ *   structure as placed; each later one is a move the optimiser has accepted.
+ * - `solving` — the electrons at the geometry that would become `step`. A move
+ *   that raised the energy is tried again shorter under the same `step`.
+ *
+ * A single point reports only the first two.
+ */
+export type CalculationProgress =
+  | { stage: 'preparing' }
+  | { stage: 'searching' }
+  | { stage: 'forces'; step: number }
+  | { stage: 'solving'; step: number };
+
+export type CalculationStage = CalculationProgress['stage'];
+
+/**
+ * Reads the engine's `on_progress(stage, step)` into a protocol message.
+ *
+ * The names are the engine's (`crates/dft-wasm`, `mod stage`) and this is the
+ * one place they are spelled on this side. A name it does not know is dropped
+ * rather than guessed at: a missing progress line costs nothing, and a wrong
+ * one would describe a calculation that is not happening.
+ */
+export function progressFromEngine(stage: string, step: number): CalculationProgress | null {
+  switch (stage) {
+    case 'preparing':
+    case 'searching':
+      return { stage };
+    case 'forces':
+    case 'solving':
+      return Number.isInteger(step) && step >= 0 ? { stage, step } : null;
+    default:
+      return null;
+  }
 }
 
 /** Result of a single-point calculation. */
@@ -199,10 +256,12 @@ export interface IsoMesh {
 
 export type WorkerRequest =
   | { id: number; type: 'elements' }
+  /** A single point, answering with `progress` as it goes and then one `scf`. */
   | { id: number; type: 'scf'; z: Uint8Array; xyz: Float64Array }
   /**
    * Relaxes the structure, answering with a `step` per accepted geometry and
-   * then one `scf` for the final calculation.
+   * `progress` as each part of the work starts, and then one `scf` for the final
+   * calculation.
    */
   | { id: number; type: 'optimize'; z: Uint8Array; xyz: Float64Array }
   /** Cuts the density of the last `scf` or `optimize` request at a new level. */
@@ -211,12 +270,18 @@ export type WorkerRequest =
 export type WorkerResponse =
   /** Emitted once, unsolicited, when the WASM module has finished loading. */
   | { id: 0; type: 'ready' }
+  /**
+   * Emitted once instead of `ready` when the WASM module could not be loaded.
+   * Nothing sent to this worker afterwards can be answered.
+   */
+  | { id: 0; type: 'unavailable'; message: string }
   | { id: number; type: 'elements'; elements: ElementInfo[] }
   /**
-   * An intermediate answer: more will follow for the same `id`. Every other
+   * Intermediate answers: more will follow for the same `id`. Every other
    * response type ends the request it belongs to.
    */
   | { id: number; type: 'step'; step: OptimizationStep }
+  | { id: number; type: 'progress'; progress: CalculationProgress }
   | { id: number; type: 'scf'; result: ScfOutcome }
   | { id: number; type: 'mesh'; mesh: IsoMesh }
   | { id: number; type: 'error'; message: string };
@@ -229,5 +294,5 @@ export type WorkerResponse =
  * as every other request.
  */
 export function isTerminal(response: WorkerResponse): boolean {
-  return response.type !== 'step';
+  return response.type !== 'step' && response.type !== 'progress';
 }

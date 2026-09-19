@@ -107,6 +107,25 @@ impl Status {
     }
 }
 
+/// What the optimiser is about to spend time on, reported before it starts.
+///
+/// A step of a large molecule takes seconds, and most of it is two things the
+/// caller cannot see: solving the electrons at a trial geometry, and then the
+/// forces on the nuclei. Saying which one is under way is what lets an interface
+/// show that something is happening while the atoms stand still. There is no
+/// clock here (there is no `std::time` on `wasm32-unknown-unknown`), so how long
+/// each part takes is for the caller to measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Building a geometry's integrals and grid and solving its electrons.
+    /// `step` is the index the geometry gets if it is accepted, so a trial that
+    /// raises the energy and is tried again shorter reports the same index twice.
+    Solving { step: usize },
+    /// The forces on the nuclei of geometry `step`, which has been accepted by
+    /// then. Zero is the structure as given.
+    Forces { step: usize },
+}
+
 /// One accepted geometry, handed to the caller as it is produced.
 #[derive(Debug, Clone, Copy)]
 pub struct Step<'a> {
@@ -148,26 +167,33 @@ impl Relaxation {
 ///
 /// `on_step` returning false stops the relaxation where it is, which is how a
 /// caller imposes a wall-clock budget without this module needing a clock (there
-/// is no `std::time` on `wasm32-unknown-unknown`).
+/// is no `std::time` on `wasm32-unknown-unknown`). `on_stage` is told what each
+/// expensive part is before it starts (see [`Stage`]); it only listens, and
+/// nothing it does changes the result.
 pub fn relax(
     mut system: System,
     options: &Options,
     start: Option<ScfResult>,
     on_step: &mut dyn FnMut(Step) -> bool,
+    on_stage: &mut dyn FnMut(Stage),
 ) -> Relaxation {
     let n = system.molecule.n_atoms();
     let dimension = 3 * n;
 
     let mut result = match start {
         Some(result) => result,
-        None => single_point(&system, &options.scf),
+        None => {
+            on_stage(Stage::Solving { step: 0 });
+            single_point(&system, &options.scf)
+        }
     };
     if !result.converged {
-        return finish(system, result, Status::ScfFailed, 0);
+        return finish(system, result, None, Status::ScfFailed, 0);
     }
 
     let mut coordinates = DVector::from_vec(system.molecule.coords());
-    let mut forces = force_vector(&system, &result);
+    on_stage(Stage::Forces { step: 0 });
+    let (mut analytic, mut forces) = forces_at(&system, &result);
     let mut energy = result.energy;
     let mut inverse_hessian = DMatrix::identity(dimension, dimension) / INITIAL_CURVATURE;
     let mut trust = options.initial_trust;
@@ -176,7 +202,7 @@ pub fn relax(
     let mut accepted = 0;
 
     if !emit(on_step, 0, &coordinates, energy, &forces) {
-        return finish(system, result, Status::Interrupted, 0);
+        return finish(system, result, Some(analytic), Status::Interrupted, 0);
     }
 
     for step in 1..=options.max_steps {
@@ -196,6 +222,7 @@ pub fn relax(
         let mut moved = false;
         for _ in 0..MAX_REJECTIONS {
             let trial_coordinates = &coordinates + &direction;
+            on_stage(Stage::Solving { step });
             let Some(trial) = evaluate(&system, options, &result, &trial_coordinates) else {
                 // The step put two nuclei on top of each other, or the SCF found
                 // nothing there. Either way the direction was too long.
@@ -219,13 +246,15 @@ pub fn relax(
 
             // Accepted. Update the inverse Hessian from what the move revealed
             // about the curvature along it.
-            let trial_forces = force_vector(&trial_system, &trial_result);
+            on_stage(Stage::Forces { step });
+            let (trial_analytic, trial_forces) = forces_at(&trial_system, &trial_result);
             update_inverse_hessian(&mut inverse_hessian, &direction, &(&forces - &trial_forces));
 
             energy_change = trial_result.energy - energy;
             system = trial_system;
             result = trial_result;
             coordinates = trial_coordinates;
+            analytic = trial_analytic;
             forces = trial_forces;
             energy = result.energy;
             trust = (trust * 1.3).min(options.max_trust);
@@ -255,7 +284,7 @@ pub fn relax(
     if status == Status::MaxSteps && converged(options, &forces, energy_change, accepted + 1) {
         status = Status::Converged;
     }
-    finish(system, result, status, accepted)
+    finish(system, result, Some(analytic), status, accepted)
 }
 
 /// Builds and solves a trial geometry, or `None` when it cannot be solved.
@@ -295,14 +324,20 @@ fn single_point(system: &System, options: &ScfOptions) -> ScfResult {
     }
 }
 
-/// Forces - minus the gradient - as a flat vector, with the net force removed.
-fn force_vector(system: &System, result: &ScfResult) -> DVector<f64> {
-    let mut analytic = gradient::energy_gradient(system, result);
-    gradient::remove_net_force(&mut analytic);
-    DVector::from_iterator(
-        3 * analytic.len(),
-        analytic.iter().flat_map(|g| g.iter().map(|value| -value)),
-    )
+/// The analytic gradient at a geometry, and the forces the optimiser steps
+/// along: minus the gradient, as a flat vector, with the net force removed.
+///
+/// The gradient is kept as it came out, because it is also what the relaxation
+/// reports at the end (see [`finish`]).
+fn forces_at(system: &System, result: &ScfResult) -> (Vec<[f64; 3]>, DVector<f64>) {
+    let analytic = gradient::energy_gradient(system, result);
+    let mut balanced = analytic.clone();
+    gradient::remove_net_force(&mut balanced);
+    let forces = DVector::from_iterator(
+        3 * balanced.len(),
+        balanced.iter().flat_map(|g| g.iter().map(|value| -value)),
+    );
+    (analytic, forces)
 }
 
 fn converged(options: &Options, forces: &DVector<f64>, energy_change: f64, step: usize) -> bool {
@@ -349,12 +384,26 @@ fn emit(
     })
 }
 
-fn finish(system: System, result: ScfResult, status: Status, steps: usize) -> Relaxation {
-    let (max_force, rms_force) = if result.converged {
-        let analytic = gradient::energy_gradient(&system, &result);
-        (gradient::max_force(&analytic), gradient::rms_force(&analytic))
-    } else {
-        (f64::NAN, f64::NAN)
+/// Packages the end of a relaxation.
+///
+/// `analytic` is the gradient of `system` as it stands, which the loop
+/// has always computed already: the geometry it ends on is one whose forces it
+/// stepped from. Passing it in rather than computing it again is not an
+/// approximation - it is the same function of the same density - and computing
+/// it again was a whole gradient, a second for benzene in the browser, spent
+/// after the last step had already been shown.
+fn finish(
+    system: System,
+    result: ScfResult,
+    analytic: Option<Vec<[f64; 3]>>,
+    status: Status,
+    steps: usize,
+) -> Relaxation {
+    let (max_force, rms_force) = match analytic {
+        Some(analytic) if result.converged => {
+            (gradient::max_force(&analytic), gradient::rms_force(&analytic))
+        }
+        _ => (f64::NAN, f64::NAN),
     };
     Relaxation { system, result, status, steps, max_force, rms_force }
 }
