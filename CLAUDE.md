@@ -1,661 +1,142 @@
 # ブラウザ分子シミュレータ
 
-ブラウザ上で本物の DFT を回し、(1) 構造最適化アニメーションと (2) 電子密度等値面を見せるアプリ。
-化学の知識がないユーザーが 3D 空間に原子を置くだけで使える。
+ブラウザ上で本物の DFT（Rust → WebAssembly）を回し、化学を知らない人が原子を置くだけで
+(1) 安定な形へ緩和するアニメーションと (2) 電子密度の等値面を見られるアプリ。
+**v1（P0〜P7）完了・Vercel にデプロイ済み（2026-09-19）。**
 
-- **要件定義書**: https://claude.ai/code/artifact/35efc875-a8df-49bc-946b-9e18abba1614
-  （Claude Docs。読むときは docs コネクタの `read` を使う。web fetch では読めない）
-- **設計計画**: `~/.claude/plans/tidy-munching-sedgewick.md` — フェーズ構成・アーキテクチャ・検証方針の一次情報
+- 要件定義書: https://claude.ai/code/artifact/35efc875-a8df-49bc-946b-9e18abba1614
+  （Claude Docs。docs コネクタの `read` で読む。web fetch では読めない）
+- 設計計画: `~/.claude/plans/tidy-munching-sedgewick.md`
+- **経緯・実測・却下した案: [docs/dev-notes.md](docs/dev-notes.md)**。自動では読み込まれない。
+  触る領域の節だけ読むこと。下の規約の「なぜ」と数字はすべてそこにある。
 
 ## スコープ（v1 で固定）
 
-| 項目 | 値 |
-| --- | --- |
-| 対象系 | 非周期系（分子）のみ。H₂O・O₂ 程度〜ベンゼン程度 |
-| 対象元素 | H–Ar（Z = 1..18）。全電子計算 |
-| 基底関数 | **STO-3G 固定**（6-31G* は将来の差し替え候補。データは差し替え可能な形に保つ） |
-| 汎関数 | **LDA（Slater 交換 + VWN5 相関）**。PBE は後から足せる構造にする |
-| 対象外 | 周期系、重元素・遷移金属、励起状態（TD-DFT）、反応経路探索 |
-| 性能目標 | ベンゼンで SCF + 構造最適化が数秒〜十数秒 |
+非周期系（分子）のみ、H–Ar の全電子計算、H₂O〜ベンゼン規模。基底は **STO-3G 固定**
+（6-31G* は差し替え候補。積分・勾配・π 判定は d 関数でもそのまま動く）。汎関数は
+**LDA（Slater + VWN5）**（PBE は後から足せる構造）。対象外: 周期系・重元素・TD-DFT・反応経路。
+性能目標「ベンゼンの SCF + 構造最適化が数秒〜十数秒」→ 現状ブラウザで約 15 秒。
 
 ## コマンド
 
 ```bash
-npm run dev          # Vite 開発サーバ (5173)
+npm run dev          # Vite 開発サーバ (5173)。launch.json: mol-dev / mol-preview (4173, web/dist)
 npm run build        # tsc -b && vite build → web/dist
-npm test             # vitest (web)
-npm run build:wasm   # scripts/build-wasm.sh → web/src/wasm/（生成物はコミットする。出荷されるのは CI（Linux）が作り直したもの）
+npm test             # vitest (web)。engine.test.ts はコミット済みの .wasm を実際に呼ぶ
+npm run build:wasm   # scripts/build-wasm.sh → web/src/wasm/（コミットする）
 cargo test           # dft-core / dft-wasm
-cargo run --release --example profile -- benzene --optimize   # ネイティブの所要時間の内訳
+cargo run --release --example profile -- benzene --optimize   # ネイティブの内訳
 ```
 
-WASM の中でどこに時間が行っているかは、関数名を残したビルドを Node で CPU プロファイルに
-かけて見る（`dft-wasm` の Cargo.toml に `profiling` プロファイルがある。生成物は
-`web/src/wasm/` とは別の場所に出すこと）:
-
-```bash
-wasm-pack build crates/dft-wasm --profiling --target nodejs --out-dir /tmp/wasm-prof
-node --cpu-prof --cpu-prof-interval 500 bench.cjs   # require('/tmp/wasm-prof/dft_wasm.js') して optimize() を呼ぶだけの小さなスクリプト
-```
-
-`.cpuprofile` の `nodes[].callFrame.functionName` と `samples` を数えれば自己時間の表になる。
-WASM の内訳は**ネイティブとまるで違う**（P6 のメモ参照）ので、WASM の高速化はネイティブの
-`sample`/プロファイラだけ見て決めないこと。
-
-前後の所要時間の比較も Node（`--target nodejs` の release ビルド）で取るのが安定する。
-Chromium と同じ V8 で、しかも間引かれない。Claude の Browser ペインは**非表示だと
-ワーカーが間引かれ**（レンダラの CPU が 30〜50% に落ちていた）、同じバイナリで Node の
-1.2〜1.8 倍かかった。長い計算ほど歪むので、ペインが見えていないときのブラウザ実測は参考値。
-
-参照値・基底データの再生成（PySCF が要る。普段は不要で、基底や汎関数を変えるときだけ）:
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install pyscf
-.venv/bin/python scripts/gen_reference.py
-```
-
-`main()` の全実行は分〜十数分かかる（ベンゼンを grid level 9 で解くため）。
-一部だけ要るときは関数を直接呼ぶこと。放置すると孤児プロセスとして残り続ける:
-
-```bash
-.venv/bin/python -c "import sys; sys.path.insert(0,'scripts'); import gen_reference as g; g.open_shell_reference()"
-```
+- **時間の比較は Node で取る**（`wasm-pack build crates/dft-wasm --release --target nodejs --out-dir <scratch>`
+  を小さなスクリプトから呼ぶ）。Browser ペインは非表示だとワーカーが間引かれ 1.2〜2.6 倍遅い。
+  このマシン（i5-5287U、2 コア）は同じバイナリでも ±30% ぶれるので、複数回の最小値で判断する。
+- **WASM の高速化は WASM のプロファイルで決める**（`--profiling` ビルド + `node --cpu-prof`。手順は
+  dev-notes「コマンドの詳細」）。内訳はネイティブとまるで違う。
+- 参照値の再生成は基底・汎関数を変えるときだけ: `.venv/bin/python scripts/gen_reference.py`
+  （PySCF。全体は十数分かかるので、要る関数だけを直接呼ぶ。放置すると孤児プロセスが残る）。
 
 ## 構成
 
 ```
-crates/dft-core/          純Rust の計算エンジン。wasm 非依存 → cargo test で全部検証できる
-  src/basis/              Shell/BasisSet + sto3g_data.rs（生成物）
-  src/integrals/          boys.rs, md.rs（McMurchie-Davidson）, onee.rs, eri.rs
-  src/integrals/deriv.rs  ∂S/∂R・∂T/∂R・∂V/∂R・∂(μν|λσ)/∂R。ガウス関数の中心微分を
-                          「角運動量 ±1 の積分」に落として既存の MD ルーチンを使い回す
-  src/grid/               radial.rs, becke.rs, lebedev_data.rs（生成物）。点の並び順に意味がある（後述）
-  src/xc/                 lda.rs（Slater + VWN5）+ グリッド上の E_xc / V_xc 組み立て
-                          と dE_xc/dR（グリッド重みの微分は省略。理由は下の規約）
-  src/xc/blocks.rs        ブロックごとに無視できる基底関数を落とす評価と、SCF 1 回分の
-                          基底値キャッシュ（BasisOnGrid）
-  src/xc/kernels.rs       XC の小さな行列積（matrixmultiply を使わない。理由は P6 のメモ）
-  examples/profile.rs     ネイティブの所要時間の内訳（UI のプリセットと同じ構造で測る）
-  src/gradient/           勾配の組み立て（Pulay 項・エネルギー重み付き密度行列 W）。
-                          finite_difference.rs は**勾配より先に書いた**検証ハーネス
-  src/opt/                Cartesian BFGS + trust radius。最適化用グリッドもここ
-  src/scf/                mod.rs（RKS/UKS ループ）, diis.rs, guess.rs（SAD）, linalg.rs
-  src/driver.rs           電荷とスピン多重度の自動決定（要件 F4）。ラウンド制の探索
-  src/density.rs          表示用の直交格子上の ρ(r)（Becke グリッドとは別物）。符号付きも扱う
-  src/bonding.rs          「どの電子を描くか」。分子平面の検出、鏡映パリティによる π 判定、差密度
-  src/marching.rs         marching cubes。256 ケース表は起動時に導出する（後述）
-  tests/data/             PySCF/libxc 由来の参照値 JSON（生成物）。開殻は scf_open_shell.json、
-                          勾配と緩和後の構造は gradients.json
-crates/dft-wasm/   wasm-bindgen ラッパー。単位変換とシリアライズのみ、物理を書かない
-.cargo/config.toml wasm32 向けに simd128 を有効にする（wasm-opt 側は --enable-simd）
-scripts/           gen_reference.py — 上の「生成物」をすべて作る唯一の場所
-                   build-wasm.sh — web/src/wasm/ を作る唯一の手順（npm run build:wasm。再現性の理由は規約）
-rust-toolchain.toml Rust 1.98.1 に固定（CI も同じ版。Linux のビルドどうしを一致させるため）
-web/src/worker/    protocol.ts（UI↔Worker の契約）, dft.worker.ts, workerClient.ts,
-                   engineSupport.ts（SIMD の有無の判定と、動かないブラウザへの案内）,
-                   engine.test.ts（コミット済みの .wasm を vitest から直接呼ぶ）
-web/src/animation/ framePlayer.ts（キュー + 再生クロック）, divergence.ts（発散演出の生成）。
-                   最適化ステップも発散演出も同じキューに流れる
-web/src/scene/     viewer.ts（Three.js, 命令的）, bonds.ts, webgl.ts
-web/src/components/ PeriodicPicker.tsx, IsoLevelSlider.tsx,
-                   progress.ts（進捗カードの文言。純粋関数）+ ProgressOverlay.tsx
-web/src/wasm/      npm run build:wasm の生成物。**コミット対象**
+crates/dft-core/   純 Rust のエンジン（wasm 非依存、cargo test で全部検証できる）
+  basis/ integrals/（MD 法、deriv.rs = 全積分の中心微分）grid/（Becke + Lebedev）xc/（LDA、
+  blocks.rs = スクリーニングと基底値キャッシュ、kernels.rs = 小さな行列積）scf/（RKS/UKS、DIIS、
+  SAD、linalg.rs = Jacobi）gradient/（Pulay 含む。finite_difference.rs は検証ハーネス）
+  opt/（BFGS + trust radius）driver.rs（電荷・スピンの自動探索）density.rs（表示用の ρ 格子）
+  bonding.rs（π 判定・差密度）marching.rs（marching cubes）tests/data/（参照値 JSON、生成物）
+crates/dft-wasm/   wasm-bindgen ラッパー。単位変換とシリアライズだけ（物理を書かない）
+scripts/           gen_reference.py（生成物をすべて作る唯一の場所）、build-wasm.sh
+web/src/worker/    protocol.ts（Worker の契約）dft.worker.ts workerClient.ts engineSupport.ts
+web/src/animation/ framePlayer.ts（キュー + 再生クロック）divergence.ts（発散演出）
+web/src/scene/     viewer.ts（Three.js、命令的）  web/src/components/  progress.ts ほか
+web/src/wasm/      build:wasm の生成物（コミットする）
 ```
 
 ## 守るべき規約
 
-- **単位**: エンジンは原子単位（Bohr, Hartree）、UI は Å。変換は `crates/dft-wasm` の境界 1 箇所だけ。エンジン内部に Å を持ち込まない。
-- **`dft-core` に wasm 依存を入れない。** 全ロジックをホスト上の `cargo test` で検証できる状態を保つ。
-- **Rust を書き戻すときに `mv`（や `cp -p`）を使わない。** cargo の再ビルド判定は
-  mtime で、バックアップから `mv` で戻すと**ファイルの時刻ごと巻き戻る**ので
-  cargo は「変更なし」と判断して再コンパイルを飛ばす。`wasm-pack` は成功したように
-  見え、**中身は前のままの `.wasm` が `web/src/wasm/` に書かれる**。
-  一度これで、検証用に 2 秒へ縮めたタイムアウトを 300 秒へ戻したつもりのまま
-  2 秒のバイナリを配信し、「タイムアウトが厳しすぎる」という報告を受けた。
-  戻すときは `cp`（`-p` なし）か、戻したあとに `touch` すること。
-  疑わしいときは**定数がバイナリに入っているか直接見る**のが早い:
+### エンジン
+- **単位**: エンジンは原子単位（Bohr, Hartree）、UI は Å。変換は `dft-wasm` の境界だけ。
+- **`dft-core` に wasm 依存も時計も入れない。** 予算・進捗はクロージャで受ける
+  （`driver` の `keep_going`、`opt::relax` の `on_step` / `on_stage`）。
+- **参照値・物理定数を記憶から書かない。** テスト内で独立な経路から導出するか、`gen_reference.py`
+  の生成物にする（STO-3G・Lebedev・`tests/data/` も生成物で手編集しない）。例外は `xc/lda.rs` の
+  VWN5 定数（libxc と照合済み）。合わないときは先にどちらが正しいかを確かめる。
+- **勾配は HF 項 + Pulay 項**（`W` = エネルギー重み付き密度行列）で、SCF 収束時にしか成り立たない。
+  書き換えたら `integrals/deriv.rs` の項ごとの有限差分と並進不変性を先に見る（4 中心とも明示的に微分）。
+- **XC のグリッド重み微分は省略**している＝解析勾配は「グリッド固定のエネルギー」の厳密な微分。
+  検証は `System::build_with_grid` で。最適化は Fine（`opt::OPTIMIZER_GRID`）、一点は Medium。
+- **`nalgebra` の `SymmetricEigen` は使わない**（固有値と固有ベクトルの対応が黙って壊れる）。
+  `scf/linalg.rs` の Jacobi。検査は `A V = V Λ` と `V L Vᵀ = A` の両方。
+- **スピン探索は一重項と三重項を両方解いて比べる**（HOMO-LUMO ギャップでの振り分けは不可。
+  三重項を一重項の密度から始める・level shift はどちらも遅い）。探索は Medium、勝った状態だけ
+  Fine で解き直す（`driver::solve_then_refine`）。
+- **性能の前提を崩さない**: ERI 微分は密度を先に Hermite 係数へ畳み込む（`DensityPair`。素朴版と
+  1e-12 で照合）/ シェルは群で回す（`BasisSet::groups()`）/ グリッド点は再帰二分割で 128 点ブロック
+  に並べる（並びを崩すと答えは同じまま遅くなる）/ スクリーニングは**証明できる上界**でだけ落とす
+  （`xc::blocks::SCREENING` 1e-14、ERI 原始対 1e-22。微分と非微分で同じ原始対を残す）/
+  `BasisOnGrid` は SCF 1 回ごとに作って捨てる（`System` に持たせない）/ XC の行列積は
+  `kernels.rs`（matrixmultiply は WASM で遅い）。
+- **π/σ 判定は鏡映の対称性**（`Cᵀ S U C` の対角）で経験則ではない。3 原子は必ず平面なので
+  `MIN_ATOMS_FOR_A_PLANE = 4`。
+- **marching cubes の表を書き写さない**（`marching.rs` が定義から導出）。閉曲面性は「無向辺が
+  2 枚」ではなく「有向辺が往復で打ち消し合う」で検査する。
+
+### 画面に出すもの（要件 F4 / F5）
+- **DFT パラメータを出さない**: 基底・電荷・多重度・試した状態・試行回数。`ScfOutcome` の
+  `multiplicity` / `charge` / `attempts` は診断用（dev ビルドの `console.debug` だけ）。進捗の段階名も
+  「何に時間を使っているか」だけ（`preparing` / `searching` / `forces` / `solving`）。
+- **非収束は例外ではなく戻り値。「解けなかった」と「間に合わなかった」を区別する**:
+  SCF 非収束（`converged: false`、`ScfFailed`）→ 発散アニメーションだけ、数値・等値面は全部 `—`。
+  時間切れ・回数上限（`interrupted` / `maxSteps`）→ そこまでの構造を残し、数値・等値面を出し、
+  理由を表示する。判定は `protocol.ts` の `hasUsableStructure()` だけ。UI の `solved`（数値を出して
+  よい）と `settled`（「完了」と言ってよい）は別物。
+- 「結合に寄与する電子」はエンジンが選ぶ（平面分子なら π、それ以外は差密度。差密度は符号付きで
+  2 面）。UI は返ってきた `channel` で説明文と色を変える。
+
+### Worker と UI
+- **Worker の契約は `protocol.ts` が唯一の情報源。** 失敗は `error` レスポンスで返し、例外を越境
+  させない。終端かどうかは `isTerminal()`（`step` と `progress` は非終端で `onPartial` に流れる）。
+- 進捗の段階名は `dft-wasm` の `mod stage` と `progressFromEngine()` の 2 箇所にある。ずれても落ちず
+  カードが止まるだけなので、`engine.test.ts` がコミット済みの `.wasm` で照合している。
+- **キャンセルは `worker.terminate()` + 再生成。** 保持中の `Calculation`（密度）も消えるので、
+  等値面は SCF からやり直し（`hasDensityRef`）。等値面の要求は App で合流させる（`wantedRef`）。
+- **起動時に SIMD を判定**し、非対応なら Worker を作らず案内（`engineSupport.ts`）。Worker の
+  初期化失敗も `unavailable` → `EngineUnavailableError`。下限は Chrome/Edge 96・Firefox 114・Safari 16.4。
+- **アニメーションはキーフレーム列 + `FramePlayer`。** 発散演出も最適化の step も同じキューを
+  通り、表示レートと生成レートを分ける。時計とスケジューラは注入してブラウザ無しでテストする。
+- **アニメーション中は viewer の所有権が `FramePlayer`**（App の `animation`）。キューが空でも
+  `producerDoneRef` が立つまで終わりではない。**緩和後の構造は即 `setAtoms`**（背景タブでは rAF が
+  走らない）。発散は絵なので `atoms` を触らない。
+- Viewer はメッシュとマテリアルを再利用し、等値面の古い geometry は必ず `dispose()`。
+  `renderer.setSize(w, h)` の第 3 引数を `false` にしない（Retina で canvas がパネルを覆う）。
+
+### ビルド・CI・デプロイ
+- **`web/src/wasm/` はコミットする**（Vercel に Rust が無い）。作るのは `npm run build:wasm` だけ。
+  rustflags を `RUSTFLAGS` で渡さない（`.cargo/config.toml` の `+simd128` が黙って消える。`--config` で足す）。
+- **Rust を書き戻すときに `mv` や `cp -p` を使わない**（mtime が戻って cargo が再ビルドを飛ばし、古い
+  `.wasm` ができる）。怪しいときは定数がバイナリに入っているかを直接見る:
   `python3 -c "import struct,pathlib; w=pathlib.Path('web/src/wasm/dft_wasm_bg.wasm').read_bytes(); print(w.count(struct.pack('<d', 1800000.0)))"`
-- **`web/src/wasm/` はコミットする。** Vercel のビルド環境に Rust ツールチェーンが無いため。CI は main への push でも PR でも Linux で作り直し、コミットされたものとバイトが違えばそのブランチに「chore: rebuild WASM artifact」をコミットする（フォークからの PR だけは push できないので失敗させる）。push のあとは bot のコミットを `git pull` で取り込むこと。
-- **π/σ の判定は対称性であって経験則ではない。** 分子平面での鏡映は Kohn-Sham 演算子と
-  可換なので、各軌道は厳密にその固有関数になる（ベンゼンで ⟨σ̂⟩ = ±1.000000）。
-  判定は基底での反射行列 U を作って `Cᵀ S U C` の対角を見る。U は単項式を展開して
-  作っているので任意の角運動量で動く（6-31G* の d 関数でも書き換え不要）。
-  **3 原子は必ず平面なので平面性は何も言っていない**。`MIN_ATOMS_FOR_A_PLANE = 4`
-  はそのための下限で、水が「π＝面外孤立電子対」として扱われるのを防いでいる。
-- **テストの参照値も物理定数テーブルも記憶から書かない。** 一度これで誤った定数を書いてテストが落ちた。次のどちらかにする:
-  1. テスト内で独立な経路から導出する（例: 核間反発を「ペア距離を書き下した和」と比較する、Boys 関数を Simpson 積分と照合する）
-  2. `scripts/gen_reference.py` で生成して JSON / 生成 .rs としてコミットする
-  STO-3G 係数と Lebedev グリッドも同スクリプトの生成物であり、手で編集しない。
-  唯一の例外は `xc/lda.rs` の VWN5 フィッティング定数（汎関数の定義そのもの）で、
-  これは `tests/reference_xc.rs` が libxc と 1 点ずつ照合して守っている。
-- **参照値が合わないとき、先に「どちらが正しいか」を確かめる。** 低密度・完全スピン分極の
-  領域では VWN5 の式が桁落ちし、libxc の側が 1e-10 ずれる。50 桁演算で確認済みで、
-  `tests/reference_xc.rs` にその許容と理由を書いてある。
-- **非収束は例外ではなく戻り値**（要件 F5）。SCF・構造最適化とも最大反復数とタイムアウトを
-  持ち、例外を投げずに状態を返す。ただし**「解けなかった」と「間に合わなかった」は区別する**:
-  - **SCF が収束しない**（単点計算の `converged: false`、最適化の `OptStatus::ScfFailed`）
-    ＝その原子配置には束縛された電子状態が無い。**発散アニメーション**を出し、
-    **エネルギーも反復数も等値面も出さない**（すべて `—`）。最後の反復の密度は
-    「その分子の密度」ではなく「反復が止まらなかった最後の 1 枚」なので描かない。
-    画面で起きることは原子が飛び散って戻ってくることだけで、それが答えの全部。
-  - **最適化が時間切れ・回数上限で止まった**（`Interrupted` / `MaxSteps`）＝
-    分子は何も失敗していない。通った構造すべてで電子は解けている。**静かに止め、
-    そこまで緩和した構造をそのまま残す**。その構造の SCF は収束しているので
-    エネルギーも反復数も等値面も出す。止まった理由（「時間切れ」「回数の上限」）は
-    画面に出す — 計算機の都合であって DFT パラメータではないので要件 F4 に触れないし、
-    黙っていると途中の構造が完成品に見えてしまう。もう一度押せばそこから続きが走る。
+  （1800 秒 = `OPTIMIZE_BUDGET_SECONDS`）。
+- **出荷されるのは CI（Linux）のビルド。** Mac のビルドは機能同一だがデータ領域の並びが違い、
+  バイトは一致しない。CI は main でも PR でも作り直し、違えばそのブランチにコミットする
+  → **push したら `git pull`**。Rust 1.98.1（`rust-toolchain.toml`）と wasm-pack 0.15.0（CI）は揃えて上げる。
+- **Vercel の Root Directory はリポジトリ直下（空）。** 設定は直下の `vercel.json`
+  （`web/dist`、`.wasm` の Content-Type、`/assets` のキャッシュ）。正しいビルドログには
+  `> mol@0.1.0 build` が出る。Vercel のビルドはログインなしで手元で再現できる（dev-notes）。
 
-  **発散させてよいのは前者だけ。** 後者を飛び散らせると「計算機が遅かった」を
-  「この分子は存在できない」と言い換えることになる。判定は `protocol.ts` の
-  `hasUsableStructure()` が唯一の情報源。UI 側のゲートは 2 つあり、
-  `solved`（電子が解けたか＝数値と等値面を出してよいか）と
-  `settled`（構造が落ち着いたか＝「完了」と言ってよいか）は別物。
-- **DFT パラメータを UI に出さない。** 基底関数・電荷・スピン多重度は自動決定（要件 F4）で、ユーザーには見せない。
-  `ScfOutcome` の `multiplicity` / `charge` / `attempts` は**診断用**で、画面に出さない
-  （dev ビルドの Worker が `console.debug` に 1 行出すだけ）。P5 が最適化中にスピン状態を
-  固定するのにも使う。
-- **スピン状態の探索は「両方解いて比べる」しかない。** HOMO-LUMO ギャップで
-  三重項を試すかどうかを振り分けたくなるが、**使えない**。実測（`scf::run_*` で直接測定）:
-  ベンゼンはギャップ 0.226 Ha で一重項、CH₂ はギャップ 0.160 Ha で**三重項が 0.186 Ha 下**。
-  順序はギャップで決まらないし、そもそも一重項が収束しない系ではギャップ自体が無い。
-  **三重項を収束した一重項の密度から始めるのも遅くなる**（P6 で実測: 同じエネルギーに
-  着くのに H₂O 7 → 15 反復、CH₄ 14 → 26 反復）。level shift も遅くなるうえ、ベンゼンの
-  Fine グリッドでは別の、0.027 Ha 高い三重項に落ちた。探索を安くする手はグリッドのほうで、
-  状態は Medium で選び、勝った状態だけを最適化用の Fine で解き直す
-  （`driver::solve_then_refine`。Coarse / Medium / Fine で全テスト分子が同じ状態を選ぶ）。
-- **勾配は Hellmann-Feynman だけでは足りない。** 基底関数が原子核に乗っているので、
-  1 電子・2 電子のすべての積分に「基底が動く」分の微分（Pulay 項）がある。全体は
-  `Σ D ∂H/∂R + ½ΣΣ DD ∂(μν|λσ)/∂R + ∂E_xc/∂R + ∂E_nn/∂R − Σ W ∂S/∂R`
-  で、`W` はエネルギー重み付き密度行列。**この式は SCF が収束しているときにしか成り立たない**
-  （途中の密度で勾配を取っても何の微分でもない）。
-- **`nalgebra` の `SymmetricEigen` は使わない。** 0.33 は、この engine が作る
-  Kohn-Sham 行列に対して**固有値と固有ベクトルの対応が壊れた**分解を返すことがある
-  （`V L Vᵀ` が入力と 0.64 ずれる。直交性も固有値も正しいので黙って通る）。
-  P2〜P4 が気づかなかったのは、**占有軌道どうしの混ざりは密度を変えない**から。
-  勾配は気づく: `W` は軌道ごとにエネルギーで重みを付けるので、混ざった瞬間に
-  Pulay 項が壊れる。`scf/linalg.rs` は Jacobi 法を自前で回している（36×36 なら
-  XC のグリッド 1 回分より遥かに安い）。検査は「`A V = V Λ` と `V L Vᵀ = A` を見る」こと。
-  固有値だけ・直交性だけを見るテストはこのバグを通す。
-- **XC のグリッド重みの微分は省いている。** つまり解析的勾配は「**グリッドを固定した**
-  エネルギー」の厳密な微分。検証もそれに合わせる:
-  `System::build_with_grid` でグリッドを止めたまま中心差分を取れば 1e-6 で一致する。
-  グリッドを毎回作り直す差分と比べると、省いた分が見える（歪んだ水で実測）:
-  **Coarse 4.3e-4 / Medium 7.2e-5 / Fine 1.2e-5 Ha/Bohr**。収束判定の 4.5e-4 に対し
-  Coarse は論外なので、**構造最適化は `opt::OPTIMIZER_GRID`（Fine）で回す**。
-  設計計画の「グリッドを細かく取って実害がないことを確認する」がこれ。
-- **ERI 微分は密度を先に Hermite 係数へ畳み込む。積分そのものは作らない。**
-  `Σ D_μν D_λσ ∂(μν|λσ)` にしか使わないので、`Ē_tuv = Σ D_μν E^{μν}_tuv` を先に作れば
-  原始四重項ごとに R 1 枚と小さな行列ベクトル積 2 回で 12 方向ぶんが出る（`DensityPair`）。
-  `two_electron_gradient_by_quartets`（テスト専用）が「全部の微分積分を作ってから縮約する」
-  素朴な版で、速い版はこれと 1e-12 で一致することを確かめている。4 中心はいまも全部明示的に
-  微分している（並進不変性で 1 つを出しても dot 3 回分しか得をせず、テストが自明になる）。
-- **シェルは「群」で扱う。** 同じ原子・同じ指数の殻（STO-3G の 2s と 2p）は Gaussian 積も
-  R も同じなので、ERI・ERI 微分・格子上の基底評価はすべて `BasisSet::groups()` 単位で回る。
-  炭素の価電子四重項は R 16 枚が 1 枚になった。基底を差し替えても自動でまとまる（6-31G の sp 殻も）。
-- **グリッドの点の並び順には意味がある。** `grid::build` は点を再帰二分割で並べ替え、
-  先頭から `grid::BLOCK`（128）点ずつが空間的にまとまった塊になるようにしている（分割位置を
-  128 の倍数に置くので、ブロックが葉をまたがない）。XC はブロック単位で「どの点からも
-  無視できる基底関数」を落とすので、並びを崩すと答えは同じまま遅くなる。生成順（原子ごと・
-  球殻ごと）ではブロックが球殻の帯になって分子をまたぐ。Morton 曲線順でも外側の疎な点で
-  ブロックが数十 Bohr に広がり、落とせた値は 12%。再帰二分割で 26% になった（ベンゼン Fine）。
-- **スクリーニングは上界で判定する。「たぶん小さい」で落とさない。** `xc::blocks::SCREENING`（1e-14）は
-  ブロック内のどの点でも値（勾配計算では微分も）がそれ未満だと**証明できる**殻群だけを落とす。
-  `nothing_above_the_threshold_is_ever_left_out` が全点でそれを確かめ、
-  `screening_changes_nothing_that_matters` がエネルギー・ポテンシャル・勾配を閾値 0 の場合と 1e-12 で比べる。
-  ERI の原始対の切り捨て（`NEGLIGIBLE_PRIMITIVE_PAIR` = 1e-22、`exp(−μR²)` が倍精度で消える対）も同じ考えで、
-  微分した対とそうでない対で**同じ原始対を残す**こと（`DensityPair` は原始対の番号で両者を対応させている）。
-  ERI 微分の原始四重項単位の切り捨ては P6 で調べたが、手頃な見積もりが上界にならなかった
-  （実際の寄与が見積もりの 2.2 倍になる四重項があった）ので入れていない。
-- **SCF は格子上の基底値（`xc::BasisOnGrid`）を 1 回作って反復で使い回す。**
-  ベンゼンの Fine で約 30 MB で、SCF が返れば捨てる。`System` には持たせない
-  （最適化中は新旧 2 つの `System` が同時に生きるので倍になる）。
-- **ブラウザ版は WebAssembly SIMD を前提にする**（`.cargo/config.toml` の `+simd128`、
-  wasm-opt の `--enable-simd`）。SIMD の無いブラウザではモジュールがコンパイルできないので、
-  **起動時に `engineSupport.ts` の 43 バイトの判定モジュールを `WebAssembly.validate` にかけ、
-  非対応なら Worker を作らずに案内を出す**（P7 でユーザーが「非 SIMD 版を並べて配る」より
-  こちらを選んだ）。アプリ全体の下限は **Chrome / Edge 96・Firefox 114・Safari 16.4**
-  （webassembly.org の機能表と MDN の互換データで確認。Chrome は reference-types、
-  Firefox はモジュール Worker で決まり、SIMD が効いているのは Safari だけ）。
-  判定モジュールは wasm-opt で「SIMD 有効なら妥当、MVP のみなら拒否」を確かめてある。
-  **Worker の初期化失敗も黙らせない**: Worker は `ready` の代わりに `unavailable` を送り、
-  `ready` 前の `onerror` も同じ扱いで、`workerClient` は保留中も以後もすべての要求を
-  `EngineUnavailableError` で失敗させる（P6 までは `ready` を永久に待ち、画面が空の周期表の
-  まま黙って固まっていた）。
-- **出荷される `.wasm` は CI（Linux）が作ったもの。Mac のビルドとはバイトが一致しない。**
-  P7 で「どこでも同じバイト」にしたつもりが、確かめたのは macOS の中だけだった。最初の CI が
-  作り直した版（`f3b6eb3`）は、サイズ・文字列・命令列は同じで、データ領域でパニック位置の
-  記録（16 バイト）の並び順が違い、それを指す `i32.const` が 39 箇所違っていた。機能は同一
-  （両方でベンゼンを最適化してエネルギー小数 10 桁・歩数・最大力・進捗の段階まで一致）。
-  原因は推定で、cargo がクレートごとに作るハッシュに、ホスト向けにビルドされる proc-macro
-  （serde・wasm-bindgen のマクロ）経由でホストの違いが入り、リンク時の並びが変わるのだと
-  考えている。安定版の cargo で揃える手段は無い。だから CI は比較して落とすのではなく、
-  作り直してコミットする（上の規約）。同じ OS の中で一致させるための手当ては残してある:
-  1. 依存 crate のパニック位置に `CARGO_HOME` の絶対パスが入る（P6 までの成果物には
-     `/Users/konya/.cargo/registry/...` が 13 箇所あった）。`scripts/build-wasm.sh` が
-     `--remap-path-prefix` で `/cargo` に置き換える。cargo の `trim-paths` は 1.98 ではまだ unstable。
-  2. 標準ライブラリのパスに rustc のコミットが入る → `rust-toolchain.toml` と CI で 1.98.1 に固定
-     （固定しないと Rust のリリースのたびに CI が成果物を作り直してコミットする）。
-  3. wasm-opt の版は wasm-pack が決める → CI の wasm-pack を 0.15.0 に固定。
-  macOS 上で「別ディレクトリへのコピー + 空の `CARGO_HOME`」から作り直すと 5 ファイルとも一致する。
-  **rustflags は `RUSTFLAGS` で渡さない。** `.cargo/config.toml` の `+simd128` を置き換えて
-  しまい、SIMD 無しのバイナリが黙ってできる（`--config` で渡した配列は連結される）。
-  空の `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS=""` は上書きにならず無視される（実測）。
-- **Vercel の Root Directory はリポジトリ直下（空）にする。** 設定は直下の `vercel.json`
-  （`npm run build` → `web/dist`、`.wasm` の Content-Type、`/assets` の immutable キャッシュ）で、
-  Root Directory が直下でないと読まれない。P7 の最初のデプロイは Root Directory が `web` より
-  下になっていて、`npm` が上の `web/package.json` を見つけてビルドし `web/dist` を作ったのに、
-  Vercel は Root Directory の下の `dist` を探して「No Output Directory named "dist"」で落ちた。
-  直下なら `vercel.json` がダッシュボードの Override より優先される（手元で確認）。
-  正しい構成のログには `> mol@0.1.0 build` → `> npm run build --workspace web` が出る。
-- **Vercel のビルドは手元で再現できる（ログイン不要）。** リポジトリを別の場所に clone し、
-  `.vercel/project.json` に `{"projectId":"x","orgId":"y","settings":{"rootDirectory":…,
-  "framework":…,"installCommand":…,"buildCommand":…,"outputDirectory":…}}` を書いて
-  `npx vercel@<ログに出ている版> build --yes` を走らせる。ログの形（「Running "install" command」
-  が出るか、`> mol@0.1.0 build` が出るか）で設定の上書きの有無まで見分けられる。
-- **性能は同じ条件で前後を並べて測る。** このマシン（i5-5287U）のネイティブ計測は同じバイナリでも
-  ±30% ぶれるので、判断は複数回の最小値か、`sample` / CPU プロファイルの比率で行う。
-  WASM は内訳がネイティブと違う（ネイティブで速い `gemm` や `exp`・`cbrt` が WASM では
-  ソフトウェア実装になる）ので、WASM の改善は WASM のプロファイルで決める（コマンド節）。
-- **勾配を書き換えたら、まず項ごとの有限差分を見る。** `integrals/deriv.rs` のテストは
-  ∂S・∂T・∂V・∂ERI を**それぞれ**行列ごと中心差分と比べている。全体の勾配だけ見ていると
-  「どこが悪いか」が出ない。並進不変性（全原子の勾配の和 = 0）は ∂V の Hellmann-Feynman 項を
-  単独で捕まえるので、必ず残しておくこと。4 中心すべてを明示的に微分しているのは、
-  1 つを並進不変性から逆算するとこの検査が自明になるため。
-- **Worker の契約は `protocol.ts` が唯一の情報源。** 失敗は例外を越境させず `error` レスポンスで返す。
-- **Worker のレスポンスは「1 リクエスト = 1 応答」ではない。** 構造最適化は受理した構造ごとに
-  `step` を返し、最後に `scf` で終わる。一点計算も最適化も、作業の段階が変わるたびに
-  `progress` を返す。どれが終端かは `protocol.ts` の `isTerminal()` が唯一の
-  情報源で、`workerClient` はそれを見て `#pending` から消すかどうかを決める。
-  `step` と `progress` は `onPartial` に流れるだけで Promise を解決しない
-  （`workerClient.test.ts` が偽の Worker を通して往復で確かめている）。
-- **進捗の段階名は「何に時間を使っているか」であって「何を試しているか」ではない**（F4）。
-  `preparing`（積分・グリッド）/ `searching`（電子の並び方＝スピン探索と Fine での解き直し）/
-  `forces`（step の力）/ `solving`（step の電子）の 4 つだけで、試している状態・試行回数は
-  境界を越えない。名前は `dft-wasm` の `mod stage` と `protocol.ts` の `progressFromEngine()` の
-  2 箇所に書かれていて、後者は知らない名前を黙って捨てる。ずれると進捗カードが止まるだけで
-  どこも落ちないので、`engine.test.ts` がコミット済みの `.wasm` を実際に呼んで照合している。
-  文言は `components/progress.ts` で、テストが全状態を列挙して DFT パラメータの語が出ないことを見る。
-- **`opt::relax` の `on_stage` は聞くだけ。** 戻り値は無く、結果に影響しない。`dft-core` に
-  時計は入れない（経過時間は UI が `performance.now()` で数える）。
-- **アニメーション中は viewer の所有権が `FramePlayer` にある。** App の `animation`
-  （`'divergence' | 'optimization' | null`）がそのフラグで、null のときだけ
-  `setMolecule(atoms)` する。**Player がキューを使い切っても終わりとは限らない**:
-  最適化中は「次のステップを計算中」なだけなので、`producerDoneRef` が立つまで
-  `onIdle` は何もしない。
-- **緩和後の構造は「答え」なので、アニメーションを待たずに即 `setAtoms` する。**
-  バックグラウンドのタブでは `requestAnimationFrame` が**まったく走らない**ので、
-  Player の完了を待って commit すると「パネルは完了と言っているのに `atoms` は
-  ユーザーが作った元の構造のまま」になり、次の編集で `stopAnimation()` が
-  結果を黙って捨てる。実際に踏んだ（2 回目の「安定な形にする」がプリセットから
-  やり直しになり、エネルギーが上がって見えた）。Player は**表示の所有権を返すだけ**で、
-  何を残すかは決めない。発散は絵なので `atoms` を触らない。
-- **キャンセルは `worker.terminate()` + 再生成**（`workerClient.ts`）。単一スレッド WASM は外から中断できないため。
-- **Viewer はメッシュを再利用する。** 毎フレームのジオメトリ生成に戻さない。P5 の最適化アニメーションが同じ経路を毎フレーム叩く。
-  等値面だけは頂点数が閾値ごとに変わるので `BufferGeometry` を作り直すが、`Mesh` と
-  マテリアルは使い回し、古い geometry は必ず `dispose()` する（GPU バッファは GC されない）。
-- **marching cubes の 256 ケース表を書き写さない。** `marching.rs` は定義から導出している
-  （面ごとに切断辺を結び、閉ループにし、符号だけから向きを決める）。公開されている表は
-  曖昧面の解消方法を固定した「選択」を含んでいて、1 エントリの写し間違いが穴になり、
-  エネルギーのテストでは絶対に捕まらない。テストは全 256 ケースの被覆と、球・二球・
-  乱数場に対する閉曲面性（有向辺が往復で打ち消し合うこと）と体積・面積で押さえている。
-- **等値面メッシュの閉曲面性はループ境界で見る。** ループは扇状に三角形化するので、
-  内部対角線は隣のキューブの対角線と一致して 4 枚に共有されることがある。穴ではない。
-  「無向辺がちょうど 2 枚」ではなく「有向辺が往復で打ち消し合う」で検査すること。
-- **アニメーションはキーフレーム列 + `FramePlayer`。** 発散演出も P5 の最適化ステップも
-  `web/src/animation/` の同じ経路を通る。Player は表示レート（rAF）と生成レートを分離し、
-  アンカー時刻を 1 フレーム分ずつ進めるので、コールバックが遅れても尺がずれない。
-  時計とスケジューラは注入するので、ブラウザ無しでテストできる。
-- **`renderer.setSize(w, h)` の第3引数を `false` にしない。** CSS サイズが書かれず、Retina で canvas が 2 倍の大きさになりパネルを覆う（実際に踏んだ）。
+## 状態と今後
 
-## 技術的な補足（要件定義書に対する）
-
-1. **「Hellmann-Feynman 力」だけでは力が求まらない。** 原子核上に中心を持つガウス基底では基底関数自体が原子位置に依存するため、Pulay 項（`-Σ W_μν ∂S_μν/∂R` ほか）を含む完全な解析的勾配が必要。
-2. **COOP/COEP によるマルチスレッド化は最終フェーズの任意項目。** `wasm-bindgen-rayon` は nightly + `-Z build-std` 依存。まず単一スレッド + WASM SIMD（stable）で性能目標を狙う。
-
-## フェーズ進捗
-
-| # | 内容 | 状態 |
-| --- | --- | --- |
-| P0 | 土台（ワークスペース、Worker↔WASM 疎通、CI、Vercel 設定） | 完了 |
-| P1 | 原子配置 GUI（周期表ピッカー、配置・移動・削除、結合描画） | 完了 |
-| P2 | SCF 一点計算（STO-3G データ、積分、Becke グリッド、LDA、SAD guess、DIIS） | 完了 |
-| P3 | 電子密度等値面（ρ(r) グリッド、marching cubes、閾値スライダー、結合に寄与する電子） | 完了 |
-| P4 | 自動スピン・電荷決定（UKS、探索の状態機械、level shift）+ 非収束時の発散アニメーション | 完了 |
-| P5 | 解析的勾配（Pulay 含む）+ 構造最適化アニメーション | 完了 |
-| P6 | 性能（ERI 微分の密度縮約、XC のスクリーニングとキャッシュ、探索グリッド、SIMD） | 完了 |
-| **P7** | **仕上げ（待ち時間の見せ方、SIMD 非対応ブラウザの案内、WASM ビルドの固定と CI での作り直し）** | **実装済み・手動 E2E と Vercel の再デプロイ確認待ち** |
-
-各フェーズ終了時点で Vercel にデプロイ可能な状態を保つ。
-
-### P5 の実装メモ
-
-- **有限差分ハーネスを勾配より先に書いた**（設計計画どおり）。`gradient/finite_difference.rs`。
-  最初にそれ自身を「既に正しいと分かっている唯一の勾配」= 核間反発で検証している。
-- **項ごとに中心差分と比べるのが効いた。** ∂S・∂T・∂V・∂ERI をそれぞれ行列のまま
-  比較したので、最初の実装で全部が一発で通った。通らなかったのは**全体**だけで、
-  そこから `nalgebra` の固有値分解に辿り着いた（上の規約を参照）。
-  項ごとのテストが無ければ「勾配のどこかが 3 倍おかしい」で止まっていた。
-- **ガウス関数の中心微分は 1 つの恒等式に尽きる**:
-  `∂/∂A_x φ(i,j,k) = 2a φ(i+1,j,k) − i φ(i−1,j,k)`。
-  微分した積分は「角運動量をずらした普通の積分」なので、ERI 側は
-  `ShellPair` の Hermite 係数を作り替えるだけで既存の `quartet()` がそのまま使える。
-  新しい積分カーネルはひとつも書いていない。d 殻でも動く（テスト済み、6-31G* 用）。
-- **探索の結果をそのまま最適化の 0 歩目に渡している。** 探索は初期構造で
-  1 回だけ走り、決まった状態を `opt::relax` が固定して回す。SCF は 1 回分節約できる。
-  収束しなかった結果を渡すと `opt::relax` は何も動かさずに `ScfFailed` を返す（F5 の経路）。
-  P6 から探索は Medium グリッドで行い、勝った状態だけを Fine で解き直して渡す
-  （`driver::solve_then_refine`。P6 のメモ参照）。
-- **各ステップの SCF は前ステップの密度から始める**（`InitialGuess::Previous`）。
-  収束しなければ 1 度だけ SAD からやり直す。水で 6 反復→ 3〜4 反復になる。
-- **PySCF 側の参照は scipy の BFGS で作った。** geomeTRIC も pyberny も入っていないので、
-  `gen_reference.py` の `relaxed_geometry()` が PySCF のエネルギーと解析的勾配を
-  `scipy.optimize.minimize` に渡している。別のエンジン × 別の最小化アルゴリズムなので、
-  一致すれば「同じ極小点を 2 通りの方法が見つけた」ことになる。
-  PySCF の DFT 勾配も既定で `grid_response = False`（＝こちらと同じ近似）なので、
-  比較しているのは同じ量。ずれは実測で水 1.5e-6 / メタン 1.2e-5 Ha/Bohr。
-- **`wasm-pack` 0.15 は自分が吐いた `web/src/wasm/package.json` を読み返して落ちる**
-  （`files` が配列なのに文字列を期待する）。`npm run build:wasm` は先に消してから走らせる。
-- **生成物が本当に更新されたかを疑うこと**（上の mtime の規約）。ブラウザでの挙動が
-  ソースと食い違ったら、まず `.wasm` の中に定数が入っているかを見る。
-
-### P5 の実測
-
-ネイティブ（release）。勾配 1 回の内訳:
-
-| | System::build | SCF | 勾配 1e | 勾配 2e | 勾配 XC |
-| --- | --- | --- | --- | --- | --- |
-| H₂O (Fine) | 14 ms | 248 ms | 0.5 ms | **160 ms** | 90 ms |
-| CH₄ (Fine) | 26 ms | 313 ms | 1.0 ms | **227 ms** | 103 ms |
-| ベンゼン (Medium) | 4.1 秒 | 1.8 秒 | 48 ms | **72.8 秒** | 0.9 秒 |
-
-小さい分子では勾配 1 回 ≈ SCF 1 回。**ベンゼンでは ERI 微分だけで SCF 全体の 40 倍**になる。
-理由は単純で、ユニークなシェル四重項ごとに 4 中心 × 3 方向 = 12 回 `quartet()` を
-呼び、しかも片側の角運動量が 1 つ上がっているため 1 回あたりも約 2 倍高い。
-
-ブラウザ実測（release + wasm-opt -O3、Fine グリッド。初回のスピン探索込み）:
-
-| | 所要 | ステップ数 | 収束後のエネルギー |
-| --- | --- | --- | --- |
-| H₂O | 3.9 秒 | 4 | −74.743110 Ha（PySCF −74.743109） |
-| CH₄ | 6.5 秒 | 3 | −39.617132 Ha（PySCF −39.617139） |
-| O₂ | 6.3 秒 | 5 | −147.205416 Ha（三重項のまま固定） |
-| NH₃ | 7.5 秒 | 7 | −55.296302 Ha |
-| **ベンゼン** | **1 歩 60〜110 秒**（0 歩目 133 秒、以降 111 秒 → 61 秒） | 収束に 15 歩前後 | 未実測 |
-
-**ベンゼンは 15〜25 分かかる**（P5 時点。P6 で約 16 秒になった。P6 の実測参照）。
-`OPTIMIZE_BUDGET_SECONDS`（`dft-wasm`）が 1800 秒なのはそのため — スコープが上限として挙げている分子が 1 回のボタンで終わらないのはおかしい。
-この予算は**ステップとステップの間でしか見ないので、固まった計算は捕まえられない**。
-止める手段はユーザーの「中止」（`worker.terminate()`）のほうで、予算は放置されたタブが
-走り続けるのを防ぐ最後の歯止めにすぎない。**縮めると健全に進んでいる計算を切るだけ**になる。
-予算に当たったときは途中まで緩和した構造が残り、「時間切れ · N 回動いたところまで」と出る。
-もう一度押せばその構造から続く（ただしスピン探索は毎回やり直す。P6 でも残っているが、
-探索を Medium グリッドに移したのでベンゼンで約 2 秒）。
-歩ごとに速くなっているのは前ステップの密度から始めているから（133 → 111 → 61 秒）。
-
-### P6 の実装メモ
-
-実測で順番を決めた。着手前のネイティブ内訳はベンゼンの ERI 微分 34 秒に対して他はすべて 2 秒未満
-（下の表）なので ERI 微分から。そこが 0.6 秒になった時点で「ベンゼンは 3 歩で収束する」
-（P5 の見積もりの 15 歩ではなかった）ことと、**Fine グリッドでのスピン探索が全体の半分**で
-あることが見え、次はそこ。以降は Node の CPU プロファイル（WASM）で決めた。
-
-- **ERI 微分: 密度を先に畳み込む**（規約参照）。34 秒 → 0.42 秒（ネイティブ、ベンゼン）。
-  引き継ぎにあった「R を 1 回にする（1.5〜2 倍）」「4 中心目を並進不変性で（25%）」より
-  桁で効く。R を共有するだけでは 12 個の積分ブロックの縮約が残るが、密度を先に入れると
-  ブロックそのものが消える。
-- **Boys 関数のテーブル化。** T ≤ 20 で 0.05 刻みの表から 7 項の Taylor 展開
-  （`dF_n/dT = −F_(n+1)` なので表の中身だけで展開できる）。表は起動時に級数から作る。
-  級数とは 1e-14（相対）で一致し、Simpson 積分のテストもそのまま通る。
-- **シェル群**（規約参照）と **ERI の原始対の切り捨て**。ERI 本体は 1.6 秒 → 0.31 秒。
-- **`HermiteR` の漸化式を次数ごとの手順列に展開**した。どの要素をどの順で埋めるかは
-  次数だけで決まるので、4 次元配列の添字計算を 1 回にできる。前のループと**ビット単位で一致**
-  （テストあり）。WASM での R の自己時間が 1.54 秒 → 1.12 秒（ベンゼン最適化 1 回分）。
-- **XC: 空間ブロック + 上界スクリーニング + SCF 内キャッシュ + 専用カーネル**（規約参照）。
-  - 基底評価は 2s/2p で `exp` を共有し、`a r² > 50` の原始は `exp` を呼ばずに 0 にする
-    （微分に掛かる 2a とアルゴンの係数を入れても 1e-17 未満）。s・p 殻は一般の単項式を通さない。
-  - XC 勾配は `Σ_ν D_μν φ_ν = (Dφ)_μ` を使って行列を作らない形にした（6 本の m×m 積が消える）。
-    閉殻は 2 つの同じ半分を回さず 1 チャンネルで計算する。
-  - SCF で要るのは各点の ρ だけなので `(Dφ)` 全体ではなく `φᵀDφ` を下三角だけで作る。
-    V_xc は対称なので下三角だけ足して鏡映する。
-  - **matrixmultiply をやめた理由**: ネイティブでは AVX カーネルで速いが、WASM 用のカーネルが無く、
-    汎用フォールバックが **WASM の実行時間の 34%**（Node の CPU プロファイル）を占めていた。XC の積は m（数十）× 128 と
-    小さいので、ベクトル化できる形のループ（列方向の要素ごとの更新だけで、和の順序を変えない）を
-    書いた。ネイティブでは同等、WASM では大きく速い。
-  - LDA は `powf(x, 4/3)` を `x·cbrt(x)` に、定数の立方根を 1 回に、ζ = 0 ではスピン補間を
-    評価しない。WASM では `pow`・`cbrt` がソフトウェア実装で、`cbrt` の中のソフトウェア FMA まで
-    合わせると LDA の超越関数が 16% あった。libxc との 1e-11 比較はそのまま通る。
-- **スピン探索は Medium、最適化は Fine**（`driver::solve_then_refine`）。Fine のまま探すと
-  ベンゼンの三重項は 28 反復かかっていた（Medium では 11）。解き直しが収束しなければ
-  Fine で探索全体をやり直すので、結果が以前より悪くなることはない。
-- **WASM SIMD**（規約参照）。ベンゼン最適化で約 1 割。
-- **Becke 重みは原子対ごとに 1 回**: `ν_BA = −ν_AB` で多項式が奇関数なので
-  `s(ν_BA) = (1 + g)/2` が同じ評価から出る。サイズ補正 `a_AB` は反対称に作る。
-
-**試して効かなかったもの**（再挑戦しないこと。数字は実測）:
-
-- 三重項を一重項の収束密度から始める → 遅くなる（規約参照）。
-- 三重項に level shift → 遅くなり、ベンゼン Fine では高い三重項に落ちる。
-- 最適化ステップの SCF（前ステップの密度から開始）でダンピングを切る → ベンゼンは 7/6/6 反復の
-  まま。小さい分子で 1 反復減るだけで、難しい系で収束に失敗したときの損（100 反復＋やり直し）が大きい。
-- XC のブロックを 64 / 256 点にする → 128 と誤差の範囲。
-- ERI 微分の原始四重項の切り捨て → 規約参照（上界にならない）。
-
-### P6 の実測
-
-同じマシン（i5-5287U、2 コア）で、P5 の状態（238fc64 を worktree に展開）と並べて測った。
-分子は UI のプリセット（ベンゼンは C–C 1.39 Å / C–H 1.09 Å の理想構造）。
-
-**ネイティブ**（release、`cargo run --release --example profile -- <分子> --optimize` を前後の
-ビルドで交互に 2 回ずつ。この機械は ±30% ぶれるので幅で書く）:
-
-| | ERI | SCF（Fine、1 回） | 勾配 2e | 勾配 XC | 最適化 全体 |
-| --- | --- | --- | --- | --- | --- |
-| H₂O | 5 → 3〜6 ms | 0.17 → 0.06〜0.07 秒 | 90〜100 → 3〜5 ms | 38〜43 → 15〜17 ms | 1.9 → 0.55 秒 |
-| CH₄ | 10〜14 → 3〜9 ms | 0.30〜0.32 → 0.11〜0.13 秒 | 240〜250 → 7〜13 ms | 94〜104 → 36〜48 ms | 4.1〜4.6 → 1.1〜1.2 秒 |
-| ベンゼン | 1.9〜2.0 → 0.35〜0.43 秒 | 3.1 → 0.95〜1.45 秒 | **34〜43 秒 → 0.45〜0.51 秒** | 1.15 → 0.23〜0.25 秒 | **296 → 12.6〜13.5 秒** |
-
-ベンゼン最適化の内訳（P6）: 探索（Medium で一重項 8 反復 + 三重項 11 反復）と Fine での解き直しで
-約 4 秒、以降 1 歩 2.2〜3.0 秒（グリッド 0.25 秒、ERI 0.4 秒、SCF 6〜7 反復で約 0.9 秒、勾配約 0.8 秒）。
-P5 は探索を Fine で行い（三重項 28 反復）24 秒、1 歩 50〜64 秒だった。
-グリッド生成は点の並べ替え（XC のスクリーニングの前提）が増えた分と Becke の半減が
-打ち消して、ベンゼンで前後とも 0.23〜0.27 秒（水では 6 → 17 ms に増えた）。
-
-**WASM（V8 = Node 25、release + wasm-opt -O3。worker が受けるのと同じ `scf()` / `optimize()`）**。
-P6 側は 3 回の幅で、最後の 1 回は `web/src/wasm/` と同一のバイナリ:
-
-| | P5 | P6 | |
-| --- | --- | --- | --- |
-| H₂O 一点（探索込み） | 0.66 秒 | 0.31〜0.37 秒 | |
-| CH₄ 一点 | 2.25 秒 | 1.17〜1.43 秒 | |
-| **ベンゼン 一点** | **15.2 秒** | **3.4〜3.7 秒** | ×4.3 |
-| H₂O 最適化（4 歩） | 5.6 秒 | 0.88〜1.06 秒 | |
-| CH₄ 最適化（3 歩） | 12.2 秒 | 2.1〜2.9 秒 | |
-| **ベンゼン 最適化（3 歩）** | **396 秒**（0 歩目 112 秒、以降 1 歩 65〜77 秒） | **15.3〜16.7 秒**（0 歩目 5.6〜6.2 秒、以降 1 歩 2.6〜3.5 秒） | ×25 |
-
-収束後のエネルギーは前後で表示桁まで同じ（ベンゼン −227.26432894 Ha、H₂O −74.74311011 Ha、
-CH₄ −39.61713241 Ha）。**ベンゼンは P5 の見積もりの 15 歩ではなく 3 歩で収束する**。
-
-ブラウザ（Claude の Browser ペイン = Chromium、ペイン非表示のため間引かれた参考値。コマンド節参照）:
-P6 はベンゼン一点 3.2〜3.4 秒、最適化 19.3〜20.8 秒、H₂O 最適化 1.0〜1.9 秒、CH₄ 最適化 2.9〜3.2 秒。
-P5 はベンゼン一点 16.4 秒、H₂O 最適化 4.8 秒、CH₄ 最適化 11.5 秒で、ベンゼン最適化は
-間引かれて終わらなかった（P5 のメモの値は 1 歩 60〜110 秒）。
-
-### P6 以降に残したもの
-
-- **重み微分を実装して最適化を Medium に戻す。** 見積もりでは、ステップごとの SCF・XC 勾配・
-  グリッド生成が半分になり解き直しも要らなくなる分から重み微分の費用を引いて、ベンゼン最適化の
-  1〜2 割。規約どおり `the_omitted_grid_weight_derivatives_are_small` で実際に小さくなることを
-  示してから。今回は性能目標に届いたので見送った。
-- **マルチスレッド化（COOP/COEP + rayon）。** 計画どおり任意。今の内訳ならスピン探索の
-  一重項と三重項、ERI とグリッド生成、XC のブロックがそれぞれ独立に並列化できる。
-- **`OPTIMIZE_BUDGET_SECONDS`（1800 秒）** はベンゼンが 15〜25 分かかった頃の値。今は 20 秒前後で
-  終わるので縮められるが、予算は健全な計算を切らないことのほうが大事なので据え置いている。
-
-### P7 の実装メモ
-
-- **進捗は 4 段階＋等値面。** 実測で段階を決めた（下の表）。探索（一重項→三重項）と Fine での
-  解き直しは 1 つの「電子の並び方を探す」にまとめた。分けると `driver` にもフックが要り、
-  どれも 4 秒を超えないので経過時間が動いていれば十分。探索の中の切り替えは F4 で見せない。
-  - エンジンが知らせるのは `opt::relax` の `on_stage`（`Solving { step }` / `Forces { step }`）だけで、
-    `preparing` / `searching` は `dft-wasm` が `System::build` と探索の前に自分で知らせる。
-    `driver` の API は変えていない。
-  - UI は左上のカード（`ProgressOverlay`）とパネルの「状態」に同じ見出しと経過時間を出す。
-    カードは**最初の等値面が出るまで**残す（その時点で答えが画面に揃う）。非収束・エラー・中止・
-    編集では即座に消す（発散は絵だけで語る。F5）。チャンネルを初めて切り替えたときの ρ の
-    サンプリング（ベンゼンで約 0.8 秒）は 300 ms 経ってから「電子の雲を描いています」だけを出す
-    （スライダー操作の数 ms でちらつかせない）。
-- **最適化の最後の勾配の再計算をやめた。** `opt::finish` が最終構造の勾配をもう一度計算していた
-  （ループが既に計算済みのもの）。ベンゼンで最後の step が届いてから完了まで 1.0 秒、画面が
-  止まっていた → 0 秒。同じ関数・同じ入力なので値はビット単位で同じ
-  （`the_reported_forces_are_those_of_the_final_structure` が `to_bits()` で比較）。
-- **SIMD 非対応は「検出して案内」**（ユーザー判断）。比較した 3 案と実測は下の表。
-- **生成物と CI**（規約参照）。P6 までの CI の PR 検査は、ローカルでビルドした成果物に対して
-  必ず落ちる状態だった（絶対パス・`stable` の rustc・`latest` の wasm-pack）。P7 で同じ OS の
-  中では一致するようにしたが、最初の CI の実行で Mac と Linux では一致しないことが分かり、
-  PR でも作り直してコミットする形に変えた。
-- **wasm-pack のリポジトリは `wasm-bindgen/wasm-pack` に移った**（旧 `rustwasm/wasm-pack` の URL は
-  リダイレクトされる）。CI の `jetli/wasm-pack-action@v0.4.0` は旧 URL から取るが、v0.15.0 の
-  `x86_64-unknown-linux-musl` は取れることを確認した。
-- **要件定義書の基底関数スレッド**は、9/18 に返信済みで未クローズだった。ユーザーの了承を得て
-  実装結果を追記し、クローズした（2026-09-19）。
-- ページの `<title>`（`web` のまま）と `lang`、パネルの「Phase 5 — 構造最適化」を直した。
-- **Browser ペインで App を再マウントして確かめる方法**: Fast Refresh はマウント時の effect を
-  再実行しないので、`WebAssembly.validate` などを差し替えた後に、ページ内で
-  `/src/App.tsx` を `import()` して別の `createRoot` に描く（React は `main.tsx` と同じ
-  `?v=` 付きの URL から取ること。別インスタンスだとフックが壊れる）。アプリに検証用の口は足していない。
-
-### P7 の実測
-
-ベンゼン「安定な形にする」の段階ごとの時刻（Node = `--target nodejs` の release、ブラウザ =
-Browser ペイン表示中）:
-
-| 段階 | Node | ブラウザ |
-| --- | --- | --- |
-| 下準備（Medium の積分・グリッド + Fine のグリッド） | 0 → 1.1 秒 | 0 → 1.8 秒 |
-| 電子の並び方を探す（Medium で探索 + Fine で解き直し） | 1.1 → 5.1 秒 | 1.8 → 5.6 秒 |
-| 最初の力 | 5.1 → 6.9 秒 | 5.6 → 7.0 秒 |
-| 1 歩（電子 ≈ 2 秒 → 力 ≈ 1 秒） × 3 | 6.9 → 16.0 秒 | 7.0 → 14.7 秒 |
-| 最後の step → 完了 | **1.0 秒 → 0 秒** | — |
-| 最初の等値面 | — | +0.9 秒 |
-
-一点計算（ベンゼン）は下準備 0.6 秒 + 探索 2.9 秒。表示が 4 秒以上止まる区間はない。
-収束後のエネルギー・最大力は前後で表示桁まで同じ（−227.26432894 Ha、3.4466e-5 Ha/Å）。
-
-SIMD あり/なし（Node、3 回の最小値。`-C target-feature=-simd128` で作った版は SIMD 命令 0 個、
-JS グルーは同一）:
-
-| | SIMD | 非 SIMD |
-| --- | --- | --- |
-| ベンゼン 最適化 | 16.6 秒 | 17.4 秒 |
-| ベンゼン 一点 | 4.0 秒 | 4.4 秒 |
-| CH₄ 最適化 | 2.4 秒 | 2.5 秒 |
-| H₂O 最適化 | 1.2 秒 | 1.1 秒 |
-
-非 SIMD 版を並べて救えるのは Safari 15.0〜16.3 だけ（Chrome は reference-types で 96、Firefox は
-モジュール Worker で 114 が先に効く）で、その Safari で three.js / React 19 / esnext の構文が
-動くかは確かめられない。ビルド・CI が倍になり、.wasm の変更ごとに約 300 KB × 2 が履歴に積まれる。
-
-本番ビルド（`web/dist` を `vite preview`、launch.json の `mol-preview`）で `.wasm` が
-`application/wasm` で配られ、ベンゼンが 3 歩・−227.264329 Ha で収束することを確認した。
-
-### P7 で残したもの
-
-- **手動 E2E（Firefox、ユーザー）。** 3D の見た目と、進捗カードが分子に重なる具合。
-- **Vercel の再デプロイ（ユーザー）。** Root Directory を直下にしてから、デプロイ先の URL で
-  `.wasm` の Content-Type と、ベンゼンの所要時間。
-- **PR での作り直しコミット**は、まだ一度も PR で走らせていない（main への push では動いた）。
-- 任意: 重み微分・マルチスレッド化・`OPTIMIZE_BUDGET_SECONDS` の見直し（「P6 以降に残したもの」）。
-
-### P3・P4 の実装メモ
-
-- **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
-  `Calculation`（`System` + `ScfResult` + チャンネルごとに遅延生成する ρ グリッド）を返し、
-  `summary()` がスカラー値、`isosurface(channel, level)` がメッシュを返す。
-  `dft.worker.ts` の `current` がそれを持ち、新しい SCF のたびに古いものを `free()` する
-  （WASM のメモリは GC されない）。
-  P4 で UKS を足したが、等値面側は変わっていない（`ScfResult::density` は α+β の全密度）。
-- **`worker.terminate()` は保持中の `Calculation` も道連れにする。** 中止や編集のあと
-  等値面を再生成するには SCF からやり直しになる。UI 側は `hasDensityRef` でそれを追跡
-  している。発散アニメーション中に等値面を出したいなら、この前提を見直すこと。
-- **等値面リクエストは App 側で合流させている**（`wantedRef` + `meshInFlightRef`）。
-  Worker は単一スレッドなので、スライダーのイベントを全部キューに積むと数秒遅れる。
-- **非収束でも密度は返る**が、**描かないことにした**。`ScfResult` は `converged: false`
-  でも形式上は密度を持つけれど、それは「その分子の密度」ではなく「反復が止まらなかった
-  最後の 1 枚」なので、飛び散る原子の隣に電子雲を出すと「計算できた」に見えてしまう。
-  発散演出だけを出し、数値も等値面も伏せる。
-- **表示チャンネルは 2 つある。** UI は `total` か `bonding` を要求し、`bonding` に対して
-  **どう答えるかはエンジンが決める**（`bonding::bonding_channel`）。平面分子なら π、
-  それ以外は差密度（ρ_分子 − ρ_孤立原子の重ね合わせ）。返ってきた `channel`
-  （`total` / `pi` / `deformation`）で UI の説明文と色が変わる。
-  π の選択は `ScfResult::channels` を全部なめるので、UKS でも α/β 別々の軌道を見る
-  （`DensityChannel::Pi` は `OrbitalRef { channel, index }` の列）。
-- **差密度は符号付き。** `density::evaluate` は**負の値をクランプしない**（P3 の最初の版は
-  していた）。`marching::extract_side(grid, level, Side)` で正負 2 枚の曲面を切り、
-  Worker は 2 組のジオメトリを返す。
-- **差密度は原子核の上で鋭く尖る。** CH₄ では炭素核で −2.2 e/Bohr³ に達する（分子と
-  孤立原子の 1s カスプの差）。等値面の意味がある範囲はスライダーの下半分で、
-  上のほうへ動かすと核まわりの赤い小球だけが残る。これは量の性質であって不具合ではない。
-
-### P4 で分かったこと
-
-- **開殻の参照値は `tests/data/scf_open_shell.json`。** `gen_reference.py` の
-  `open_shell_reference()` が UKS（閉殻比較用の 1 件だけ RKS）で生成する。O₂ の三重項と
-  一重項、CH₃・OH ラジカル、H/C/N/O/Al/Si 原子。α/β 別の密度行列と軌道エネルギー、
-  `<S²>` まで入っているので、ずれたときにどの項が悪いか分かる。
-- **PySCF 側も開殻原子は素直に収束しない。** 縮退した p 殻で DIIS が振動するので、
-  `unrestricted_payload` は収束しなければ `mf.newton()`（二次収束法）に落とす。
-- **`<S²>` は診断として効く。** `ScfResult::spin_squared(&overlap)` が
-  `S_z(S_z+1) + n_β − tr(D_α S D_β S)`。三重項のつもりが一重項に落ちていても
-  エネルギーはそれらしく見えるが、これは見逃さない。
-- **level shift が無いと Al・Si 原子が解けない。** 3s と 3p が近く、占有/非占有が
-  反復ごとに入れ替わる。**ダンピングでは直らない**（振動しているのは密度ではなく占有）。
-  空軌道を持ち上げれば止まる。入れる前は Al が**カチオンとして**、Si が五重項として
-  返ってきていた（どちらも中性基底状態ではない）。`tests/reference_open_shell.rs` の
-  `a_level_shift_is_what_the_hard_atoms_need` が「無いと落ちる」ことごと固定している。
-- **非収束を作るのは難しい。** 原子を重ねる・詰める程度では探索のどこかで収束する
-  （O₂ を 0.4 Å、S 3 個の団子、C 4 個の積み重ね、いずれも収束した）。発散アニメーションを
-  手で確認したいときは、Worker で `converged: false` を一時的に強制するのが早い。
-
-### P4 の実測（自動探索のコスト）
-
-閉殻分子は一重項と三重項の両方を解くので、単純に SCF が 2 回走る。
-ネイティブ（release、`System::build` + 探索 vs `System::build` + 1 状態）:
-
-| | 1 状態 | 探索 | 倍率 | 三重項の反復数 |
-| --- | --- | --- | --- | --- |
-| H₂O | 0.41 秒 | 0.53 秒 | ×1.30 | 7 |
-| O₂ | 0.15 秒 | 0.28 秒 | ×1.91 | 7（採用） |
-| NH₃ | 0.21 秒 | 0.57 秒 | ×2.65 | 10 |
-| CH₄ | 0.26 秒 | 1.10 秒 | ×4.21 | **17** |
-| ベンゼン | 5.28 秒 | 9.53 秒 | ×1.81 | 11 |
-
-ブラウザ実測ではベンゼンが 16.5 秒 → **24.3 秒**。倍率が分子ごとに違うのは
-三重項の収束の速さが違うから（CH₄ の三重項は 17 反復かかる）。
-P6 でここを縮めるなら、三重項を**収束した一重項の密度から始める**のが素直
-（`ScfOptions` に初期密度を渡す口を足す）。ギャップによる振り分けは上の規約のとおり不可。
-
-### P3 の実測（ブラウザ、release + wasm-opt -O3）
-
-初回の等値面（ρ サンプリング込み）: H₂O 0.12〜0.23 秒 / ベンゼン 1.0〜1.3 秒。
-チャンネルごとに格子を 1 枚ずつ持つので、`total` と `bonding` の初回はそれぞれ 1 回かかる。
-以降の閾値変更: H₂O 2 ms / ベンゼン 11〜17 ms。設計計画の「数 ms」を満たしている。
-チャンネルを切り替えて戻ると、その格子は残っているので 12〜15 ms。
-格子は `density::GridSpec::for_molecule`（0.22 Bohr 間隔・パディング 4 Bohr・上限 30 万点）で、
-ベンゼンは 80×75×38 = 22.8 万点。ρ の格子積分は電子数に対して H₂O −2.5%、CH₄ +2.8%、
-ベンゼン −1.8%（一様格子は核の尖りを解像できない。SCF が Becke グリッドを使う理由そのもので、
-表示用としては十分）。初回の 1.2 秒はほぼ全部が ρ のサンプリングで、marching cubes 自体は
-その 1/100 以下。P6 で縮めるならブロックごとの基底関数スクリーニング（XC と同じ話）。
-
-### P2 時点の性能（P6 の出発点）
-
-ブラウザ実測（release + wasm-opt -O3、SIMD なし・単一スレッド）:
-H₂O 0.6 秒 / CH₄ 0.6 秒 / ベンゼン **16.5 秒**（8 反復）。
-ネイティブ内訳ではベンゼンの 4.2 秒のうち ERI が 2.2 秒、SCF 反復が 1.9 秒
-（うちほぼ全部が XC のグリッド積分）。P6 で効きそうな順に:
-ERI の Boys 関数のテーブル化、XC のブロックごとの基底関数スクリーニング、SIMD。
-グリッドは `GridQuality::Medium`（原子あたり 60 動径点）で、PySCF の収束グリッドに対する
-誤差は 2e-6〜5e-5 Ha。
+- P0〜P7 完了、Vercel デプロイ済み。Firefox での手動 E2E の結果は未記録。
+- 拡張候補（詳細は dev-notes「P6 以降に残したもの」）: XC グリッド重み微分を実装して最適化を
+  Medium に戻す（ベンゼン最適化の 1〜2 割）、マルチスレッド化（COOP/COEP + rayon、nightly 依存）、
+  `OPTIMIZE_BUDGET_SECONDS`（1800 秒）の見直し、6-31G* / PBE への差し替え。
+- **記録の置き場所**: 作業の経緯・実測・却下した案は `docs/dev-notes.md` の「フェーズの記録」に
+  足し、この CLAUDE.md には守るべき規約と状態だけを 1〜2 行で足す（毎回読み込まれるため）。
 
 ## 開発環境の制約
 
-**Claude の作業環境のブラウザは WebGL が使えない**（GPU 無効の Chromium）。3D 表示に関わる変更は、コードとロジックまでしか自動検証できないので、見た目の確認はユーザーに Firefox で依頼すること。WebGL 非依存の部分（パネル UI、ワーカー経由の計算結果）は Browser ツールで検証できる。
+- **Claude の作業ブラウザは WebGL が使えない**（GPU 無効の Chromium）。3D の見た目はユーザーに
+  Firefox で確認を依頼する。パネル・Worker 経由の計算結果は Browser ツールで検証できる。
+- HMR（Fast Refresh）ではマウント時の effect が再実行されない。別条件で App を再マウントして
+  確かめる方法は dev-notes「P7 の実装メモ」。
