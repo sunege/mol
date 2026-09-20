@@ -17,6 +17,21 @@ export const NO_RECORDS =
 export const RECORDS_HINT =
   '同じ分子の記録どうしを、いちばん低い形からの差で並べています。棒が長いほど低い（安定な）形です。';
 
+/**
+ * The one thing this comparison cannot be trusted for.
+ *
+ * Measured (`docs/dev-notes.md`, "異性体のエネルギー順序も最小基底で逆になる"): the two pairs of
+ * isomers tried - cyclopropane against propene, ethanol against dimethyl ether -
+ * both come out the wrong way round, by 50 and 78 kJ/mol. The same molecule in
+ * different shapes is fine (ethane's rotation barrier comes out at 13.5 kJ/mol
+ * against a textbook 12). It says nothing about the basis or the functional,
+ * which stay off the screen (requirement F4); it says what the ranking above
+ * may and may not be read as.
+ */
+export const ISOMER_CAVEAT =
+  'くらべられるのは、同じつながり方の分子の形どうしです。' +
+  'つながり方が違う分子（異性体）どうしのどちらが安定かは、この計算では当てになりません。';
+
 export const NOT_KEPT_NOTICE =
   'このブラウザには記録が残りません（タブを閉じると消えます）。必要ならファイルに書き出してください。';
 

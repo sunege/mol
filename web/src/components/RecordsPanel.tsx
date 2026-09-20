@@ -10,6 +10,7 @@ import { useState } from 'react';
 import type { LogGroup } from '../records/log';
 import type { StructureRecord } from '../records/record';
 import {
+  ISOMER_CAVEAT,
   NO_RECORDS,
   NOT_KEPT_NOTICE,
   RECORDS_HINT,
@@ -160,7 +161,11 @@ export function RecordsPanel({
             );
           })}
           </div>
-          <p className="hint">{RECORDS_HINT}</p>
+          <p className="hint">
+            {RECORDS_HINT}
+            {'\u00a0'}
+            {ISOMER_CAVEAT}
+          </p>
         </>
       )}
       <div className="row">

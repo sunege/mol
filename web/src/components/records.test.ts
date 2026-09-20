@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ISOMER_CAVEAT,
+  RECORDS_HINT,
   depthBar,
   exportFileName,
   groupHeading,
@@ -124,5 +126,22 @@ describe('the file written out', () => {
     const name = exportFileName('C₂H₆O', new Date(2026, 8, 20, 9, 5));
     expect(name).toBe('C₂H₆O-記録-20260920-0905.json');
     expect(exportFileName(null, new Date(2026, 8, 20, 9, 5))).toBe('記録-20260920-0905.json');
+  });
+});
+
+describe('what the section says the comparison is for', () => {
+  it('says which comparisons hold and which do not', () => {
+    // Both pairs of isomers measured came out the wrong way round, while the
+    // same molecule in different shapes came out right (dev-notes, "異性体の
+    // エネルギー順序も最小基底で逆になる"), so the hint has to say so.
+    expect(RECORDS_HINT).toContain('いちばん低い形からの差');
+    expect(ISOMER_CAVEAT).toContain('異性体');
+    expect(ISOMER_CAVEAT).toContain('当てになりません');
+  });
+
+  it('says it without naming a single DFT parameter (requirement F4)', () => {
+    for (const word of ['基底', 'STO-3G', '汎関数', 'LDA', '電荷', '多重度', 'DFT']) {
+      expect(`${RECORDS_HINT}${ISOMER_CAVEAT}`).not.toContain(word);
+    }
   });
 });
