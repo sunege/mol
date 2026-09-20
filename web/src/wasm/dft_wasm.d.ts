@@ -89,10 +89,15 @@ export class IsoMesh {
  * being optimised.
  *
  * `on_step` receives `{ step, xyz, energy, maxForce }` with coordinates in
- * Angstrom, and returning `false` from it stops the relaxation where it is.
- * Nothing here throws: a structure the engine cannot solve comes back as a
- * calculation whose `optimization.converged` is false, which the interface
- * turns into an animation rather than a message (requirement F5).
+ * Angstrom. Its return value is not read; a caller that wants to stop early
+ * *throws* from it, and the relaxation ends where it is with `"interrupted"`
+ * and the structure it had reached - which is how the candidate pool gives
+ * itself a budget shorter than [`OPTIMIZE_BUDGET_SECONDS`] without a worker
+ * being terminated (`web/src/search/`).
+ *
+ * Nothing here throws at the caller: a structure the engine cannot solve comes
+ * back as a calculation whose `optimization.converged` is false, which the
+ * interface turns into an animation rather than a message (requirement F5).
  *
  * `on_progress(stage, step)`, when given, is called as each part of the
  * calculation starts (see [`stage`]). Most of the wait before the first step is
