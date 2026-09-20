@@ -156,9 +156,8 @@ web/src/wasm/      build:wasm の生成物（コミットする）
 ## 状態と今後
 
 - P0〜P7 完了、Vercel デプロイ済み。Firefox での手動 E2E の結果は未記録（P8 の確認で一緒に行う）。
-- **v2 着手（2026-09-20）。** P8（観測モード）完了（Firefox 確認済み）。P9（安定構造の記録）は
-  P9-1〜P9-8 の実装が完了し、**残りはユーザーの Firefox 確認**（plan-v2.md の P9 の節）。
-  WebGPU は採らないと決めた（理由は plan-v2.md）。
+- **v2 着手（2026-09-20）。** P8（観測モード）・P9（安定構造の記録）完了、どちらも Firefox 確認済み。
+  **次は P10-1（並列探索の実測）。** WebGPU は採らないと決めた（理由は plan-v2.md）。
 - 拡張候補（詳細は dev-notes「P6 以降に残したもの」）: XC グリッド重み微分を実装して最適化を
   Medium に戻す（ベンゼン最適化の 1〜2 割）、マルチスレッド化（COOP/COEP + rayon、nightly 依存）、
   `OPTIMIZE_BUDGET_SECONDS`（1800 秒）の見直し。
