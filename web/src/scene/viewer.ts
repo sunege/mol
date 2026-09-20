@@ -11,7 +11,18 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { findBonds } from './bonds';
+import { dashLayout } from './dashes';
+import { clickAction, pressAction, type ViewerMode } from './gestures';
+import {
+  distance,
+  formatMeasurement,
+  formatValue,
+  measureAtoms,
+  measurementAnchor,
+  type Measurement,
+} from './measure';
 import type { ElementInfo, IsoMesh, SurfaceGeometry } from '../worker/protocol';
 
 export interface SceneAtom {
@@ -37,10 +48,43 @@ const POSITIVE_COLOR = 0x5fa8ff;
 const NEGATIVE_COLOR = 0xff6b6b;
 /** Pointer travel below this many pixels counts as a click, not a drag. */
 const CLICK_SLOP_PX = 4;
+/** Halo around the atom selected for editing, relative to the atom's sphere. */
+const SELECTED_HALO = 1.45;
+/**
+ * The colour of everything that belongs to a measurement: the halos on the
+ * picked atoms, the dashes between them and the label. Chosen apart from the
+ * editing selection (blue) and from both density surfaces (blue and red).
+ */
+const MEASURE_COLOR = 0xffb84d;
+/**
+ * A thin rim around a measured atom rather than a ball around it: anything
+ * bigger crowds the density surface the atoms sit inside. Different from
+ * {@link SELECTED_HALO} so that an atom which is both selected and measured
+ * shows both rings instead of two halos fighting over one surface.
+ */
+const MEASURED_HALO = 1.2;
+/**
+ * The dashes joining measured atoms are short cylinders, thinner than a bond.
+ * Lines drawn by WebGL are a single device pixel wide, too thin to read on a
+ * projector, and a fat dash crowds everything around it.
+ *
+ * Being thinner than a bond, they would disappear inside one - picked atoms are
+ * usually bonded - so they are drawn without depth testing, over whatever is in
+ * front of them. They do run from centre to centre, across the two atoms: the
+ * gap between two bonded atoms' spheres is about a tenth of an Angstrom, far
+ * too short for a dashed line to be visible in.
+ */
+const DASH_RADIUS = BOND_RADIUS * 0.5;
+const DASH_LENGTH = 0.12;
+const DASH_GAP = 0.08;
+/** How far into an angle its label sits, beyond the vertex atom's halo (Angstrom). */
+const ANGLE_LABEL_MARGIN = 0.25;
 
 export type PlaceHandler = (position: [number, number, number]) => void;
 export type MoveHandler = (index: number, position: [number, number, number]) => void;
 export type SelectHandler = (index: number | null) => void;
+export type MeasureHandler = (index: number) => void;
+export type MeasurementHandler = (measurement: Measurement | null) => void;
 
 /** Shared settings of both density surfaces; only the colour differs. */
 function isosurfaceMaterial(color: number): THREE.MeshStandardMaterial {
@@ -66,13 +110,23 @@ export class MoleculeViewer {
   #controls: OrbitControls;
   #atomGroup = new THREE.Group();
   #bondGroup = new THREE.Group();
+  #measuredGroup = new THREE.Group();
+  #dashGroup = new THREE.Group();
+  #bondLabelGroup = new THREE.Group();
+  #measureLabel: CSS2DObject;
+  #labelRenderer = new CSS2DRenderer();
   #positiveSurface: THREE.Mesh;
   #negativeSurface: THREE.Mesh;
   #highlight: THREE.Mesh;
   #elements = new Map<number, ElementInfo>();
   #atoms: SceneAtom[] = [];
   #activeZ = 6;
+  #mode: ViewerMode = 'edit';
   #selected: number | null = null;
+  #measured: number[] = [];
+  #showBondLengths = false;
+  /** The bonds drawn now, shared by the cylinders and the bond-length labels. */
+  #bonds: Array<[number, number]> = [];
   #frame = 0;
   #observer: ResizeObserver;
   #container: HTMLElement;
@@ -84,6 +138,18 @@ export class MoleculeViewer {
   #bondMaterial = new THREE.MeshStandardMaterial({ color: 0x9aa4b2, roughness: 0.5 });
   #positiveMaterial = isosurfaceMaterial(POSITIVE_COLOR);
   #negativeMaterial = isosurfaceMaterial(NEGATIVE_COLOR);
+  #measuredMaterial = new THREE.MeshBasicMaterial({
+    color: MEASURE_COLOR,
+    transparent: true,
+    opacity: 0.3,
+    depthWrite: false,
+  });
+  #dashMaterial = new THREE.MeshBasicMaterial({
+    color: MEASURE_COLOR,
+    // Over the bonds and the density surface, whatever the angle of view.
+    depthTest: false,
+    depthWrite: false,
+  });
 
   // Pointer gesture state.
   #raycaster = new THREE.Raycaster();
@@ -98,6 +164,14 @@ export class MoleculeViewer {
   onMove: MoveHandler | null = null;
   /** Called when the selection changes. */
   onSelect: SelectHandler | null = null;
+  /** Called when an atom is clicked in observe mode, to pick or unpick it for measuring. */
+  onMeasure: MeasureHandler | null = null;
+  /**
+   * Called with the measurement of the picked atoms every time the atoms are
+   * redrawn, including every frame of an animation, and with `null` when fewer
+   * than two are picked.
+   */
+  onMeasurement: MeasurementHandler | null = null;
 
   constructor(container: HTMLElement) {
     this.#container = container;
@@ -140,13 +214,28 @@ export class MoleculeViewer {
       surface.renderOrder = 1;
     }
 
+    this.#measureLabel = new CSS2DObject(labelElement('measure-label'));
+    this.#measureLabel.visible = false;
+    this.#bondLabelGroup.visible = false;
+
     this.#scene.add(
       this.#atomGroup,
       this.#bondGroup,
       this.#positiveSurface,
       this.#negativeSurface,
       this.#highlight,
+      this.#measuredGroup,
+      this.#dashGroup,
+      this.#bondLabelGroup,
+      this.#measureLabel,
     );
+
+    // Labels are HTML laid over the canvas, so they stay crisp and readable at
+    // any zoom. The layer never takes the pointer: a click on a label goes
+    // through to the atom underneath.
+    const labels = this.#labelRenderer.domElement;
+    labels.className = 'viewer-labels';
+    container.appendChild(labels);
 
     // Capture phase, so an atom hit can switch OrbitControls off before it
     // starts an orbit gesture on the same pointerdown.
@@ -164,6 +253,7 @@ export class MoleculeViewer {
       this.#frame = requestAnimationFrame(tick);
       this.#controls.update();
       this.#renderer.render(this.#scene, this.#camera);
+      this.#labelRenderer.render(this.#scene, this.#camera);
     };
     tick();
   }
@@ -177,9 +267,39 @@ export class MoleculeViewer {
     this.#activeZ = z;
   }
 
+  /**
+   * Switches what pointer gestures do (see `gestures.ts`). A drag under way is
+   * dropped, so an atom never carries on following the pointer in a mode where
+   * atoms cannot be moved.
+   */
+  setMode(mode: ViewerMode) {
+    this.#mode = mode;
+    this.#dragIndex = null;
+    this.#controls.enabled = true;
+  }
+
   setSelected(index: number | null) {
     this.#selected = index;
     this.#updateHighlight();
+  }
+
+  /**
+   * The atoms to measure between, in the order they were picked: two for a
+   * distance, three for the angle at the second, four for the dihedral about
+   * the middle two. The value is worked out here, whenever the atoms move, so
+   * it follows a drag or an animation without the caller doing anything.
+   */
+  setMeasured(indices: readonly number[]) {
+    this.#measured = indices.slice();
+    this.#syncMeasurement();
+    this.#syncBondLabels();
+  }
+
+  /** Labels every drawn bond with its length. */
+  setShowBondLengths(show: boolean) {
+    this.#showBondLengths = show;
+    this.#bondLabelGroup.visible = show;
+    this.#syncBondLabels();
   }
 
   /**
@@ -190,9 +310,7 @@ export class MoleculeViewer {
    */
   setMolecule(atoms: SceneAtom[]) {
     this.#atoms = atoms.slice();
-    this.#syncAtomMeshes();
-    this.#syncBondMeshes();
-    this.#updateHighlight();
+    this.#syncAll();
   }
 
   /**
@@ -215,9 +333,16 @@ export class MoleculeViewer {
         pos: [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]],
       };
     }
+    this.#syncAll();
+  }
+
+  /** Everything drawn from the atom positions. */
+  #syncAll() {
     this.#syncAtomMeshes();
     this.#syncBondMeshes();
     this.#updateHighlight();
+    this.#syncMeasurement();
+    this.#syncBondLabels();
   }
 
   /**
@@ -297,6 +422,7 @@ export class MoleculeViewer {
 
   #syncBondMeshes() {
     const pairs = findBonds(this.#atoms, (z) => this.#covalentRadius(z));
+    this.#bonds = pairs;
     const group = this.#bondGroup;
     while (group.children.length > pairs.length) group.children.pop();
     while (group.children.length < pairs.length) {
@@ -334,7 +460,121 @@ export class MoleculeViewer {
     const atom = this.#atoms[index];
     this.#highlight.visible = true;
     this.#highlight.position.set(...atom.pos);
-    this.#highlight.scale.setScalar(this.#atomRadius(atom.z) * 1.45);
+    this.#highlight.scale.setScalar(this.#atomRadius(atom.z) * SELECTED_HALO);
+  }
+
+  /** The picked atoms, or none if one of them is gone. */
+  #measuredAtoms(): SceneAtom[] {
+    const atoms = this.#atoms;
+    if (this.#measured.some((i) => i >= atoms.length)) return [];
+    return this.#measured.map((i) => atoms[i]);
+  }
+
+  /** Halos on the picked atoms, dashes between them in order, and the label. */
+  #syncMeasurement() {
+    const picked = this.#measuredAtoms();
+
+    const halos = this.#measuredGroup;
+    while (halos.children.length > picked.length) halos.children.pop();
+    while (halos.children.length < picked.length) {
+      halos.add(new THREE.Mesh(this.#sphereGeometry, this.#measuredMaterial));
+    }
+    picked.forEach((atom, i) => {
+      const halo = halos.children[i];
+      halo.position.set(...atom.pos);
+      halo.scale.setScalar(this.#atomRadius(atom.z) * MEASURED_HALO);
+    });
+
+    this.#syncDashes(picked);
+
+    const measurement =
+      picked.length >= 2 ? measureAtoms(this.#atoms, this.#measured) : null;
+    const anchor = measurement
+      ? measurementAnchor(
+          picked.map((atom) => atom.pos),
+          // Clear of the vertex atom's halo, so the label is not on top of it.
+          (picked[1] ? this.#atomRadius(picked[1].z) * MEASURED_HALO : 0) + ANGLE_LABEL_MARGIN,
+        )
+      : null;
+    const label = this.#measureLabel;
+    if (measurement && anchor) {
+      label.visible = true;
+      label.position.set(...anchor);
+      setText(label.element, formatMeasurement(measurement));
+    } else {
+      label.visible = false;
+    }
+    this.onMeasurement?.(measurement);
+  }
+
+  /** Dashed segments from each picked atom to the next. */
+  #syncDashes(picked: SceneAtom[]) {
+    const segments: Array<{ center: THREE.Vector3; direction: THREE.Vector3; length: number }> =
+      [];
+    for (let k = 0; k + 1 < picked.length; k++) {
+      const start = new THREE.Vector3(...picked[k].pos);
+      const direction = new THREE.Vector3(...picked[k + 1].pos).sub(start);
+      const span = direction.length();
+      if (span < 1e-6) continue;
+      direction.divideScalar(span);
+      const { length, centers } = dashLayout(span, DASH_LENGTH, DASH_GAP);
+      for (const offset of centers) {
+        segments.push({
+          center: start.clone().addScaledVector(direction, offset),
+          direction,
+          length,
+        });
+      }
+    }
+
+    const group = this.#dashGroup;
+    while (group.children.length > segments.length) group.children.pop();
+    while (group.children.length < segments.length) {
+      const dash = new THREE.Mesh(this.#cylinderGeometry, this.#dashMaterial);
+      // With depth testing off, draw order is all that decides what covers
+      // what: after the atoms, the bonds and both density surfaces.
+      dash.renderOrder = 2;
+      group.add(dash);
+    }
+    const up = new THREE.Vector3(0, 1, 0);
+    segments.forEach(({ center, direction, length }, i) => {
+      const dash = group.children[i];
+      dash.position.copy(center);
+      dash.quaternion.setFromUnitVectors(up, direction);
+      dash.scale.set(DASH_RADIUS, length, DASH_RADIUS);
+    });
+  }
+
+  /**
+   * A length on every drawn bond, when switched on. A bond that is also the
+   * distance being measured keeps only the measurement's label, which says the
+   * same thing and would otherwise sit on top of it.
+   */
+  #syncBondLabels() {
+    const group = this.#bondLabelGroup;
+    if (!this.#showBondLengths) return;
+
+    const measuredPair =
+      this.#measured.length === 2 && this.#measuredAtoms().length === 2
+        ? [Math.min(...this.#measured), Math.max(...this.#measured)]
+        : null;
+    const bonds = this.#bonds.filter(
+      ([a, b]) => !(measuredPair && a === measuredPair[0] && b === measuredPair[1]),
+    );
+
+    // Removing a CSS2DObject from its parent is what takes its element out of
+    // the page, so the pool shrinks with remove() rather than by truncation.
+    while (group.children.length > bonds.length) group.remove(group.children.at(-1)!);
+    while (group.children.length < bonds.length) {
+      group.add(new CSS2DObject(labelElement('bond-label')));
+    }
+    bonds.forEach(([a, b], i) => {
+      const label = group.children[i] as CSS2DObject;
+      const p = this.#atoms[a].pos;
+      const q = this.#atoms[b].pos;
+      label.position.set((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, (p[2] + q[2]) / 2);
+      setText(label.element, formatValue('distance', distance(p, q)));
+    });
   }
 
   // --- pointer interaction -------------------------------------------------
@@ -375,13 +615,13 @@ export class MoleculeViewer {
   #handlePointerDown = (event: PointerEvent) => {
     if (event.button !== 0) return;
     this.#pointerStart = { x: event.clientX, y: event.clientY };
-    const hit = this.#pick(event);
-    this.#downIndex = hit?.index ?? null;
+    this.#downIndex = this.#pick(event)?.index ?? null;
 
-    if (hit && !event.shiftKey) {
+    const press = pressAction(this.#mode, this.#downIndex, event.shiftKey);
+    if (press.kind === 'drag') {
       // Dragging an atom must not also orbit the camera.
       this.#controls.enabled = false;
-      this.#dragIndex = hit.index;
+      this.#dragIndex = press.index;
       this.#renderer.domElement.setPointerCapture(event.pointerId);
     }
   };
@@ -409,13 +649,24 @@ export class MoleculeViewer {
 
     if (!wasClick) return;
 
-    if (downIndex !== null && event.shiftKey) {
-      this.#attachTo(downIndex, event);
-    } else if (downIndex !== null) {
-      this.onSelect?.(downIndex);
-    } else {
-      const point = this.#planePoint(event, this.#centroid());
-      if (point) this.onPlace?.([point.x, point.y, point.z]);
+    const click = clickAction(this.#mode, downIndex, event.shiftKey);
+    switch (click.kind) {
+      case 'attach':
+        this.#attachTo(click.index, event);
+        break;
+      case 'select':
+        this.onSelect?.(click.index);
+        break;
+      case 'place': {
+        const point = this.#planePoint(event, this.#centroid());
+        if (point) this.onPlace?.([point.x, point.y, point.z]);
+        break;
+      }
+      case 'measure':
+        this.onMeasure?.(click.index);
+        break;
+      case 'none':
+        break;
     }
   };
 
@@ -465,6 +716,8 @@ export class MoleculeViewer {
     // lay the canvas out at device-pixel size (twice as wide on a Retina
     // display), overflowing the viewport and covering the side panel.
     this.#renderer.setSize(clientWidth, clientHeight);
+    // The labels are placed in CSS pixels, the same units as the layout box.
+    this.#labelRenderer.setSize(clientWidth, clientHeight);
     this.#camera.aspect = clientWidth / clientHeight;
     this.#camera.updateProjectionMatrix();
   }
@@ -481,6 +734,12 @@ export class MoleculeViewer {
 
     this.#atomGroup.clear();
     this.#bondGroup.clear();
+    this.#measuredGroup.clear();
+    this.#dashGroup.clear();
+    // Detaching the labels removes their elements; the layer itself goes too.
+    this.#bondLabelGroup.clear();
+    this.#scene.remove(this.#measureLabel);
+    this.#labelRenderer.domElement.remove();
     this.#positiveSurface.geometry.dispose();
     this.#negativeSurface.geometry.dispose();
     this.#sphereGeometry.dispose();
@@ -489,9 +748,26 @@ export class MoleculeViewer {
     this.#bondMaterial.dispose();
     this.#positiveMaterial.dispose();
     this.#negativeMaterial.dispose();
+    this.#measuredMaterial.dispose();
+    this.#dashMaterial.dispose();
     (this.#highlight.material as THREE.Material).dispose();
     this.#controls.dispose();
     this.#renderer.dispose();
     dom.remove();
   }
+}
+
+/** An empty label element with the given class, for a CSS2DObject. */
+function labelElement(className: string): HTMLDivElement {
+  const element = document.createElement('div');
+  element.className = className;
+  return element;
+}
+
+/**
+ * Writes a label's text only when it changed: labels are updated on every
+ * animation frame, and most frames do not change the digits shown.
+ */
+function setText(element: HTMLElement, text: string) {
+  if (element.textContent !== text) element.textContent = text;
 }

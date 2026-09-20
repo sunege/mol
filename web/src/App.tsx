@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MoleculeViewer, type SceneAtom } from './scene/viewer';
 import { probeWebGl, type WebGlProbe } from './scene/webgl';
+import { keyAction, type ViewerMode } from './scene/gestures';
+import { measureAtoms, toggleMeasured } from './scene/measure';
+import { LiveMeasurement } from './scene/liveMeasurement';
 import { DftWorkerClient } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
 import { PeriodicPicker } from './components/PeriodicPicker';
 import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
 import { Elapsed, ProgressOverlay } from './components/ProgressOverlay';
+import { ObservePanel } from './components/ObservePanel';
 import { headline, type JobKind, type JobState } from './components/progress';
 import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
@@ -74,6 +78,15 @@ type AnimationKind = 'divergence' | 'optimization';
  * lasts until the first density surface is up, because that is when the answer
  * is on screen; a calculation that does not converge drops it at once and lets
  * the divergence speak for itself.
+ *
+ * The view has two modes. Edit mode builds the molecule. Observe mode is for
+ * showing it: clicks and drags there cannot change the structure - which while
+ * a calculation runs would also cancel it - and clicking atoms measures
+ * distances, angles and dihedrals between them instead. Starting a calculation
+ * switches to observe mode, so the class can watch the values change as the
+ * molecule relaxes; a calculation that ends with nothing to look at (it did
+ * not converge, was refused, or was cancelled) switches back, since what comes
+ * next is editing.
  */
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -85,6 +98,18 @@ export default function App() {
   const [elements, setElements] = useState<ElementInfo[]>([]);
   const [activeZ, setActiveZ] = useState(6);
   const [selected, setSelected] = useState<number | null>(null);
+  const [mode, setMode] = useState<ViewerMode>('edit');
+  // Atoms picked for measuring, in the order they were picked. They survive
+  // anything that only moves atoms (a drag, a relaxation) - the value follows
+  // - and are dropped by anything that changes which atoms there are.
+  const [measured, setMeasured] = useState<number[]>([]);
+  const [showBondLengths, setShowBondLengths] = useState(false);
+  // The structure the last relaxation started from, so a measurement can say
+  // how it changed. Only while the atoms on screen are that relaxation's.
+  const [relaxedFrom, setRelaxedFrom] = useState<SceneAtom[] | null>(null);
+  // What the picked atoms measure as drawn, written by the viewer. See
+  // `LiveMeasurement` for why the viewer and not `atoms`.
+  const [liveMeasurement] = useState(() => new LiveMeasurement());
   const [result, setResult] = useState<ScfOutcome | null>(null);
   const [computing, setComputing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -139,6 +164,13 @@ export default function App() {
   // overwriting the state of a newer request.
   const requestRef = useRef(0);
   const inFlightRef = useRef(false);
+  // Whether the calculation in flight is a relaxation, which is the only kind
+  // that leaves a before-and-after behind when it is cancelled.
+  const relaxingRef = useRef(false);
+  // The mode to go back to if the calculation that switched to observe mode
+  // ends with nothing to observe. Cleared when it succeeds, and when the user
+  // picks a mode themselves - their choice is not undone afterwards.
+  const restoreModeRef = useRef<ViewerMode | null>(null);
 
   // Whether the worker is still holding a converged calculation to cut surfaces
   // from. A ref rather than state: the isosurface pump reads it from inside a
@@ -165,10 +197,49 @@ export default function App() {
     setAnimation(null);
   }, []);
 
+  /** Selection for editing means nothing in observe mode, so it goes. */
+  const switchMode = useCallback((next: ViewerMode) => {
+    setMode(next);
+    if (next === 'observe') setSelected(null);
+  }, []);
+
+  /** The mode switch in the panel: the user's choice, which nothing reverts. */
+  const chooseMode = useCallback(
+    (next: ViewerMode) => {
+      restoreModeRef.current = null;
+      switchMode(next);
+    },
+    [switchMode],
+  );
+
+  /** A calculation is starting. */
+  const observeWhileRunning = useCallback(() => {
+    restoreModeRef.current = mode;
+    switchMode('observe');
+  }, [mode, switchMode]);
+
+  /** The calculation has an answer on screen: stay and look at it. */
+  const keepObserving = useCallback(() => {
+    restoreModeRef.current = null;
+  }, []);
+
+  /** It has nothing to look at: back to the mode it started from. */
+  const restoreMode = useCallback(() => {
+    const previous = restoreModeRef.current;
+    restoreModeRef.current = null;
+    if (previous !== null) switchMode(previous);
+  }, [switchMode]);
+
   const cancelCalculation = useCallback(() => {
     // Replacing the worker is not free, so only do it when something is actually
     // running - every edit comes through here.
     if (!inFlightRef.current) return;
+    // A cancelled relaxation leaves the structure as it was, so there is no
+    // before and after to show. A cancelled single point leaves the last
+    // relaxation's alone.
+    if (relaxingRef.current) setRelaxedFrom(null);
+    relaxingRef.current = false;
+    restoreMode();
     // A single-threaded WASM calculation cannot be interrupted from outside, so
     // the client terminates the worker and spawns a fresh one.
     inFlightRef.current = false;
@@ -179,7 +250,7 @@ export default function App() {
     setComputing(false);
     setJob(null);
     stopAnimation();
-  }, [stopAnimation]);
+  }, [stopAnimation, restoreMode]);
 
   /**
    * Hands the viewer back to React once the frames have run out for good.
@@ -204,6 +275,8 @@ export default function App() {
   const invalidateResult = useCallback(() => {
     setResult(null);
     setError(null);
+    // Whatever changed, the atoms are no longer where a relaxation left them.
+    setRelaxedFrom(null);
     stopAnimation();
     // The worker's copy of the density belongs to the old geometry, so the
     // surface on screen is stale whether or not the worker survives.
@@ -224,6 +297,7 @@ export default function App() {
       setAtoms((prev) => [...prev, { z: activeZ, pos }]);
       setPresetId(null);
       setSelected(null);
+      setMeasured([]);
       invalidateResult();
     },
     [activeZ, invalidateResult],
@@ -243,6 +317,7 @@ export default function App() {
       if (index === null) return null;
       setAtoms((prev) => prev.filter((_, i) => i !== index));
       setPresetId(null);
+      setMeasured([]);
       return null;
     });
     invalidateResult();
@@ -252,13 +327,18 @@ export default function App() {
     setAtoms([]);
     setPresetId(null);
     setSelected(null);
+    setMeasured([]);
     invalidateResult();
   }, [invalidateResult]);
 
+  const pickForMeasuring = useCallback((index: number) => {
+    setMeasured((prev) => toggleMeasured(prev, index));
+  }, []);
+
   // The viewer is created once, so it calls through a ref that always holds the
   // current handlers rather than the ones captured at mount.
-  const handlers = useRef({ placeAtom, moveAtom, setSelected, finishAnimation });
-  handlers.current = { placeAtom, moveAtom, setSelected, finishAnimation };
+  const handlers = useRef({ placeAtom, moveAtom, setSelected, pickForMeasuring, finishAnimation });
+  handlers.current = { placeAtom, moveAtom, setSelected, pickForMeasuring, finishAnimation };
 
   // --- viewer and worker lifetime -----------------------------------------
 
@@ -276,6 +356,8 @@ export default function App() {
         viewer.onPlace = (pos) => handlers.current.placeAtom(pos);
         viewer.onMove = (i, pos) => handlers.current.moveAtom(i, pos);
         viewer.onSelect = (i) => handlers.current.setSelected(i);
+        viewer.onMeasure = (i) => handlers.current.pickForMeasuring(i);
+        viewer.onMeasurement = (m) => liveMeasurement.set(m);
       } catch (e) {
         setWebgl({ ...probe, ok: false, disabled: true });
         console.error('WebGL renderer could not be created', e);
@@ -321,16 +403,31 @@ export default function App() {
       setElements([]);
       player.stop();
       viewer?.dispose();
+      liveMeasurement.set(null);
       client.dispose();
       viewerRef.current = null;
       clientRef.current = null;
       playerRef.current = null;
     };
-  }, []);
+  }, [liveMeasurement]);
 
   // --- viewer synchronisation ---------------------------------------------
 
   const elementsReady = elements.length > 0;
+
+  useEffect(() => {
+    viewerRef.current?.setMode(mode);
+  }, [mode]);
+
+  // Ahead of the molecule below, so that when both change in one render - an
+  // atom deleted, say - the old indices are never measured on the new atoms.
+  useEffect(() => {
+    viewerRef.current?.setMeasured(measured);
+  }, [measured]);
+
+  useEffect(() => {
+    viewerRef.current?.setShowBondLengths(showBondLengths);
+  }, [showBondLengths]);
 
   // While the animation is running it owns the positions; when it ends - because
   // it finished, or because the user edited the molecule out from under it - the
@@ -492,7 +589,9 @@ export default function App() {
     const { z, xyz } = toWorkerArrays(atoms);
     const token = ++requestRef.current;
     inFlightRef.current = true;
+    relaxingRef.current = false;
     stopAnimation();
+    observeWhileRunning();
     setComputing(true);
     // Drop the previous answer immediately: leaving it on screen next to
     // "計算中…" reads as though it belonged to the run in progress.
@@ -508,9 +607,11 @@ export default function App() {
         setResult(outcome);
         if (!outcome.converged) {
           endJob(false);
+          restoreMode();
           showDivergence(atoms);
           return;
         }
+        keepObserving();
         // The worker is now holding a density; show it without making the user
         // ask, so placing atoms and seeing the cloud is one action.
         hasDensityRef.current = true;
@@ -522,6 +623,7 @@ export default function App() {
         inFlightRef.current = false;
         setComputing(false);
         endJob(false);
+        restoreMode();
         reportFailure(e);
       });
   }, [
@@ -532,6 +634,9 @@ export default function App() {
     requestIsosurface,
     showDivergence,
     stopAnimation,
+    observeWhileRunning,
+    keepObserving,
+    restoreMode,
     beginJob,
     endJob,
     reportFailure,
@@ -559,7 +664,11 @@ export default function App() {
     const { z, xyz } = toWorkerArrays(original);
     const token = ++requestRef.current;
     inFlightRef.current = true;
+    relaxingRef.current = true;
     stopAnimation();
+    observeWhileRunning();
+    // Measurements compare against this, live while the molecule moves.
+    setRelaxedFrom(original);
     setComputing(true);
     setResult(null);
     setError(null);
@@ -585,15 +694,20 @@ export default function App() {
       .then((outcome) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
+        relaxingRef.current = false;
         setComputing(false);
         setResult(outcome);
 
         const relaxed = outcome.optimization;
         if (!outcome.converged || !relaxed || !hasUsableStructure(relaxed)) {
           endJob(false);
+          // The structure stays as built, so there is no before and after.
+          setRelaxedFrom(null);
+          restoreMode();
           showDivergence(original);
           return;
         }
+        keepObserving();
         // Whatever stopped it, the structure it reached is one the electrons
         // were solved for, so it is the molecule now - partly relaxed if the
         // budget ran out, fully relaxed if it settled. It is committed here
@@ -613,9 +727,12 @@ export default function App() {
       .catch((e: Error) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
+        relaxingRef.current = false;
         setComputing(false);
         endJob(false);
         stopAnimation();
+        setRelaxedFrom(null);
+        restoreMode();
         reportFailure(e);
       });
   }, [
@@ -627,6 +744,9 @@ export default function App() {
     showDivergence,
     stopAnimation,
     finishAnimation,
+    observeWhileRunning,
+    keepObserving,
+    restoreMode,
     beginJob,
     endJob,
     reportFailure,
@@ -638,18 +758,24 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
-      if (event.key === 'Delete' || event.key === 'Backspace') {
-        if (selected !== null) {
-          event.preventDefault();
-          deleteSelected();
-        }
-      } else if (event.key === 'Escape') {
-        setSelected(null);
+      switch (keyAction(mode, event.key)) {
+        case 'delete':
+          if (selected !== null) {
+            event.preventDefault();
+            deleteSelected();
+          }
+          break;
+        case 'deselect':
+          setSelected(null);
+          break;
+        case 'clearMeasured':
+          setMeasured([]);
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [selected, deleteSelected]);
+  }, [mode, selected, deleteSelected]);
 
   // Narrowed once, so every readout below agrees on what counts as an answer.
   //
@@ -662,9 +788,13 @@ export default function App() {
   const solved = result !== null && result.converged;
   const settled = solved && (relaxation === null || relaxation.converged);
   const selectedAtom = selected === null ? null : atoms[selected];
-  const selectedSymbol = selectedAtom
-    ? (elements.find((e) => e.z === selectedAtom.z)?.symbol ?? `Z=${selectedAtom.z}`)
-    : null;
+  const symbolOf = (z: number) => elements.find((e) => e.z === z)?.symbol ?? `Z=${z}`;
+  const selectedSymbol = selectedAtom ? symbolOf(selectedAtom.z) : null;
+  const measuredSymbols = measured
+    .filter((i) => i < atoms.length)
+    .map((i) => symbolOf(atoms[i].z));
+  const measuredBefore =
+    relaxedFrom !== null && measured.length >= 2 ? measureAtoms(relaxedFrom, measured) : null;
 
   return (
     <div className="app">
@@ -703,30 +833,64 @@ export default function App() {
         <h1>分子シミュレータ</h1>
         <p className="phase">原子を置くと、落ち着く形と電子の雲を計算します</p>
 
-        <h2>配置する元素</h2>
-        <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
-
-        <p className="hint">
-          何もない場所をクリックで配置 · 原子をドラッグで移動 · 原子を Shift+クリックで
-          結合距離に隣接配置 · 背景をドラッグで回転
-        </p>
-
-        <h2>編集</h2>
-        <div className="row">
-          <button type="button" onClick={deleteSelected} disabled={selected === null}>
-            削除{selectedSymbol ? `（${selectedSymbol}）` : ''}
-          </button>
-          <button type="button" onClick={clearAll} disabled={atoms.length === 0}>
-            全消去
+        <div className="row mode-switch" role="group" aria-label="モード">
+          <button
+            type="button"
+            className={mode === 'edit' ? 'active' : ''}
+            aria-pressed={mode === 'edit'}
+            onClick={() => chooseMode('edit')}
+          >
+            編集
           </button>
           <button
             type="button"
-            onClick={() => viewerRef.current?.frameAll()}
-            disabled={atoms.length === 0}
+            className={mode === 'observe' ? 'active' : ''}
+            aria-pressed={mode === 'observe'}
+            onClick={() => chooseMode('observe')}
           >
-            全体表示
+            観測
           </button>
         </div>
+
+        {mode === 'edit' ? (
+          <>
+            <h2>配置する元素</h2>
+            <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
+
+            <p className="hint">
+              何もない場所をクリックで配置 · 原子をドラッグで移動 · 原子を Shift+クリックで
+              結合距離に隣接配置 · 背景をドラッグで回転
+            </p>
+
+            <h2>編集</h2>
+            <div className="row">
+              <button type="button" onClick={deleteSelected} disabled={selected === null}>
+                削除{selectedSymbol ? `（${selectedSymbol}）` : ''}
+              </button>
+              <button type="button" onClick={clearAll} disabled={atoms.length === 0}>
+                全消去
+              </button>
+              <button
+                type="button"
+                onClick={() => viewerRef.current?.frameAll()}
+                disabled={atoms.length === 0}
+              >
+                全体表示
+              </button>
+            </div>
+          </>
+        ) : (
+          <ObservePanel
+            live={liveMeasurement}
+            before={measuredBefore}
+            symbols={measuredSymbols}
+            showBondLengths={showBondLengths}
+            onShowBondLengths={setShowBondLengths}
+            onClear={() => setMeasured([])}
+            onFrame={() => viewerRef.current?.frameAll()}
+            canFrame={atoms.length > 0}
+          />
+        )}
 
         <h2>プリセット</h2>
         <div className="row">
@@ -739,6 +903,7 @@ export default function App() {
                 setPresetId(preset.id);
                 setAtoms(preset.atoms);
                 setSelected(null);
+                setMeasured([]);
                 invalidateResult();
               }}
             >

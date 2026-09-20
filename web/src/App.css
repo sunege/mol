@@ -18,6 +18,40 @@
   touch-action: none;
 }
 
+/* The layer the viewer lays its labels on, the same size as the canvas. It
+   never takes the pointer (and neither do the labels, which inherit this), so
+   a click on a label reaches the atom under it. */
+.viewer-labels {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* The value being measured, in the colour of the halos and dashes. */
+.measure-label {
+  padding: 2px 7px;
+  border: 1px solid #ffb84d;
+  border-radius: 5px;
+  background: rgb(14 17 22 / 0.82);
+  color: #ffd699;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Bond lengths, quieter than the measurement so that one still stands out. */
+.bond-label {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgb(14 17 22 / 0.7);
+  color: #c3ccd9;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .panel {
   padding: 20px 18px;
   background: #151a21;
@@ -186,6 +220,10 @@
   backdrop-filter: blur(4px);
   font-size: 0.8rem;
   pointer-events: none;
+  /* Above the measurement labels, which share the viewport with it. React
+     may insert the card before or after the label layer, so DOM order cannot
+     be relied on. */
+  z-index: 2;
 }
 
 .progress-head {
@@ -305,4 +343,38 @@
 .engine-unavailable .title {
   font-size: 1rem;
   color: #ff9a9a;
+}
+
+/* Edit / observe, at the top of the panel. Two equal halves, so it reads as
+   one switch rather than two unrelated buttons. */
+.mode-switch {
+  margin-top: 14px;
+  flex-wrap: nowrap;
+}
+
+.mode-switch button {
+  flex: 1;
+}
+
+.panel dl.measurement dt {
+  margin-top: 0;
+}
+
+.measurement-value {
+  font-size: 1.15rem;
+  color: #ffd699;
+}
+
+.measurement-picked {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #ffd699;
+}
+
+.observe-toggle {
+  margin-top: 14px;
+}
+
+.observe-actions {
+  margin-top: 10px;
 }
