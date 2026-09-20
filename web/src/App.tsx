@@ -15,11 +15,15 @@ import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
 import { isFlat, perturb, randomSeed, PERTURB_AMPLITUDE } from './records/perturb';
 import { createRecord, hillFormula, type StructureRecord } from './records/record';
-import { groupRecords } from './records/log';
+import { entryFor, groupRecords } from './records/log';
 import { openRecordStore, type RecordStore } from './records/store';
 import { mergeRecords, readStructureLog, writeStructureLog } from './records/file';
 import { RecordsPanel } from './components/RecordsPanel';
-import { exportFileName, importProblemText, importedText } from './components/records';
+import { exportFileName, importProblemText, importedText, settledCount } from './components/records';
+import { SearchPanel } from './components/SearchPanel';
+import { NUDGED_COUNT } from './components/search';
+import { SearchPool, poolSize, type Candidate } from './search/pool';
+import { candidateAsBuilt, nudgedCandidates } from './search/candidates';
 import { hasUsableStructure } from './worker/protocol';
 import { EngineUnavailableError, engineNotice, type EngineProblem } from './worker/engineSupport';
 import type {
@@ -140,9 +144,19 @@ export default function App() {
   const [openRecordId, setOpenRecordId] = useState<string | null>(null);
   const [recordNotice, setRecordNotice] = useState<string | null>(null);
   const storeRef = useRef<RecordStore | null>(null);
+
+  // Shapes being tried on workers of their own, behind the one the screen uses.
+  // They never touch `atoms`, the player or the front worker: a candidate that
+  // finishes becomes a record, and only opening one puts anything on screen.
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const poolRef = useRef<SearchPool | null>(null);
   // The element table arrives from the worker, and a record is made inside a
   // callback that must not be rebuilt when it does.
   const symbolOfRef = useRef<(z: number) => string>((z) => `Z=${z}`);
+  // The same, for the overlap check a search candidate is drawn against
+  // (`search/candidates.ts`). The fallback is only ever used before the table
+  // arrives, when there is nothing to search from anyway.
+  const covalentRadiusRef = useRef<(z: number) => number>(() => 0.8);
   const [mesh, setMesh] = useState<IsoMesh | null>(null);
   // When the surface being cut now was asked for, or null when none is.
   const [meshingSince, setMeshingSince] = useState<number | null>(null);
@@ -473,6 +487,48 @@ export default function App() {
     [keepRecord],
   );
 
+  /**
+   * The workers the search runs on, built once and kept for the session.
+   *
+   * How many run at once is decided from the machine rather than from what the
+   * browser reports having (`search/pool.ts`), because the one thing the size
+   * must not cost is the front worker's answering speed.
+   *
+   * A candidate that ends with a structure worth keeping becomes a record here,
+   * under the candidate's own id - which is what lets a row in the search
+   * section say how deep the shape it found is, and open it.
+   */
+  useEffect(() => {
+    const pool = new SearchPool({
+      size: poolSize(navigator.hardwareConcurrency),
+      onChange: setCandidates,
+      onFinished: (candidate) => {
+        if (!candidate.outcome) return;
+        keepRecord(
+          createRecord(
+            {
+              z: Array.from(candidate.z),
+              built: Array.from(candidate.built),
+              trajectory: candidate.trajectory,
+              stepEnergies: candidate.stepEnergies,
+              outcome: candidate.outcome,
+              source: 'search',
+              batch: candidate.batch,
+            },
+            symbolOfRef.current,
+            new Date(),
+            candidate.id,
+          ),
+        );
+      },
+    });
+    poolRef.current = pool;
+    return () => {
+      pool.dispose();
+      poolRef.current = null;
+    };
+  }, [keepRecord]);
+
   const deleteRecord = useCallback((record: StructureRecord) => {
     setRecords((previous) => previous.filter((existing) => existing.id !== record.id));
     setOpenRecordId((open) => (open === record.id ? null : open));
@@ -488,14 +544,21 @@ export default function App() {
     void storeRef.current?.clear();
   }, []);
 
-  /** The atoms of a structure kept in a record, which stores them flattened. */
-  const atomsOfRecord = useCallback(
-    (record: StructureRecord, xyz: readonly number[]): SceneAtom[] =>
-      record.z.map((z, i) => ({
-        z,
+  /** Atoms from the flattened pair the records and the search both keep. */
+  const atomsOfFlat = useCallback(
+    (z: ArrayLike<number>, xyz: ArrayLike<number>): SceneAtom[] =>
+      Array.from({ length: z.length }, (_, i) => ({
+        z: z[i],
         pos: [xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]] as [number, number, number],
       })),
     [],
+  );
+
+  /** The atoms of a structure kept in a record, which stores them flattened. */
+  const atomsOfRecord = useCallback(
+    (record: StructureRecord, xyz: readonly number[]): SceneAtom[] =>
+      atomsOfFlat(record.z, xyz),
+    [atomsOfFlat],
   );
 
   // --- viewer synchronisation ---------------------------------------------
@@ -509,7 +572,9 @@ export default function App() {
 
   useEffect(() => {
     symbolOfRef.current = symbolOf;
-  }, [symbolOf]);
+    covalentRadiusRef.current = (z: number) =>
+      elements.find((element) => element.z === z)?.covalentRadius ?? 0.8;
+  }, [symbolOf, elements]);
 
   useEffect(() => {
     viewerRef.current?.setMode(mode);
@@ -964,6 +1029,88 @@ export default function App() {
     [atomsOfRecord, cancelCalculation, stopAnimation, switchMode, showDensity, solveForSurface],
   );
 
+  // --- the search ----------------------------------------------------------
+
+  /**
+   * Queues shapes to try in the background.
+   *
+   * `count` of zero is "今の形を試す" - the structure exactly as it is, which is
+   * what a structure with no symmetry relaxes from anyway. Anything more is a
+   * set of nudged starts, each drawn in its own directions, because what finds
+   * another shape is trying several directions rather than nudging harder
+   * (`search/candidates.ts`).
+   *
+   * Nothing here touches the front worker, the player or `atoms`: the point of
+   * the section is that the screen keeps working while these run.
+   */
+  const startSearch = useCallback(
+    (count: number) => {
+      const pool = poolRef.current;
+      if (!pool || atoms.length === 0) return;
+      const { z, xyz } = toWorkerArrays(atoms);
+      const source = {
+        z,
+        xyz,
+        covalentRadius: covalentRadiusRef.current,
+        batch: crypto.randomUUID(),
+        id: () => crypto.randomUUID(),
+      };
+      pool.add(
+        count <= 0
+          ? [candidateAsBuilt(source)]
+          : nudgedCandidates(source, count, randomSeed()),
+      );
+    },
+    [atoms],
+  );
+
+  /**
+   * Puts a finished candidate on screen.
+   *
+   * One that settled or ran out of time is a record by now, and goes through
+   * the same door as any other record. One the engine could not solve is not a
+   * record and never will be: what it has is a starting structure and the fact
+   * that no arrangement of electrons held it together, so the molecule is put
+   * there and comes apart, with no number and no message (requirement F5).
+   */
+  const openCandidate = useCallback(
+    (candidate: Candidate) => {
+      if (candidate.status !== 'failed') {
+        const record = records.find((each) => each.id === candidate.id);
+        if (record) openRecord(record);
+        return;
+      }
+      const structure = atomsOfFlat(candidate.z, candidate.start);
+      if (structure.length === 0) return;
+      cancelCalculation();
+      stopAnimation();
+      setAtoms(structure);
+      setPresetId(null);
+      setSelected(null);
+      setMeasured([]);
+      setError(null);
+      setResult(null);
+      setRelaxedFrom(null);
+      setOpenRecordId(null);
+      setRecordNotice(null);
+      switchMode('observe');
+      hasDensityRef.current = false;
+      wantedRef.current = null;
+      meshRequestRef.current += 1;
+      setMesh(null);
+      showDivergence(structure);
+    },
+    [
+      records,
+      openRecord,
+      atomsOfFlat,
+      cancelCalculation,
+      stopAnimation,
+      switchMode,
+      showDivergence,
+    ],
+  );
+
   /**
    * Turning the cloud on while a record is open.
    *
@@ -1092,6 +1239,21 @@ export default function App() {
       (a, b) => Number(b.formula === currentFormula) - Number(a.formula === currentFormula),
     );
   }, [records, currentFormula]);
+
+  /** The log entry a candidate's record became, once it has one. */
+  const entryOfCandidate = useCallback(
+    (candidateId: string) => entryFor(recordGroups, candidateId)?.entry ?? null,
+    [recordGroups],
+  );
+
+  /** How many records of that candidate's molecule settled, for the comparison. */
+  const settledOfCandidate = useCallback(
+    (candidateId: string) => {
+      const found = entryFor(recordGroups, candidateId);
+      return found ? settledCount(found.group) : 0;
+    },
+    [recordGroups],
+  );
   const openedRecord = records.find((record) => record.id === openRecordId) ?? null;
 
   const relaxation = result?.optimization ?? null;
@@ -1246,6 +1408,21 @@ export default function App() {
             : '「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
               '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
         </p>
+
+        <SearchPanel
+          candidates={candidates}
+          entryOf={entryOfCandidate}
+          settledOf={settledOfCandidate}
+          openId={openRecordId}
+          atomCount={atoms.length}
+          unavailable={unavailable !== null}
+          onTryCurrent={() => startSearch(0)}
+          onTryNudged={() => startSearch(NUDGED_COUNT)}
+          onOpen={openCandidate}
+          onCancel={(candidate) => poolRef.current?.cancel(candidate.id)}
+          onCancelAll={() => poolRef.current?.cancelAll()}
+          onClearFinished={() => poolRef.current?.clearFinished()}
+        />
 
         <RecordsPanel
           groups={recordGroups}

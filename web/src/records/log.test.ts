@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupRecords, groupFor, SAME_VALLEY_KJ_PER_MOL } from './log';
+import { entryFor, groupRecords, groupFor, SAME_VALLEY_KJ_PER_MOL } from './log';
 import { comparisonKey } from './record';
 import { fakeRecord } from './fixtures';
 import { HARTREE_TO_KJ_PER_MOL } from './units';
@@ -120,5 +120,21 @@ describe('the order within a valley', () => {
       fakeRecord({ energy: BOTTOM, savedAt: '2026-09-20T09:00:00.000Z', id: 'earlier' }),
     ]);
     expect(group.entries.map((entry) => entry.record.id)).toEqual(['earlier', 'later']);
+  });
+});
+
+describe('finding one record in the log', () => {
+  it('gives the entry and the group it is compared inside', () => {
+    const groups = groupRecords([
+      fakeRecord({ energy: -55.3, id: 'deep' }),
+      fakeRecord({ energy: -55.2, id: 'shallow' }),
+    ]);
+    const found = entryFor(groups, 'shallow');
+    expect(found?.entry.record.id).toBe('shallow');
+    expect(found?.group.entries).toHaveLength(2);
+  });
+
+  it('is null for a record the log does not have', () => {
+    expect(entryFor(groupRecords([fakeRecord({ energy: -55.3 })]), 'nobody')).toBeNull();
   });
 });

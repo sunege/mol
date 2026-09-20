@@ -108,6 +108,16 @@ web/src/wasm/      build:wasm の生成物（コミットする）
   等値面は SCF からやり直し（`hasDensityRef`）。等値面の要求は App で合流させる（`wantedRef`）。
 - **起動時に SIMD を判定**し、非対応なら Worker を作らず案内（`engineSupport.ts`）。Worker の
   初期化失敗も `unavailable` → `EngineUnavailableError`。下限は Chrome/Edge 96・Firefox 114・Safari 16.4。
+- **Worker は前面 1 本 + 探索のプール（P10）。** プールの大きさは `hardwareConcurrency` そのもの
+  ではなく `search/pool.ts` の `poolSize`（`min(3, max(1, floor(値/2) − 1))`）。**決め手は処理量
+  ではなく前面の応答**（裏で 2 本回すと前面が 2.5 倍遅い。実測は dev-notes「P10-1 の実測」）。
+  **WASM の線形メモリは縮まない**ので、プールの Worker はバッチの間だけ使い回し、
+  **キューが尽きたら捨てる**（ベンゼンで 1 本 139 MiB）。**候補は `atoms`・`FramePlayer`・
+  前面の Worker を触らない。**
+- **1 候補の予算は `protocol.ts` の `budgetMs`**（10 分）。Worker の step コールバックから
+  **例外を投げて**止める＝エンジンは `reason: 'interrupted'` と**そこまでの構造**を返す
+  （`terminate()` と違って構造が残る）。前面は `budgetMs` を送らない。
+  `dft-wasm` の `on_step` の**戻り値は読まれない**（doc が誤っていたので直した）。
 - **緩和の前に、平らで手で作った構造だけ揺らす**（`records/perturb.ts`: `isFlat` かつ
   `presetId === null` のとき 0.05 Å）。クリックは全原子をカメラ平面に置くので、そのまま
   最適化すると平面の鞍点で「収束」する（平面 CH₄ は正四面体より 834 kJ/mol 上）。
@@ -157,9 +167,11 @@ web/src/wasm/      build:wasm の生成物（コミットする）
 
 - P0〜P7 完了、Vercel デプロイ済み。Firefox での手動 E2E の結果は未記録（P8 の確認で一緒に行う）。
 - **v2 着手（2026-09-20）。** P8（観測モード）・P9（安定構造の記録）完了、どちらも Firefox 確認済み。
-  **次は P10-1（並列探索の実測）。** 講義で使う PC は Windows 11 / i5-1235U（P コア 2 + E コア 8、
-  12 スレッド、15 W）/ Chrome。**`hardwareConcurrency` をそのままプールの大きさにしない**
-  （plan-v2.md「P10 の前提」）。WebGPU は採らないと決めた（理由は plan-v2.md）。
+  **P10（並列探索）は P10-1〜P10-5 完了**（`web/src/search/`、パネルの「形をさがす」）。
+  **残りは P10-6 ＝ ユーザーの Firefox / 講義 PC での確認**（plan-v2.md の一覧）。
+  P10-5（モジュールを 1 回だけコンパイル）は実測して見送った。
+  講義で使う PC は Windows 11 / i5-1235U（P コア 2 + E コア 8、12 スレッド、15 W）/ Chrome で、
+  そこでは `poolSize` が 3 になる見込み。WebGPU は採らないと決めた（理由は plan-v2.md）。
 - 拡張候補（詳細は dev-notes「P6 以降に残したもの」）: XC グリッド重み微分を実装して最適化を
   Medium に戻す（ベンゼン最適化の 1〜2 割）、マルチスレッド化（COOP/COEP + rayon、nightly 依存）、
   `OPTIMIZE_BUDGET_SECONDS`（1800 秒）の見直し。

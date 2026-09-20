@@ -113,6 +113,19 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       }
       case 'optimize': {
         const started = performance.now();
+        // A budget shorter than the engine's own is enforced from here, because
+        // the engine's is a Rust constant. Throwing out of the step callback is
+        // what stops a relaxation from JavaScript: the engine takes a callback
+        // that threw as "there is nobody left to send steps to" and ends the
+        // relaxation where it is, with `reason: 'interrupted'` and the structure
+        // it had reached - which is the whole point, since terminating the
+        // worker would throw that structure away with it. Like the engine's own
+        // budget it is only tested between steps, so a single step always runs
+        // to the end.
+        const deadline =
+          request.budgetMs === undefined || request.budgetMs === null
+            ? Infinity
+            : started + request.budgetMs;
         const calculation = optimize(
           request.z,
           request.xyz,
@@ -133,6 +146,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
               },
               [xyz.buffer],
             );
+            if (performance.now() >= deadline) throw new Error('candidate budget');
           },
           reportProgress(request.id),
         );

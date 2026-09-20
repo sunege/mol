@@ -129,6 +129,24 @@ export function groupRecords(records: readonly StructureRecord[]): LogGroup[] {
   return built.sort((a, b) => (a.latest < b.latest ? 1 : a.latest > b.latest ? -1 : 0));
 }
 
+/**
+ * The entry for one record, and the group it is compared inside.
+ *
+ * What the search section needs: a candidate becomes a record under its own id,
+ * and the row wants to say how deep the shape it found is - which is a fact
+ * about the group, not about the record on its own.
+ */
+export function entryFor(
+  groups: readonly LogGroup[],
+  recordId: string,
+): { entry: LogEntry; group: LogGroup } | null {
+  for (const group of groups) {
+    const entry = group.entries.find((each) => each.record.id === recordId);
+    if (entry) return { entry, group };
+  }
+  return null;
+}
+
 /** The group these records belong with, if the log has one. */
 export function groupFor(groups: readonly LogGroup[], key: string): LogGroup | null {
   return groups.find((group) => group.key === key) ?? null;

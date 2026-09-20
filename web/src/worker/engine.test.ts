@@ -15,7 +15,12 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initSync, optimize, scf } from '../wasm/dft_wasm.js';
-import { progressFromEngine, type CalculationProgress } from './protocol';
+import {
+  hasUsableStructure,
+  progressFromEngine,
+  type CalculationProgress,
+  type OptimizationOutcome,
+} from './protocol';
 import { isFlat, perturb, PERTURB_AMPLITUDE } from '../records/perturb';
 
 beforeAll(() => {
@@ -86,6 +91,38 @@ describe('the engine as the worker calls it', { timeout: 60_000 }, () => {
       expect(heard[i - 1]).toEqual({ progress: { stage: 'forces', step: entry.step } });
       expect(heard[i - 2]).toEqual({ progress: { stage: 'solving', step: entry.step } });
     }
+  });
+
+  it('stops where it is when the step callback throws', () => {
+    // How the candidate pool gives itself a budget shorter than the engine's own
+    // (`web/src/search/pool.ts`), which is a Rust constant of half an hour. The
+    // engine treats a callback that threw as "there is nobody left to send steps
+    // to" and ends the relaxation - and, unlike terminating the worker, hands
+    // back the structure it had reached.
+    let seen = -1;
+    const calculation = optimize(
+      WATER.z,
+      WATER.xyz,
+      (raw: { step: number }) => {
+        seen = raw.step;
+        if (raw.step >= 1) throw new Error('candidate budget');
+      },
+      undefined,
+    );
+    const summary = calculation.summary() as {
+      converged: boolean;
+      optimization: { reason: string; converged: boolean; steps: number; xyz: number[] };
+    };
+    calculation.free();
+
+    expect(seen).toBe(1);
+    // Out of time, not unsolvable: the electrons converged at every geometry it
+    // passed through, so `hasUsableStructure` holds and the structure is kept.
+    expect(summary.optimization.reason).toBe('interrupted');
+    expect(summary.optimization.converged).toBe(false);
+    expect(summary.converged).toBe(true);
+    expect(hasUsableStructure(summary.optimization as OptimizationOutcome)).toBe(true);
+    expect(summary.optimization.xyz).toHaveLength(WATER.z.length * 3);
   });
 
   it('still calculates when nobody is listening', () => {

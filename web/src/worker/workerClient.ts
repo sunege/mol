@@ -219,15 +219,22 @@ export class DftWorkerClient {
    *
    * `onProgress` hears which part of the work has started - most of the wait
    * before the first step is spent where no atom moves.
+   *
+   * `budgetMs` is a wall-clock limit shorter than the engine's own, for a caller
+   * that cannot wait as long as it can - the candidate pool. It resolves
+   * normally with `optimization.reason: 'interrupted'` and the structure the
+   * optimiser had reached, so a relaxation stopped this way still has an answer,
+   * unlike one thrown away with its worker by `cancelAll`.
    */
   async optimize(
     z: Uint8Array,
     xyz: Float64Array,
     onStep: (step: OptimizationStep) => void,
     onProgress?: (progress: CalculationProgress) => void,
+    budgetMs?: number | null,
   ): Promise<ScfOutcome> {
     const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>(
-      (id) => ({ id, type: 'optimize', z, xyz }),
+      (id) => ({ id, type: 'optimize', z, xyz, budgetMs }),
       (partial) => {
         if (partial.type === 'step') onStep(partial.step);
         else if (partial.type === 'progress') onProgress?.(partial.progress);

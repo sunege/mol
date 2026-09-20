@@ -262,8 +262,22 @@ export type WorkerRequest =
    * Relaxes the structure, answering with a `step` per accepted geometry and
    * `progress` as each part of the work starts, and then one `scf` for the final
    * calculation.
+   *
+   * `budgetMs` stops it early: after that much wall-clock time the worker ends
+   * the relaxation between steps and answers with the structure it had reached
+   * and `reason: 'interrupted'`, exactly as the engine's own budget does. It is
+   * how the candidate pool keeps one stuck candidate from holding a slot for the
+   * length of a lecture (`web/src/search/`); the front worker sends no budget
+   * and is stopped by the user instead. Omitted or null means the engine's own
+   * budget is the only one.
    */
-  | { id: number; type: 'optimize'; z: Uint8Array; xyz: Float64Array }
+  | {
+      id: number;
+      type: 'optimize';
+      z: Uint8Array;
+      xyz: Float64Array;
+      budgetMs?: number | null;
+    }
   /** Cuts the density of the last `scf` or `optimize` request at a new level. */
   | { id: number; type: 'isosurface'; channel: DensityRequest; isoLevel: number };
 
