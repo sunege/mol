@@ -378,3 +378,144 @@
 .observe-actions {
   margin-top: 10px;
 }
+
+/* The structure log. A row is a name, how deep the valley is, and a bar behind
+   both: the bar is the comparison, so it is read before the number is. */
+.record-group {
+  margin-top: 12px;
+}
+
+.record-group h3 {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #9aa6b8;
+}
+
+ul.records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.record {
+  position: relative;
+  padding: 6px 8px;
+  border: 1px solid #262d38;
+  border-radius: 6px;
+  background: #171d26;
+  overflow: hidden;
+}
+
+.record.open {
+  border-color: #3f8cff;
+}
+
+.record-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #1d3a66;
+  pointer-events: none;
+}
+
+.record-row {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.record-meta {
+  margin-top: 2px;
+  font-size: 0.7rem;
+  color: #7c8798;
+}
+
+button.record-name,
+input.record-name {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  color: #d6dde8;
+  background: none;
+  border: none;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.record-name:hover {
+  color: #8fc0ff;
+}
+
+input.record-name {
+  cursor: text;
+  border-bottom: 1px solid #3f8cff;
+}
+
+.record-relative {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: #9aa6b8;
+  white-space: nowrap;
+}
+
+.record-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.record-actions button {
+  padding: 0;
+  font: inherit;
+  font-size: 0.7rem;
+  color: #7c8798;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.record-actions button:hover {
+  color: #8fc0ff;
+}
+
+/* A file input, dressed as one of the buttons beside it. */
+.file-button {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  border-radius: 6px;
+  border: 1px solid #2d3644;
+  background: #1c222c;
+  color: #d6dde8;
+  cursor: pointer;
+}
+
+.file-button:hover {
+  border-color: #3f8cff;
+}
+
+.file-button input {
+  display: none;
+}
+
+.hint.warning {
+  color: #ffc48f;
+}
+
+.file-button.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.record-list {
+  max-height: 34vh;
+  overflow-y: auto;
+}

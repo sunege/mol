@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MoleculeViewer, type SceneAtom } from './scene/viewer';
 import { probeWebGl, type WebGlProbe } from './scene/webgl';
 import { keyAction, type ViewerMode } from './scene/gestures';
@@ -13,6 +13,13 @@ import { ObservePanel } from './components/ObservePanel';
 import { headline, type JobKind, type JobState } from './components/progress';
 import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
+import { isFlat, perturb, randomSeed, PERTURB_AMPLITUDE } from './records/perturb';
+import { createRecord, hillFormula, type StructureRecord } from './records/record';
+import { groupRecords } from './records/log';
+import { openRecordStore, type RecordStore } from './records/store';
+import { mergeRecords, readStructureLog, writeStructureLog } from './records/file';
+import { RecordsPanel } from './components/RecordsPanel';
+import { exportFileName, importProblemText, importedText } from './components/records';
 import { hasUsableStructure } from './worker/protocol';
 import { EngineUnavailableError, engineNotice, type EngineProblem } from './worker/engineSupport';
 import type {
@@ -124,6 +131,18 @@ export default function App() {
     total: ISO_RANGES.total.initial,
     bonding: ISO_RANGES.bonding.initial,
   });
+  // The structure log. `kept` is false in a browser that will not keep it -
+  // a private window - which the panel says rather than treating as an error.
+  const [records, setRecords] = useState<StructureRecord[]>([]);
+  const [recordsKept, setRecordsKept] = useState(true);
+  // The record whose structure is on screen, so the list can show which, and
+  // so a measurement can compare against the structure it started from.
+  const [openRecordId, setOpenRecordId] = useState<string | null>(null);
+  const [recordNotice, setRecordNotice] = useState<string | null>(null);
+  const storeRef = useRef<RecordStore | null>(null);
+  // The element table arrives from the worker, and a record is made inside a
+  // callback that must not be rebuilt when it does.
+  const symbolOfRef = useRef<(z: number) => string>((z) => `Z=${z}`);
   const [mesh, setMesh] = useState<IsoMesh | null>(null);
   // When the surface being cut now was asked for, or null when none is.
   const [meshingSince, setMeshingSince] = useState<number | null>(null);
@@ -158,6 +177,11 @@ export default function App() {
    * says so in the panel, and still holds the structure the user started from.
    */
   const producerDoneRef = useRef(false);
+
+  // The geometries of the relaxation in flight, collected as they arrive: they
+  // are what a record replays. Float32 frames are copied, because the player
+  // keeps the ones it is handed.
+  const stepsRef = useRef<{ xyz: number[]; energy: number }[]>([]);
 
   // Identifies the calculation whose result is still wanted. Cancelling or
   // editing bumps it, so a reply that arrives afterwards is ignored instead of
@@ -275,8 +299,10 @@ export default function App() {
   const invalidateResult = useCallback(() => {
     setResult(null);
     setError(null);
-    // Whatever changed, the atoms are no longer where a relaxation left them.
+    // Whatever changed, the atoms are no longer where a relaxation left them,
+    // nor the ones a record was opened at.
     setRelaxedFrom(null);
+    setOpenRecordId(null);
     stopAnimation();
     // The worker's copy of the density belongs to the old geometry, so the
     // surface on screen is stale whether or not the worker survives.
@@ -411,9 +437,79 @@ export default function App() {
     };
   }, [liveMeasurement]);
 
+  // --- the structure log ---------------------------------------------------
+
+  // Opening the database is the one thing here that can fail, and it does not:
+  // a browser that will not keep records gets one that lasts the tab, and the
+  // panel says so.
+  useEffect(() => {
+    let stale = false;
+    openRecordStore().then(async ({ store, persistent }) => {
+      if (stale) return;
+      storeRef.current = store;
+      setRecordsKept(persistent);
+      const kept = await store.load();
+      if (!stale) setRecords(kept);
+    });
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  /** Writes a record through to the store, and into the list on screen. */
+  const keepRecord = useCallback((record: StructureRecord) => {
+    setRecords((previous) => {
+      const at = previous.findIndex((existing) => existing.id === record.id);
+      if (at === -1) return [...previous, record];
+      const next = [...previous];
+      next[at] = record;
+      return next;
+    });
+    void storeRef.current?.put(record);
+  }, []);
+
+  const renameRecord = useCallback(
+    (record: StructureRecord, name: string) => keepRecord({ ...record, name }),
+    [keepRecord],
+  );
+
+  const deleteRecord = useCallback((record: StructureRecord) => {
+    setRecords((previous) => previous.filter((existing) => existing.id !== record.id));
+    setOpenRecordId((open) => (open === record.id ? null : open));
+    setRecordNotice(null);
+    void storeRef.current?.remove(record.id);
+  }, []);
+
+  const clearRecords = useCallback(() => {
+    if (!window.confirm('記録をすべて消します。よろしいですか？')) return;
+    setRecords([]);
+    setOpenRecordId(null);
+    setRecordNotice(null);
+    void storeRef.current?.clear();
+  }, []);
+
+  /** The atoms of a structure kept in a record, which stores them flattened. */
+  const atomsOfRecord = useCallback(
+    (record: StructureRecord, xyz: readonly number[]): SceneAtom[] =>
+      record.z.map((z, i) => ({
+        z,
+        pos: [xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]] as [number, number, number],
+      })),
+    [],
+  );
+
   // --- viewer synchronisation ---------------------------------------------
 
   const elementsReady = elements.length > 0;
+
+  const symbolOf = useCallback(
+    (z: number) => elements.find((element) => element.z === z)?.symbol ?? `Z=${z}`,
+    [elements],
+  );
+
+  useEffect(() => {
+    symbolOfRef.current = symbolOf;
+  }, [symbolOf]);
 
   useEffect(() => {
     viewerRef.current?.setMode(mode);
@@ -662,6 +758,13 @@ export default function App() {
     if (!client || !player || atoms.length === 0) return;
     const original = atoms;
     const { z, xyz } = toWorkerArrays(original);
+    // A structure the user built by clicking, with every atom in one plane, is
+    // one the optimiser cannot leave: it would report the flat shape settled.
+    // Nudge it off the plane first. A preset is not built that way, and its
+    // symmetry is the molecule's own, so it goes in as it is
+    // (`records/perturb.ts`).
+    const start =
+      presetId === null && isFlat(xyz) ? perturb(xyz, PERTURB_AMPLITUDE, randomSeed()) : xyz;
     const token = ++requestRef.current;
     inFlightRef.current = true;
     relaxingRef.current = true;
@@ -679,14 +782,17 @@ export default function App() {
     meshRequestRef.current += 1;
     setMesh(null);
     setAnimation('optimization');
+    stepsRef.current = [];
     const onProgress = beginJob('relax', token);
 
     client
       .optimize(
         z,
-        xyz,
+        start,
         (step) => {
           if (requestRef.current !== token) return;
+          // Kept for the record before the player takes the frame.
+          stepsRef.current.push({ xyz: Array.from(step.xyz), energy: step.energy });
           player.push(step.xyz);
         },
         onProgress,
@@ -708,6 +814,20 @@ export default function App() {
           return;
         }
         keepObserving();
+        // A shape worth keeping: into the log, whether it settled or ran out of
+        // time. What it was built from is the structure before the nudge.
+        const record = createRecord(
+          {
+            z: Array.from(z),
+            built: Array.from(xyz),
+            trajectory: stepsRef.current.map((step) => step.xyz),
+            stepEnergies: stepsRef.current.map((step) => step.energy),
+            outcome,
+          },
+          symbolOfRef.current,
+        );
+        keepRecord(record);
+        setOpenRecordId(record.id);
         // Whatever stopped it, the structure it reached is one the electrons
         // were solved for, so it is the molecule now - partly relaxed if the
         // budget ran out, fully relaxed if it settled. It is committed here
@@ -737,6 +857,7 @@ export default function App() {
       });
   }, [
     atoms,
+    presetId,
     showDensity,
     channel,
     isoLevel,
@@ -747,10 +868,186 @@ export default function App() {
     observeWhileRunning,
     keepObserving,
     restoreMode,
+    keepRecord,
     beginJob,
     endJob,
     reportFailure,
   ]);
+
+  /**
+   * Solves the electrons of `structure` for its density alone.
+   *
+   * What opening a record needs: the record has the numbers, but a density is
+   * megabytes of grid and is not in it, so a surface has to come from the
+   * worker. Nothing here touches `result` - the numbers on screen stay the
+   * record's, computed on the optimiser's finer grid - and a structure that
+   * will not solve simply gets no surface.
+   */
+  const solveForSurface = useCallback(
+    (structure: SceneAtom[]) => {
+      const client = clientRef.current;
+      if (!client || structure.length === 0) return;
+      const { z, xyz } = toWorkerArrays(structure);
+      const token = ++requestRef.current;
+      inFlightRef.current = true;
+      relaxingRef.current = false;
+      setComputing(true);
+      const onProgress = beginJob('single', token);
+      client
+        .scf(z, xyz, onProgress)
+        .then((outcome) => {
+          if (requestRef.current !== token) return;
+          inFlightRef.current = false;
+          setComputing(false);
+          if (!outcome.converged) {
+            // Nothing to cut, and nothing to say: the record's own numbers are
+            // still the answer (requirement F5 keeps this silent).
+            endJob(false);
+            return;
+          }
+          hasDensityRef.current = true;
+          endJob(true);
+          requestIsosurface(channel, isoLevel);
+        })
+        .catch((e: Error) => {
+          if (requestRef.current !== token) return;
+          inFlightRef.current = false;
+          setComputing(false);
+          endJob(false);
+          // Only an engine that has stopped working is worth a notice; anything
+          // else here costs a surface, not the record.
+          if (e instanceof EngineUnavailableError) reportFailure(e);
+          else if (import.meta.env.DEV) console.debug('no surface for the record', e);
+        });
+    },
+    [channel, isoLevel, requestIsosurface, beginJob, endJob, reportFailure],
+  );
+
+  /**
+   * Puts a record back on screen (requirement: open a shape without waiting for
+   * it to be calculated again).
+   *
+   * The numbers in the panel become the record's own, unchanged: they were
+   * computed on the optimiser's finer grid, and a fresh single point would
+   * differ in the last digits for no reason the user could see. What is *not*
+   * in the record is the density - it is megabytes of grid - so if a surface is
+   * being shown, the electrons are solved again at the structure the record
+   * ended on and only the surface is taken from that. A structure that will not
+   * solve simply gets no surface; its record still says what it said.
+   */
+  const openRecord = useCallback(
+    (record: StructureRecord) => {
+      const client = clientRef.current;
+      if (!client) return;
+      // Whatever is running belongs to the molecule about to be replaced.
+      cancelCalculation();
+      stopAnimation();
+      const opened = atomsOfRecord(record, record.final);
+      setAtoms(opened);
+      setPresetId(null);
+      setSelected(null);
+      setMeasured([]);
+      setError(null);
+      setResult(record.outcome);
+      // "Before" is the structure this record was built from, so the observe
+      // panel reads the same as it did when the relaxation finished.
+      setRelaxedFrom(atomsOfRecord(record, record.built));
+      setOpenRecordId(record.id);
+      setRecordNotice(null);
+      switchMode('observe');
+      hasDensityRef.current = false;
+      wantedRef.current = null;
+      meshRequestRef.current += 1;
+      setMesh(null);
+      if (showDensity) solveForSurface(opened);
+    },
+    [atomsOfRecord, cancelCalculation, stopAnimation, switchMode, showDensity, solveForSurface],
+  );
+
+  /**
+   * Turning the cloud on while a record is open.
+   *
+   * Opening one does not solve anything unless a surface is being shown, so the
+   * worker may be holding no density for the structure on screen. Anywhere else
+   * the toggle has a density to cut already.
+   */
+  useEffect(() => {
+    if (!showDensity || hasDensityRef.current || openRecordId === null) return;
+    if (inFlightRef.current) return;
+    solveForSurface(atoms);
+  }, [showDensity, openRecordId, atoms, solveForSurface]);
+
+  /**
+   * Plays the relaxation this record was made by, from the structure it started
+   * at to the one it ended on.
+   *
+   * The frames are the record's own atoms, so the viewer is given the molecule
+   * before the player starts pushing positions into it: `setPositions` keeps
+   * whatever elements are on screen and drops a frame whose length disagrees.
+   * Only the open record can be replayed, so `atoms` is already the structure
+   * the animation ends on and the viewer returns to it by itself.
+   */
+  const replayRecord = useCallback(
+    (record: StructureRecord) => {
+      const player = playerRef.current;
+      const viewer = viewerRef.current;
+      if (!player || !viewer || record.trajectory.length === 0) return;
+      stopAnimation();
+      viewer.setMolecule(atomsOfRecord(record, record.trajectory[0]));
+      setAnimation('optimization');
+      producerDoneRef.current = true;
+      player.push(...record.trajectory.map((frame) => Float32Array.from(frame)));
+    },
+    [atomsOfRecord, stopAnimation],
+  );
+
+  /** Hands the log to the browser as a file to save. */
+  const exportRecords = useCallback(
+    (only: string | null) => {
+      const chosen = only === null ? records : records.filter((r) => r.formula === only);
+      if (chosen.length === 0) return;
+      const url = URL.createObjectURL(
+        new Blob([writeStructureLog(chosen)], { type: 'application/json' }),
+      );
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = exportFileName(only);
+      // In the document and revoked later: Firefox ignores a click on a link
+      // that is not in the page, and revoking while the download is starting
+      // cancels it.
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setRecordNotice(`${chosen.length} 件を書き出しました。`);
+    },
+    [records],
+  );
+
+  /**
+   * Reads a file into the log.
+   *
+   * A file that does not fit is refused whole, with a reason, and the records
+   * already here are untouched - the alternative is a blank row in front of a
+   * class. Records that are already here keep the copy that is here, so reading
+   * the same file twice changes nothing.
+   */
+  const importRecords = useCallback(
+    async (file: File) => {
+      const result = readStructureLog(await file.text(), (z) =>
+        elements.some((element) => element.z === z),
+      );
+      if (!result.ok) {
+        setRecordNotice(importProblemText(result.problem));
+        return;
+      }
+      const merged = mergeRecords(records, result.records);
+      setRecords(merged.records);
+      void storeRef.current?.putAll(merged.added);
+      setRecordNotice(importedText(merged.added.length, merged.alreadyHere));
+    },
+    [elements, records],
+  );
 
   // --- keyboard ------------------------------------------------------------
 
@@ -784,11 +1081,23 @@ export default function App() {
   // currently on screen, and that description is true whenever its SCF
   // converged, whether or not the optimiser had time to reach the bottom. What
   // the optimiser managed is a separate line of its own.
+  // The molecule on screen, so its own records are the ones at the top of the
+  // list. The formula alone, because the charge that completes a comparison key
+  // is only known once the engine has chosen one.
+  const currentFormula = atoms.length > 0 ? hillFormula(atoms.map((a) => a.z), symbolOf) : null;
+  const recordGroups = useMemo(() => {
+    const all = groupRecords(records);
+    // A stable sort, so within each half the newest group stays first.
+    return all.sort(
+      (a, b) => Number(b.formula === currentFormula) - Number(a.formula === currentFormula),
+    );
+  }, [records, currentFormula]);
+  const openedRecord = records.find((record) => record.id === openRecordId) ?? null;
+
   const relaxation = result?.optimization ?? null;
   const solved = result !== null && result.converged;
   const settled = solved && (relaxation === null || relaxation.converged);
   const selectedAtom = selected === null ? null : atoms[selected];
-  const symbolOf = (z: number) => elements.find((e) => e.z === z)?.symbol ?? `Z=${z}`;
   const selectedSymbol = selectedAtom ? symbolOf(selectedAtom.z) : null;
   const measuredSymbols = measured
     .filter((i) => i < atoms.length)
@@ -937,6 +1246,23 @@ export default function App() {
             : '「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
               '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
         </p>
+
+        <RecordsPanel
+          groups={recordGroups}
+          openId={openRecordId}
+          kept={recordsKept}
+          canImport={elementsReady}
+          currentFormula={currentFormula}
+          onOpen={openRecord}
+          onReplay={replayRecord}
+          canReplay={openedRecord !== null && openedRecord.trajectory.length > 1}
+          onRename={renameRecord}
+          onDelete={deleteRecord}
+          onClear={clearRecords}
+          onExport={exportRecords}
+          onImport={(file) => void importRecords(file)}
+          notice={recordNotice}
+        />
 
         <h2>電子密度</h2>
         <label className="toggle">

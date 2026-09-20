@@ -51,6 +51,8 @@ crates/dft-core/   純 Rust のエンジン（wasm 非依存、cargo test で全
 crates/dft-wasm/   wasm-bindgen ラッパー。単位変換とシリアライズだけ（物理を書かない）
 scripts/           gen_reference.py（生成物をすべて作る唯一の場所）、build-wasm.sh
 web/src/worker/    protocol.ts（Worker の契約）dft.worker.ts workerClient.ts engineSupport.ts
+web/src/records/   perturb.ts（緩和前の揺らし）record.ts（記録の型・比較キー）log.ts（谷と順位）
+                   file.ts（書き出し・読み込み）store.ts（IndexedDB / メモリ）units.json（生成物）
 web/src/animation/ framePlayer.ts（キュー + 再生クロック）divergence.ts（発散演出）
 web/src/scene/     viewer.ts（Three.js、命令的）  web/src/components/  progress.ts ほか
 web/src/wasm/      build:wasm の生成物（コミットする）
@@ -106,10 +108,26 @@ web/src/wasm/      build:wasm の生成物（コミットする）
   等値面は SCF からやり直し（`hasDensityRef`）。等値面の要求は App で合流させる（`wantedRef`）。
 - **起動時に SIMD を判定**し、非対応なら Worker を作らず案内（`engineSupport.ts`）。Worker の
   初期化失敗も `unavailable` → `EngineUnavailableError`。下限は Chrome/Edge 96・Firefox 114・Safari 16.4。
+- **緩和の前に、平らで手で作った構造だけ揺らす**（`records/perturb.ts`: `isFlat` かつ
+  `presetId === null` のとき 0.05 Å）。クリックは全原子をカメラ平面に置くので、そのまま
+  最適化すると平面の鞍点で「収束」する（平面 CH₄ は正四面体より 834 kJ/mol 上）。
+  プリセットや記録から開いた構造は揺らさない（対称性は分子自身のもので、揺らすとベンゼンが
+  3 歩 → 15 歩になる）。振幅と条件の実測は dev-notes「P9 の実測」。
 - **編集 / 観測モード。** ポインタとキーの解釈は `scene/gestures.ts` だけ（観測モードは構造を
   変える動作を返さない。テストで固定）。計算の開始時に観測モードへ、発散・エラー・中止で終わったら
   開始前のモードへ戻す（計算中にユーザーが選んだモードは戻さない）。計測は原子の並びが変わる操作で消し、
   ドラッグ・緩和では残す。
+- **記録（P9）。** 「安定な形にする」が `hasUsableStructure()` で終わるたびに 1 件作る
+  （`records/`）。**比べてよい組は Hill 式 + 電荷 + `ENGINE_MODEL`**（電荷は `driver` が選ぶので
+  内部の比較キーに使う。**画面には出さない**）。`ENGINE_MODEL` は基底・汎関数・最適化グリッドを
+  変えたら書き換える。**同じ谷は 1 kJ/mol 以内**（`SAME_VALLEY_KJ_PER_MOL`。実測は dev-notes）。
+  時間切れ・回数上限は「途中」として残し、順位にも谷にも入れない。
+- **記録を開いたら数値は記録のもの。** 等値面のために一点計算をやり直すが、その値で表示を
+  上書きしない（グリッドが違う）。非収束でも発散演出は出さず、等値面が出ないだけ。
+- **ファイルは `{ format: 'mol-structure-log', version: 1 }`。** 形を変えたら `version` を上げる。
+  読み込みは 1 件でも駄目なら全部拒否し、理由を出す（`records/file.ts`、文言は `components/records.ts`）。
+- **記録の保存は `RecordStore` 越し**（IndexedDB とメモリ）。開けないブラウザでは
+  メモリのまま動かし、「残りません」と案内する（失敗にしない）。
 - **計測値は viewer が描いている位置から出す**（補間フレームは React に届かない）。パネルは
   `LiveMeasurement` を購読する。ラベルは `CSS2DRenderer` の層（`pointer-events: none`、z-index は
   進捗カードより下）。
@@ -138,7 +156,8 @@ web/src/wasm/      build:wasm の生成物（コミットする）
 ## 状態と今後
 
 - P0〜P7 完了、Vercel デプロイ済み。Firefox での手動 E2E の結果は未記録（P8 の確認で一緒に行う）。
-- **v2 着手（2026-09-20）。** P8（観測モード）完了（Firefox 確認済み）。**次は P9-1。**
+- **v2 着手（2026-09-20）。** P8（観測モード）完了（Firefox 確認済み）。P9（安定構造の記録）は
+  P9-1〜P9-7 完了、**残りは P9-8（検証と記録）と、ユーザーの Firefox 確認**。
   WebGPU は採らないと決めた（理由は plan-v2.md）。
 - 拡張候補（詳細は dev-notes「P6 以降に残したもの」）: XC グリッド重み微分を実装して最適化を
   Medium に戻す（ベンゼン最適化の 1〜2 割）、マルチスレッド化（COOP/COEP + rayon、nightly 依存）、
