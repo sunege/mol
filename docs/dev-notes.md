@@ -40,6 +40,16 @@ WASM の内訳は**ネイティブとまるで違う**（P6 のメモ参照）�
 `sample`/プロファイラだけ見て決めないこと。
 
 前後の所要時間の比較も Node（`--target nodejs` の release ビルド）で取るのが安定する。
+CLAUDE.md が指しているのはこのコマンド:
+
+```bash
+wasm-pack build crates/dft-wasm --release --target nodejs --out-dir <scratch>
+# あとは require('<scratch>/dft_wasm.js') して scf() / optimize() を呼ぶだけの小さなスクリプト。
+# 複数の Worker で同時に回して測るなら node の worker_threads（P10-1 でそうした）。
+# nodejs ターゲットのグルーは wasm を module.exports に出さないので、線形メモリの大きさを
+# 見たいときは出力の末尾に `module.exports.__wasm = wasm;` を足す（生成物なので scratch 側で）。
+```
+
 Chromium と同じ V8 で、しかも間引かれない。Claude の Browser ペインは**非表示だと
 ワーカーが間引かれ**（レンダラの CPU が 30〜50% に落ちていた）、同じバイナリで Node の
 1.2〜1.8 倍かかった。長い計算ほど歪むので、ペインが見えていないときのブラウザ実測は参考値。
@@ -193,6 +203,14 @@ python3 -m venv .venv && .venv/bin/pip install pyscf
      （固定しないと Rust のリリースのたびに CI が成果物を作り直してコミットする）。
   3. wasm-opt の版は wasm-pack が決める → CI の wasm-pack を 0.15.0 に固定。
   macOS 上で「別ディレクトリへのコピー + 空の `CARGO_HOME`」から作り直すと 5 ファイルとも一致する。
+  **コメントだけの Rust の変更でも生成物は変わる**（P10 で踏んだ）。理由は 2 つあって、
+  どちらも「機能は同じなのに CI が作り直してコミットする」形になる:
+  1. **wasm-bindgen は公開関数の doc コメントを `.d.ts` と `.js` に写す。** `optimize` の doc を
+     直しただけで両方が変わった。
+  2. **行が増えるとパニック位置の行番号が動く。** doc を 5 行増やしたら `.wasm` の 3 バイトが
+     `542 → 547`（`0x21e → 0x223`）に変わった。差はこの 3 バイトだけで、命令は 1 つも違わない。
+  だから「コメントなら CI は何もしないはず」と考えないこと。**push したら `git pull`** の規約は
+  このためにもある。
   **rustflags は `RUSTFLAGS` で渡さない。** `.cargo/config.toml` の `+simd128` を置き換えて
   しまい、SIMD 無しのバイナリが黙ってできる（`--config` で渡した配列は連結される）。
   空の `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS=""` は上書きにならず無視される（実測）。
@@ -1147,10 +1165,13 @@ P9 の揺らし（0.05 Å）は**平面の対称性から降りる**ためのも
 - **P10-5 の判断材料**（このブラウザで実測）: `WebAssembly.compile`（305 KiB）2.2〜3.4 ms、
   空のモジュール Worker の起動 7〜12 ms。→ モジュールを配り回す価値なし（plan-v2.md）。
 
-**確かめられていないもの**（ユーザーの Firefox / 講義 PC に回す。plan-v2.md「P10-6」）:
-3D の見た目と候補の行の並び、非収束の候補（作るのが難しい。`pool.test.ts` と
-`search.test.ts` で「—」と発散に回ることは固定してある）、**講義 PC（12 スレッド）での
-実際の本数（3 本になる）と所要時間、前面の操作が固まらないこと**。
+**2026-09-21、ユーザーの Firefox 確認が完了し、P10 完了となった。指摘による手直しは無し。**
+
+**それでも実測が残っていないもの**: **講義 PC（i5-1235U、12 スレッド）そのものでの所要時間・
+熱・画面の引っかかり**。そこでは `poolSize` が 3 になる。教室で重いようなら
+`web/src/search/pool.ts` の `MAX_CONCURRENT` を 2 にするだけでよい。
+非収束の候補も手では作れていない（dev-notes「P4 で分かったこと」のとおり作るのが難しい）が、
+「—」を出して発散に回ることは `pool.test.ts` と `search.test.ts` で固定してある。
 
 ### P3・P4 の実装メモ
 
