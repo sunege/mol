@@ -5,6 +5,7 @@
 //! the molecule, the volumes are compared against each other rather than against
 //! a number, and the surface is checked for the properties a surface must have.
 
+use dft_core::basis::BasisKind;
 use dft_core::density::{self, GridSpec};
 use dft_core::grid::GridQuality;
 use dft_core::marching::{self, Mesh};
@@ -22,7 +23,8 @@ fn water() -> Molecule {
 }
 
 fn converged_density(molecule: Molecule) -> (System, nalgebra::DMatrix<f64>) {
-    let system = System::build(molecule, GridQuality::Medium).expect("basis covers the molecule");
+    let system = System::build(molecule, BasisKind::Sto3g, GridQuality::Medium)
+        .expect("basis covers the molecule");
     let result = scf::run_restricted(&system, &ScfOptions::default());
     assert!(result.converged, "the reference geometry has to converge");
     (system, result.density)

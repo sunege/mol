@@ -32,7 +32,7 @@ pub mod linalg;
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::basis::{BasisError, BasisSet};
+use crate::basis::{BasisError, BasisKind, BasisSet};
 use crate::grid::{self, GridQuality, MolecularGrid};
 use crate::integrals::{self, EriTensor};
 use crate::molecule::Molecule;
@@ -50,6 +50,10 @@ const DEGENERACY_TOLERANCE: f64 = 1e-6;
 /// iterations themselves only touch the density.
 pub struct System {
     pub molecule: Molecule,
+    /// Which table `basis` was built from. Kept because anything that builds a
+    /// system of its own from this one - the atomic guess, every step of a
+    /// geometry optimisation - must use the same basis.
+    pub kind: BasisKind,
     pub basis: BasisSet,
     pub overlap: DMatrix<f64>,
     /// `T + V_ne`.
@@ -60,9 +64,13 @@ pub struct System {
 }
 
 impl System {
-    pub fn build(molecule: Molecule, quality: GridQuality) -> Result<Self, BasisError> {
+    pub fn build(
+        molecule: Molecule,
+        kind: BasisKind,
+        quality: GridQuality,
+    ) -> Result<Self, BasisError> {
         let grid = grid::build(&molecule, quality);
-        System::build_with_grid(molecule, grid)
+        System::build_with_grid(molecule, kind, grid)
     }
 
     /// The same, with the integration grid supplied rather than built.
@@ -74,14 +82,15 @@ impl System {
     /// every step - so this is not a shortcut it can take.
     pub fn build_with_grid(
         molecule: Molecule,
+        kind: BasisKind,
         grid: MolecularGrid,
     ) -> Result<Self, BasisError> {
-        let basis = BasisSet::sto3g(&molecule)?;
+        let basis = BasisSet::build(kind, &molecule)?;
         let (overlap, kinetic) = integrals::overlap_and_kinetic(&basis);
         let core = kinetic + integrals::nuclear_attraction(&basis, &molecule);
         let eri = integrals::compute_eri(&basis);
         let nuclear_repulsion = molecule.nuclear_repulsion();
-        Ok(System { molecule, basis, overlap, core, eri, grid, nuclear_repulsion })
+        Ok(System { molecule, kind, basis, overlap, core, eri, grid, nuclear_repulsion })
     }
 
     pub fn n_functions(&self) -> usize {
@@ -396,7 +405,7 @@ pub fn run_restricted(system: &System, options: &ScfOptions) -> ScfResult {
     };
     let mut density = match &options.initial_guess {
         InitialGuess::Atomic => {
-            guess::superposition_of_atomic_densities(&system.molecule, &system.basis)
+            guess::superposition_of_atomic_densities(system)
         }
         InitialGuess::Core => fill(&system.core).2,
         restart => restart
@@ -498,7 +507,7 @@ pub fn run_unrestricted(system: &System, options: &ScfOptions) -> ScfResult {
     // genuinely different potentials.
     let (mut alpha, mut beta) = match &options.initial_guess {
         InitialGuess::Atomic => {
-            let total = guess::superposition_of_atomic_densities(&system.molecule, &system.basis);
+            let total = guess::superposition_of_atomic_densities(system);
             (&total * 0.5, &total * 0.5)
         }
         InitialGuess::Core => {

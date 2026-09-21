@@ -186,6 +186,7 @@ mod tests {
     /// energies - which is what it is.
     #[test]
     fn energy_weighted_density_traces_to_the_orbital_energies() {
+        use crate::basis::BasisKind;
         use crate::grid::GridQuality;
         use crate::scf::{run_restricted, ScfOptions};
 
@@ -194,7 +195,7 @@ mod tests {
             Atom { z: 1, pos: [0.0, 0.0, 1.4] },
         ])
         .unwrap();
-        let system = System::build(molecule, GridQuality::Coarse).unwrap();
+        let system = System::build(molecule, BasisKind::Sto3g, GridQuality::Coarse).unwrap();
         let result = run_restricted(&system, &ScfOptions::default());
         let weighted = energy_weighted_density(&result);
         let expected: f64 = result.channels[0]

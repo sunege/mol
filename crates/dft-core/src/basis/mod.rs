@@ -19,6 +19,7 @@
 //! Splitting it this way lets the integral code work with one coefficient list
 //! per shell and apply `s` only when a shell block is written into a matrix.
 
+mod b631gs_data;
 mod sto3g_data;
 
 use crate::element::MAX_Z;
@@ -33,10 +34,32 @@ pub struct ShellDef {
     pub coefficients: &'static [f64],
 }
 
+/// The basis sets the engine carries, both tabulated for H-Ar.
+///
+/// Everything downstream of [`BasisSet`] is written for arbitrary angular
+/// momentum, so the choice changes how many functions there are and nothing
+/// else: no integral, grid or gradient code looks at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasisKind {
+    /// Minimal: one contracted function per occupied atomic orbital.
+    Sto3g,
+    /// Split valence, with one Cartesian d shell on Li-Ar.
+    B631Gs,
+}
+
+impl BasisKind {
+    fn table(self) -> &'static [&'static [ShellDef]; 18] {
+        match self {
+            BasisKind::Sto3g => &sto3g_data::STO3G,
+            BasisKind::B631Gs => &b631gs_data::B631GS,
+        }
+    }
+}
+
 /// Reasons a basis set cannot be built for a molecule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BasisError {
-    /// No STO-3G contraction is tabulated for this element.
+    /// No contraction is tabulated for this element.
     UnsupportedElement { z: u8 },
 }
 
@@ -264,7 +287,7 @@ pub struct ShellGroup {
 
 /// All shells of a molecule, in the order that fixes basis-function indices:
 /// atom by atom, and within an atom in the order the element's table lists them
-/// (ascending angular momentum for STO-3G). PySCF orders its shells the same
+/// (ascending angular momentum in both tables). PySCF orders its shells the same
 /// way, so reference matrices line up index for index.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BasisSet {
@@ -274,14 +297,15 @@ pub struct BasisSet {
 }
 
 impl BasisSet {
-    /// Builds the fixed STO-3G basis for a molecule.
-    pub fn sto3g(molecule: &Molecule) -> Result<Self, BasisError> {
+    /// Builds one of the tabulated basis sets for a molecule.
+    pub fn build(kind: BasisKind, molecule: &Molecule) -> Result<Self, BasisError> {
+        let table = kind.table();
         let mut shells = Vec::new();
         for (center, atom) in molecule.atoms.iter().enumerate() {
             if atom.z == 0 || atom.z > MAX_Z {
                 return Err(BasisError::UnsupportedElement { z: atom.z });
             }
-            for def in sto3g_data::STO3G[(atom.z - 1) as usize] {
+            for def in table[(atom.z - 1) as usize] {
                 shells.push(Shell::new(
                     center,
                     atom.pos,
@@ -292,6 +316,11 @@ impl BasisSet {
             }
         }
         Ok(BasisSet::from_shells(shells))
+    }
+
+    /// The STO-3G basis for a molecule.
+    pub fn sto3g(molecule: &Molecule) -> Result<Self, BasisError> {
+        BasisSet::build(BasisKind::Sto3g, molecule)
     }
 
     pub fn from_shells(shells: Vec<Shell>) -> Self {
@@ -555,12 +584,37 @@ mod tests {
 
     #[test]
     fn every_supported_element_has_a_contraction() {
+        for kind in [BasisKind::Sto3g, BasisKind::B631Gs] {
+            for z in 1..=MAX_Z {
+                let mol = Molecule::new(vec![Atom { z, pos: [0.0; 3] }]).unwrap();
+                let basis = BasisSet::build(kind, &mol).unwrap();
+                assert!(basis.n_functions() > 0, "no {kind:?} basis for Z={z}");
+                // Enough functions to hold every electron in pairs.
+                assert!(2 * basis.n_functions() >= z as usize, "{kind:?} too small for Z={z}");
+            }
+        }
+    }
+
+    #[test]
+    fn b631gs_is_split_valence_with_d_from_lithium() {
         for z in 1..=MAX_Z {
             let mol = Molecule::new(vec![Atom { z, pos: [0.0; 3] }]).unwrap();
-            let basis = BasisSet::sto3g(&mol).unwrap();
-            assert!(basis.n_functions() > 0, "no basis for Z={z}");
-            // Enough functions to hold every electron in pairs.
-            assert!(2 * basis.n_functions() >= z as usize, "basis too small for Z={z}");
+            let minimal = BasisSet::build(BasisKind::Sto3g, &mol).unwrap();
+            let larger = BasisSet::build(BasisKind::B631Gs, &mol).unwrap();
+            // Split valence: every element gets more functions than the minimal set.
+            assert!(larger.n_functions() > minimal.n_functions(), "Z={z}");
+            // The star is one d shell on everything past helium, and nothing on H/He.
+            let expected_l = if z <= 2 { 0 } else { 2 };
+            assert_eq!(larger.max_angular_momentum(), expected_l, "Z={z}");
+            let d_shells = larger.shells.iter().filter(|s| s.l == 2).count();
+            assert_eq!(d_shells, usize::from(z > 2), "Z={z}");
         }
+    }
+
+    #[test]
+    fn sto3g_is_build_with_sto3g() {
+        let mol = Molecule::from_angstrom(&[(16, [0.0; 3]), (1, [0.0, 0.96, 0.93])]).unwrap();
+        let built = BasisSet::build(BasisKind::Sto3g, &mol).unwrap();
+        assert_eq!(BasisSet::sto3g(&mol).unwrap(), built);
     }
 }

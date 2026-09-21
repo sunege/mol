@@ -13,6 +13,7 @@
 mod common;
 
 use common::{load, OpenShellReference, OpenShellReferences};
+use dft_core::basis::BasisKind;
 use dft_core::driver::DriverOptions;
 use dft_core::grid::GridQuality;
 use dft_core::scf::{self, ScfOptions, System};
@@ -39,7 +40,8 @@ fn options_for(key: &str) -> ScfOptions {
 }
 
 fn system_of(reference: &OpenShellReference) -> System {
-    System::build(reference.molecule(), GridQuality::Medium).expect("basis must cover the molecule")
+    System::build(reference.molecule(), BasisKind::Sto3g, GridQuality::Medium)
+        .expect("basis must cover the molecule")
 }
 
 fn run(reference: &OpenShellReference) -> (System, scf::ScfResult) {

@@ -14,6 +14,7 @@
 mod common;
 
 use common::GradientReferences;
+use dft_core::basis::BasisKind;
 use dft_core::gradient::{self, finite_difference};
 use dft_core::opt::OPTIMIZER_GRID;
 use dft_core::scf::{self, ScfOptions, ScfResult, System};
@@ -56,7 +57,7 @@ fn analytic_gradients_match_pyscf() {
 
     for case in &references.cases {
         let molecule = case.molecule();
-        let system = System::build(molecule, OPTIMIZER_GRID).unwrap();
+        let system = System::build(molecule, BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
         let result = solve(&system);
 
         // The energies have to agree first; a gradient comparison on top of a

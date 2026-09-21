@@ -365,6 +365,7 @@ fn rounds(molecule: &Molecule, options: &DriverOptions) -> Vec<Round> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::basis::BasisKind;
     use crate::grid::GridQuality;
     use crate::molecule::Atom;
 
@@ -436,7 +437,8 @@ mod tests {
 
     #[test]
     fn oxygen_is_found_to_be_a_triplet() {
-        let mut system = System::build(oxygen_molecule(), GridQuality::Medium).unwrap();
+        let mut system =
+            System::build(oxygen_molecule(), BasisKind::Sto3g, GridQuality::Medium).unwrap();
         let outcome = solve(&mut system, &DriverOptions::default(), &mut always());
         assert!(outcome.converged());
         assert_eq!(outcome.state, SpinState { charge: 0, multiplicity: 3 });
@@ -459,7 +461,7 @@ mod tests {
 
     #[test]
     fn a_closed_shell_molecule_stays_a_singlet() {
-        let mut system = System::build(water(), GridQuality::Medium).unwrap();
+        let mut system = System::build(water(), BasisKind::Sto3g, GridQuality::Medium).unwrap();
         let outcome = solve(&mut system, &DriverOptions::default(), &mut always());
         assert!(outcome.converged());
         assert_eq!(outcome.state, SpinState { charge: 0, multiplicity: 1 });
@@ -473,9 +475,8 @@ mod tests {
 
     #[test]
     fn an_odd_electron_count_is_solved_unrestricted_without_a_search() {
-        let mut system =
-            System::build(Molecule::new(vec![Atom { z: 1, pos: [0.0; 3] }]).unwrap(), GridQuality::Medium)
-                .unwrap();
+        let hydrogen = Molecule::new(vec![Atom { z: 1, pos: [0.0; 3] }]).unwrap();
+        let mut system = System::build(hydrogen, BasisKind::Sto3g, GridQuality::Medium).unwrap();
         let outcome = solve(&mut system, &DriverOptions::default(), &mut always());
         assert!(outcome.converged());
         assert_eq!(outcome.state, SpinState { charge: 0, multiplicity: 2 });
@@ -494,7 +495,7 @@ mod tests {
     #[test]
     fn a_stubborn_atom_is_rescued_by_the_later_rounds() {
         let silicon = Molecule::new(vec![Atom { z: 14, pos: [0.0; 3] }]).unwrap();
-        let mut system = System::build(silicon, GridQuality::Medium).unwrap();
+        let mut system = System::build(silicon, BasisKind::Sto3g, GridQuality::Medium).unwrap();
         let outcome = solve(&mut system, &DriverOptions::default(), &mut always());
         assert!(outcome.converged());
         assert_eq!(outcome.state, SpinState { charge: 0, multiplicity: 3 });
@@ -512,10 +513,12 @@ mod tests {
     #[test]
     fn refining_on_a_finer_grid_is_the_search_on_that_grid() {
         for (name, molecule) in [("O2", oxygen_molecule()), ("H2O", water())] {
-            let mut direct = System::build(molecule.clone(), GridQuality::Fine).unwrap();
+            let mut direct =
+                System::build(molecule.clone(), BasisKind::Sto3g, GridQuality::Fine).unwrap();
             let expected = solve(&mut direct, &DriverOptions::default(), &mut always());
 
-            let mut system = System::build(molecule.clone(), GridQuality::Medium).unwrap();
+            let mut system =
+                System::build(molecule.clone(), BasisKind::Sto3g, GridQuality::Medium).unwrap();
             let fine = crate::grid::build(&molecule, GridQuality::Fine);
             let points = fine.len();
             let refined =
@@ -549,7 +552,8 @@ mod tests {
         // A clock that stops the search immediately: the first attempt runs
         // anyway, because a caller always needs something to show.
         let mut out_of_time = || false;
-        let mut system = System::build(oxygen_molecule(), GridQuality::Coarse).unwrap();
+        let mut system =
+            System::build(oxygen_molecule(), BasisKind::Sto3g, GridQuality::Coarse).unwrap();
         let outcome = solve(&mut system, &DriverOptions::default(), &mut out_of_time);
         assert_eq!(outcome.attempts.len(), 1);
         assert_eq!(outcome.state, SpinState { charge: 0, multiplicity: 1 });
@@ -569,7 +573,7 @@ mod tests {
             extra_multiplicities: 1,
             try_charges: true,
         };
-        let mut system = System::build(water(), GridQuality::Coarse).unwrap();
+        let mut system = System::build(water(), BasisKind::Sto3g, GridQuality::Coarse).unwrap();
         let outcome = solve(&mut system, &options, &mut always());
         assert!(!outcome.converged());
         assert_eq!(outcome.state, SpinState { charge: 0, multiplicity: 1 });

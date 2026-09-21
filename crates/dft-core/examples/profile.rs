@@ -16,6 +16,7 @@
 
 use std::time::Instant;
 
+use dft_core::basis::BasisKind;
 use dft_core::driver::{self, DriverOptions};
 use dft_core::gradient;
 use dft_core::grid::{self, GridQuality};
@@ -72,12 +73,13 @@ fn profile(name: &str, molecule: Molecule, optimize: bool) {
         let t_grid = seconds(t);
 
         let t = Instant::now();
-        let basis = dft_core::BasisSet::sto3g(&molecule).unwrap();
+        let basis = dft_core::BasisSet::build(BasisKind::Sto3g, &molecule).unwrap();
         let _ = integrals::compute_eri(&basis);
         let t_eri = seconds(t);
 
         let t = Instant::now();
-        let mut system = System::build_with_grid(molecule.clone(), grid.clone()).unwrap();
+        let mut system =
+            System::build_with_grid(molecule.clone(), BasisKind::Sto3g, grid.clone()).unwrap();
         let t_build = seconds(t);
 
         let t = Instant::now();
@@ -139,7 +141,8 @@ fn profile(name: &str, molecule: Molecule, optimize: bool) {
         // medium grid, solve it again on the optimiser's.
         let t = Instant::now();
         let fine = grid::build(&molecule, opt::OPTIMIZER_GRID);
-        let mut system = System::build(molecule.clone(), GridQuality::Medium).unwrap();
+        let mut system =
+            System::build(molecule.clone(), BasisKind::Sto3g, GridQuality::Medium).unwrap();
         let outcome =
             driver::solve_then_refine(&mut system, fine, &DriverOptions::default(), &mut || true);
         let t_start = seconds(t);

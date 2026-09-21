@@ -12,6 +12,7 @@ mod common;
 use std::cell::RefCell;
 
 use common::GradientReferences;
+use dft_core::basis::{BasisKind, BasisSet};
 use dft_core::gradient;
 use dft_core::molecule::{Atom, Molecule};
 use dft_core::opt::{self, bond_angle, bond_length, Options, Stage, Status, OPTIMIZER_GRID};
@@ -26,7 +27,7 @@ const ANGLE_TOLERANCE: f64 = 0.5;
 
 /// Relaxes a molecule, collecting the geometries it emitted.
 fn relax(molecule: Molecule) -> (opt::Relaxation, Vec<Vec<f64>>) {
-    let system = System::build(molecule, OPTIMIZER_GRID).unwrap();
+    let system = System::build(molecule, BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     let mut trajectory = Vec::new();
     let relaxation = opt::relax(
         system,
@@ -153,7 +154,7 @@ fn a_distorted_start_reaches_the_same_minimum() {
 /// molecule never visibly backs out of a move it has already made.
 #[test]
 fn accepted_steps_only_ever_lower_the_energy() {
-    let system = System::build(water_reference(), OPTIMIZER_GRID).unwrap();
+    let system = System::build(water_reference(), BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     let mut energies = Vec::new();
     let relaxation = opt::relax(
         system,
@@ -185,7 +186,7 @@ fn accepted_steps_only_ever_lower_the_energy() {
 /// wall-clock budget.
 #[test]
 fn the_callback_can_stop_it() {
-    let system = System::build(water_reference(), OPTIMIZER_GRID).unwrap();
+    let system = System::build(water_reference(), BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     let mut seen = 0;
     let relaxation = opt::relax(
         system,
@@ -213,7 +214,7 @@ fn running_out_of_steps_is_reported_rather_than_thrown() {
         (1, [1.5, 0.0, -0.4]),
     ])
     .unwrap();
-    let system = System::build(distorted, OPTIMIZER_GRID).unwrap();
+    let system = System::build(distorted, BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     let options = Options { max_steps: 2, ..Options::default() };
     let relaxation = opt::relax(system, &options, None, &mut |_| true, &mut |_| {});
     assert_eq!(relaxation.status, Status::MaxSteps);
@@ -229,7 +230,7 @@ fn running_out_of_steps_is_reported_rather_than_thrown() {
 /// structure it reached instead.
 #[test]
 fn an_unsolved_starting_point_stops_before_moving_anything() {
-    let system = System::build(water_reference(), OPTIMIZER_GRID).unwrap();
+    let system = System::build(water_reference(), BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     // One iteration can converge nothing, so the calculation handed in is the
     // shape of a failed SCF.
     let hopeless = dft_core::scf::ScfOptions {
@@ -270,7 +271,7 @@ fn oxygen_relaxes_as_a_triplet_throughout() {
     stretched.multiplicity = 3;
     let start = bond_length(&stretched, 0, 1);
 
-    let system = System::build(stretched, OPTIMIZER_GRID).unwrap();
+    let system = System::build(stretched, BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     let relaxation =
         opt::relax(system, &Options::default(), None, &mut |_| true, &mut |_| {});
 
@@ -300,7 +301,8 @@ fn an_already_relaxed_structure_converges_immediately() {
             ],
         })
         .collect();
-    let system = System::build(Molecule::new(atoms).unwrap(), OPTIMIZER_GRID).unwrap();
+    let system =
+        System::build(Molecule::new(atoms).unwrap(), BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     let relaxation =
         opt::relax(system, &Options::default(), None, &mut |_| true, &mut |_| {});
     assert_eq!(relaxation.status, Status::Converged);
@@ -316,7 +318,7 @@ enum Event {
 
 /// Relaxes a molecule, recording the stages and the steps as one sequence.
 fn relax_recording(molecule: Molecule, stop_after: usize) -> (opt::Relaxation, Vec<Event>) {
-    let system = System::build(molecule, OPTIMIZER_GRID).unwrap();
+    let system = System::build(molecule, BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
     // Two closures write to the same list, so neither can own it.
     let events = RefCell::new(Vec::new());
     let relaxation = opt::relax(
@@ -409,4 +411,17 @@ fn the_reported_forces_are_those_of_the_final_structure() {
             relaxation.status
         );
     }
+}
+
+/// Every step rebuilds the system at the new geometry, and it has to rebuild it
+/// in the basis the relaxation started in.
+#[test]
+fn every_step_keeps_the_basis_it_started_in() {
+    let system = System::build(distorted_water(), BasisKind::B631Gs, OPTIMIZER_GRID).unwrap();
+    let options = Options { max_steps: 2, ..Options::default() };
+    let relaxation = opt::relax(system, &options, None, &mut |_| true, &mut |_| {});
+    assert!(relaxation.steps > 0, "nothing moved, so no step rebuilt the system");
+    assert_eq!(relaxation.system.kind, BasisKind::B631Gs);
+    let expected = BasisSet::build(BasisKind::B631Gs, &relaxation.system.molecule).unwrap();
+    assert_eq!(relaxation.system.basis, expected);
 }

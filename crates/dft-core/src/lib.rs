@@ -1,8 +1,8 @@
 //! A small all-electron molecular DFT engine.
 //!
 //! Scope: non-periodic molecules built from H-Ar, up to roughly benzene in
-//! size, using a fixed STO-3G basis and the LDA (Slater exchange + VWN5
-//! correlation) functional. Everything is in atomic units.
+//! size, in the STO-3G or 6-31G* basis ([`BasisKind`]) with the LDA (Slater
+//! exchange + VWN5 correlation) functional. Everything is in atomic units.
 //!
 //! The crate is deliberately free of any WebAssembly dependency so the whole
 //! engine can be exercised with `cargo test` on the host.
@@ -22,7 +22,7 @@ pub mod opt;
 pub mod scf;
 pub mod xc;
 
-pub use basis::{BasisError, BasisSet, Shell};
+pub use basis::{BasisError, BasisKind, BasisSet, Shell};
 pub use bonding::{DensityChannel, OrbitalRef};
 pub use density::{DensityGrid, GridSpec};
 pub use driver::{DriverOptions, Outcome, SpinState};

@@ -15,6 +15,7 @@
 //! separately, in `the_omitted_grid_weight_derivatives_are_small`, by letting the
 //! grid move as it does in the application.
 
+use dft_core::basis::BasisKind;
 use dft_core::gradient::{self, finite_difference};
 use dft_core::grid::{self, GridQuality, MolecularGrid};
 use dft_core::molecule::{Atom, Molecule};
@@ -51,14 +52,14 @@ fn solve(system: &System) -> ScfResult {
 
 /// Energy of a geometry on a grid that is *not* rebuilt for it.
 fn frozen_grid_energy(molecule: &Molecule, grid: &MolecularGrid) -> f64 {
-    let system = System::build_with_grid(molecule.clone(), grid.clone()).unwrap();
+    let system = System::build_with_grid(molecule.clone(), BasisKind::Sto3g, grid.clone()).unwrap();
     solve(&system).energy
 }
 
 /// Energy of a geometry with the grid rebuilt around it, which is what the
 /// application computes.
 fn moving_grid_energy(molecule: &Molecule, quality: GridQuality) -> f64 {
-    let system = System::build(molecule.clone(), quality).unwrap();
+    let system = System::build(molecule.clone(), BasisKind::Sto3g, quality).unwrap();
     solve(&system).energy
 }
 
@@ -118,7 +119,7 @@ fn distorted_methyl() -> Molecule {
 /// energy and returns the worst disagreement, having asserted it is small.
 fn check(name: &str, molecule: Molecule) -> f64 {
     let grid = grid::build(&molecule, QUALITY);
-    let system = System::build_with_grid(molecule.clone(), grid.clone()).unwrap();
+    let system = System::build_with_grid(molecule.clone(), BasisKind::Sto3g, grid.clone()).unwrap();
     let result = solve(&system);
     let analytic = gradient::energy_gradient(&system, &result);
 
@@ -181,7 +182,7 @@ fn distorted_methyl_radical_unrestricted() {
 #[test]
 fn the_gradient_has_no_net_force() {
     let molecule = distorted_water(1);
-    let system = System::build(molecule, dft_core::opt::OPTIMIZER_GRID).unwrap();
+    let system = System::build(molecule, BasisKind::Sto3g, dft_core::opt::OPTIMIZER_GRID).unwrap();
     let result = solve(&system);
     let analytic = gradient::energy_gradient(&system, &result);
     for axis in 0..3 {
@@ -217,7 +218,7 @@ fn the_omitted_grid_weight_derivatives_are_small() {
 
     let mut worst_by_quality = Vec::new();
     for quality in [GridQuality::Medium, dft_core::opt::OPTIMIZER_GRID] {
-        let system = System::build(molecule.clone(), quality).unwrap();
+        let system = System::build(molecule.clone(), BasisKind::Sto3g, quality).unwrap();
         let result = solve(&system);
         let analytic = gradient::energy_gradient(&system, &result);
         let numeric =

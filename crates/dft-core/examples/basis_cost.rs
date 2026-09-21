@@ -4,80 +4,36 @@
 //! cargo run --release --example basis_cost -- <input.json> [molecule ...]
 //! ```
 //!
-//! `input.json` is `{"bases": {name: {z: [{l, exponents, coefficients}]}},
-//! "molecules": {name: {z: [...], xyz: [...]}}, "order": [name, ...]}`, with the
-//! shells straight out of PySCF:
-//!
-//! ```python
-//! from pyscf import gto
-//! from pyscf.data.elements import ELEMENTS
-//! [{"l": sh[0], "exponents": [p[0] for p in sh[1:]],
-//!   "coefficients": [p[1] for p in sh[1:]]}
-//!  for sh in gto.basis.load("6-31g*", ELEMENTS[z])]
-//! ```
-//!
-//! `System::build` hardcodes STO-3G, so this assembles a `System` itself from a
-//! shell table supplied as JSON (generated from PySCF, like every other table
-//! here). It is a measurement tool, not a route into the engine: nothing else
-//! may build a basis this way.
+//! `input.json` is `{"molecules": {name: {z: [...], xyz: [...]}}}` with `xyz`
+//! flat and in Angstrom; other keys are ignored. Every molecule is run in both
+//! of the engine's bases, through `System::build` like the app.
 //!
 //! Printed per (molecule, basis): the integration grid, the one- and
 //! two-electron integrals, one SCF, one gradient, and - because a hybrid
 //! functional would need it - one Coulomb and one exchange matrix built from
-//! the stored tensor. The initial guess is the core Hamiltonian in every run,
-//! since the atomic guess only knows STO-3G; iteration counts are therefore
-//! higher than the app's, and what to compare is the cost per iteration.
+//! the stored tensor. The SCF starts from the atomic guess, as the app's does.
+//!
+//! The v3-0 table in dev-notes predates `BasisKind`: it built each basis from a
+//! PySCF shell table in the input file, also ran 6-31G, and started every SCF
+//! from the core Hamiltonian (the atomic guess only knew STO-3G then). Its
+//! iteration counts are therefore higher than these; what carries over is the
+//! cost per iteration.
 
 use std::time::Instant;
 
 use nalgebra::DMatrix;
 use serde_json::Value;
 
-use dft_core::basis::{BasisSet, Shell};
+use dft_core::basis::BasisKind;
 use dft_core::grid;
 use dft_core::integrals::{self, deriv};
 use dft_core::molecule::Molecule;
 use dft_core::opt;
-use dft_core::scf::{self, InitialGuess, ScfOptions, System};
+use dft_core::scf::{self, ScfOptions, System};
 use dft_core::gradient;
 
 fn seconds(start: Instant) -> f64 {
     start.elapsed().as_secs_f64()
-}
-
-/// Shells for one element, as `basis_tables.json` stores them.
-fn shells_for(table: &Value, z: u8, center: usize, origin: [f64; 3]) -> Vec<Shell> {
-    let defs = table
-        .get(z.to_string())
-        .unwrap_or_else(|| panic!("no shells tabulated for Z = {z}"))
-        .as_array()
-        .unwrap();
-    defs.iter()
-        .map(|def| {
-            let l = def["l"].as_u64().unwrap() as u8;
-            let e: Vec<f64> = def["exponents"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_f64().unwrap())
-                .collect();
-            let c: Vec<f64> = def["coefficients"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_f64().unwrap())
-                .collect();
-            Shell::new(center, origin, l, &e, &c)
-        })
-        .collect()
-}
-
-fn basis_for(table: &Value, molecule: &Molecule) -> BasisSet {
-    let mut shells = Vec::new();
-    for (center, atom) in molecule.atoms.iter().enumerate() {
-        shells.extend(shells_for(table, atom.z, center, atom.pos));
-    }
-    BasisSet::from_shells(shells)
 }
 
 /// Naive exchange matrix from the stored tensor: K[i,j] = sum_kl P[k,l] (ik|jl).
@@ -100,35 +56,29 @@ fn exchange(eri: &integrals::EriTensor, density: &DMatrix<f64>) -> DMatrix<f64> 
     k
 }
 
-fn run(name: &str, molecule: &Molecule, basis_name: &str, table: &Value) {
+fn run(name: &str, molecule: &Molecule, kind: BasisKind) {
+    // `System::build_with_grid` does the three stages below in one go; they are
+    // repeated here on their own only to time them, and the system it returns is
+    // the one everything after is measured on.
     let t = Instant::now();
     let grid = grid::build(molecule, opt::OPTIMIZER_GRID);
     let t_grid = seconds(t);
 
+    let basis = dft_core::BasisSet::build(kind, molecule).unwrap();
     let t = Instant::now();
-    let basis = basis_for(table, molecule);
-    let (overlap, kinetic) = integrals::overlap_and_kinetic(&basis);
-    let core = kinetic + integrals::nuclear_attraction(&basis, molecule);
+    let (_, kinetic) = integrals::overlap_and_kinetic(&basis);
+    let _ = kinetic + integrals::nuclear_attraction(&basis, molecule);
     let t_1e = seconds(t);
 
     let t = Instant::now();
-    let eri = integrals::compute_eri(&basis);
+    let _ = integrals::compute_eri(&basis);
     let t_eri = seconds(t);
-    let mib = (eri.len() * 8) as f64 / (1024.0 * 1024.0);
 
-    let system = System {
-        molecule: molecule.clone(),
-        basis,
-        overlap,
-        core,
-        eri,
-        grid,
-        nuclear_repulsion: molecule.nuclear_repulsion(),
-    };
+    let system = System::build_with_grid(molecule.clone(), kind, grid).unwrap();
+    let mib = (system.eri.len() * 8) as f64 / (1024.0 * 1024.0);
 
-    let options = ScfOptions { initial_guess: InitialGuess::Core, ..ScfOptions::default() };
     let t = Instant::now();
-    let result = scf::run_restricted(&system, &options);
+    let result = scf::run_restricted(&system, &ScfOptions::default());
     let t_scf = seconds(t);
 
     let weighted = gradient::energy_weighted_density(&result);
@@ -155,6 +105,7 @@ fn run(name: &str, molecule: &Molecule, basis_name: &str, table: &Value) {
     let t_k = seconds(t);
 
     let per_step = t_grid + t_1e + t_eri + t_scf + t_g1e + t_g2e + t_gxc;
+    let basis_name = format!("{kind:?}");
     println!(
         "{name:14} {basis_name:8} n={:3} eri={:>10} ({mib:7.1} MiB) | \
          grid {t_grid:6.3}  1e {t_1e:6.3}  ERI {t_eri:7.3} | \
@@ -175,13 +126,6 @@ fn main() {
     let input: Value = serde_json::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
 
     let molecules = input["molecules"].as_object().unwrap();
-    let bases = input["bases"].as_object().unwrap();
-    let order: Vec<&str> = input["order"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
 
     for (name, entry) in molecules {
         if !wanted.is_empty() && !wanted.iter().any(|w| w == name) {
@@ -195,10 +139,8 @@ fn main() {
             .map(|(i, &zi)| (zi, [xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]]))
             .collect();
         let molecule = Molecule::from_angstrom(&atoms).unwrap();
-        for basis_name in &order {
-            if let Some(table) = bases.get(*basis_name) {
-                run(name, &molecule, basis_name, table);
-            }
+        for kind in [BasisKind::Sto3g, BasisKind::B631Gs] {
+            run(name, &molecule, kind);
         }
     }
 }

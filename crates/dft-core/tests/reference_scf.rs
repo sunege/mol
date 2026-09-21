@@ -12,6 +12,7 @@
 mod common;
 
 use common::{load, AtomicReferences, ScfReference};
+use dft_core::basis::BasisKind;
 use dft_core::grid::GridQuality;
 use dft_core::molecule::{Atom, Molecule};
 use dft_core::scf::{self, Occupation, ScfOptions, System};
@@ -37,7 +38,8 @@ const WITH_DENSITY: [&str; 6] = [
 const GRID_TOLERANCE: f64 = 1e-4;
 
 fn system_of(reference: &ScfReference) -> System {
-    System::build(reference.molecule(), GridQuality::Medium).expect("basis must cover the molecule")
+    System::build(reference.molecule(), BasisKind::Sto3g, GridQuality::Medium)
+        .expect("basis must cover the molecule")
 }
 
 #[test]
@@ -143,7 +145,7 @@ fn closed_shell_atoms_match_the_reference() {
     let references: AtomicReferences = load("scf_atoms.json");
     for atom in &references.atoms {
         let molecule = Molecule::new(vec![Atom { z: atom.z, pos: [0.0; 3] }]).unwrap();
-        let system = System::build(molecule, GridQuality::Fine).unwrap();
+        let system = System::build(molecule, BasisKind::Sto3g, GridQuality::Fine).unwrap();
         let options =
             ScfOptions { occupation: Occupation::SphericalAverage, ..ScfOptions::default() };
         let result = scf::run_restricted(&system, &options);
@@ -168,7 +170,7 @@ fn finer_grids_converge_towards_the_reference() {
         let flat = reference.density_matrix.as_ref().expect("reference density");
         let density = DMatrix::from_row_slice(n, n, flat);
         let error = |quality: GridQuality| {
-            let system = System::build(reference.molecule(), quality).unwrap();
+            let system = System::build(reference.molecule(), BasisKind::Sto3g, quality).unwrap();
             let (terms, _, _) = scf::energy_and_fock(&system, &density);
             (terms.total() - reference.energy).abs()
         };

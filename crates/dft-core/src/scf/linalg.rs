@@ -20,9 +20,9 @@
 
 use nalgebra::{DMatrix, DVector};
 
-/// Overlap eigenvalues below this are dropped as linearly dependent. STO-3G is
-/// far from over-complete so this should never fire, but a user is free to place
-/// two atoms almost on top of each other.
+/// Overlap eigenvalues below this are dropped as linearly dependent. Neither
+/// basis is anywhere near over-complete so this should never fire, but a user is
+/// free to place two atoms almost on top of each other.
 pub const OVERLAP_THRESHOLD: f64 = 1e-8;
 
 /// Jacobi sweeps before giving up. Convergence is quadratic and eight sweeps is

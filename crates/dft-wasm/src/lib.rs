@@ -4,6 +4,7 @@
 //! engine (Bohr), and nothing else: all physics lives in `dft-core` so it stays
 //! testable on the host.
 
+use dft_core::basis::BasisKind;
 use dft_core::bonding::{self, DensityChannel};
 use dft_core::constants::{ANGSTROM_PER_BOHR, BOHR_PER_ANGSTROM};
 use dft_core::density::{self, DensityGrid, GridSpec};
@@ -387,7 +388,7 @@ pub fn scf(
     let on_progress = on_progress.as_ref();
     let molecule = build_molecule(z, xyz_angstrom)?;
     report(on_progress, stage::PREPARING, 0);
-    let mut system = System::build(molecule, GridQuality::Medium)
+    let mut system = System::build(molecule, BasisKind::Sto3g, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
     report(on_progress, stage::SEARCHING, 0);
     let deadline = js_sys::Date::now() + SEARCH_BUDGET_SECONDS * 1000.0;
@@ -457,7 +458,7 @@ pub fn optimize(
     // depend on the grid, and every losing state tried on the fine grid was
     // most of the first step's cost (see `driver::solve_then_refine`).
     let fine = dft_core::grid::build(&molecule, opt::OPTIMIZER_GRID);
-    let mut system = System::build(molecule, GridQuality::Medium)
+    let mut system = System::build(molecule, BasisKind::Sto3g, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
 
     report(on_progress, stage::SEARCHING, 0);

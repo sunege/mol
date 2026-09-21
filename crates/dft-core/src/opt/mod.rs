@@ -303,7 +303,7 @@ fn evaluate(
     molecule.set_coords(coordinates.as_slice());
     molecule.validate().ok()?;
 
-    let trial = System::build(molecule, options.quality).ok()?;
+    let trial = System::build(molecule, system.kind, options.quality).ok()?;
     let restart = ScfOptions {
         initial_guess: restart_guess(previous),
         ..options.scf.clone()

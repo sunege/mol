@@ -281,7 +281,7 @@ pub fn channel_density(
         }
         DensityChannel::Deformation => {
             &result.density
-                - guess::superposition_of_atomic_densities(&system.molecule, &system.basis)
+                - guess::superposition_of_atomic_densities(system)
         }
     }
 }
@@ -289,6 +289,7 @@ pub fn channel_density(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::basis::BasisKind;
     use crate::density::{self, GridSpec};
     use crate::grid::GridQuality;
     use crate::molecule::Atom;
@@ -400,7 +401,7 @@ mod tests {
     #[test]
     fn the_reflection_matrix_agrees_with_integrating_over_the_grid() {
         let molecule = rotated(&benzene(), 0.4);
-        let system = System::build(molecule, GridQuality::Coarse).unwrap();
+        let system = System::build(molecule, BasisKind::Sto3g, GridQuality::Coarse).unwrap();
         let plane = molecular_plane(&system.molecule).unwrap();
         let result = scf::run_restricted(&system, &ScfOptions::default());
         let orbitals = &result.channels[0].coefficients;
@@ -422,7 +423,7 @@ mod tests {
     #[test]
     fn benzene_has_three_pi_orbitals_holding_six_electrons() {
         let molecule = rotated(&benzene(), 0.4);
-        let system = System::build(molecule, GridQuality::Medium).unwrap();
+        let system = System::build(molecule, BasisKind::Sto3g, GridQuality::Medium).unwrap();
         let result = scf::run_restricted(&system, &ScfOptions::default());
         assert!(result.converged);
 
@@ -454,7 +455,7 @@ mod tests {
 
     #[test]
     fn a_non_planar_molecule_falls_back_to_the_deformation_density() {
-        let system = System::build(methane(), GridQuality::Medium).unwrap();
+        let system = System::build(methane(), BasisKind::Sto3g, GridQuality::Medium).unwrap();
         let result = scf::run_restricted(&system, &ScfOptions::default());
         let channel = bonding_channel(&system, &result);
         assert_eq!(channel, DensityChannel::Deformation);
@@ -481,7 +482,7 @@ mod tests {
 
     #[test]
     fn the_total_channel_is_the_density_the_scf_converged_on() {
-        let system = System::build(methane(), GridQuality::Coarse).unwrap();
+        let system = System::build(methane(), BasisKind::Sto3g, GridQuality::Coarse).unwrap();
         let result = scf::run_restricted(&system, &ScfOptions::default());
         let density = channel_density(&system, &result, &DensityChannel::Total);
         assert_eq!(density, result.density);
