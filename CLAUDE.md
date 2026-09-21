@@ -2,7 +2,7 @@
 
 ブラウザ上で本物の DFT（Rust → WebAssembly）を回し、化学を知らない人が原子を置くだけで
 (1) 安定な形へ緩和するアニメーションと (2) 電子密度の等値面を見られるアプリ。
-**v1（P0〜P7）・v2（P8〜P10）完了、Vercel にデプロイ済み。v3 は計画済み・実装未着手。**
+**v1（P0〜P7）・v2（P8〜P10）完了、Vercel にデプロイ済み。v3 は実装中（進み具合は板）。**
 **作業は [docs/v3/README.md](docs/v3/README.md)（板）から。1 チケット = 1 セッションで、
 板とチケット 1 枚だけ読めば着手できる。**
 
@@ -55,8 +55,10 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
 - **単位**: エンジンは原子単位（Bohr, Hartree）、UI は Å。変換は `dft-wasm` の境界だけ。
 - **`dft-core` に wasm 依存も時計も入れない。** 予算・進捗はクロージャで受ける。
 - **参照値・物理定数を記憶から書かない。** テスト内で独立な経路から導出するか
-  `gen_reference.py` の生成物にする（STO-3G・Lebedev・`tests/data/`・`units.json` も生成物で
-  手編集しない）。例外は `xc/lda.rs` の VWN5 定数。合わないときは先にどちらが正しいかを確かめる。
+  `gen_reference.py` の生成物にする（STO-3G・6-31G\*・Lebedev・`tests/data/`・`units.json` も
+  生成物で手編集しない）。例外は `xc/lda.rs` の VWN5 定数。合わないときは先にどちらが正しいかを確かめる。
+- **基底は `System` が覚えている**（`System::kind`、`BasisKind::{Sto3g, B631Gs}`）。`System` から
+  別の `System` を組む箇所（SAD の原子・最適化の毎歩）は必ず `system.kind` を引き継ぐ。
 - **勾配は HF 項 + Pulay 項**で、SCF 収束時にしか成り立たない。書き換えたら
   `integrals/deriv.rs` の**項ごとの**有限差分と並進不変性を先に見る。
 - **XC のグリッド重み微分は省略**＝解析勾配は「グリッド固定のエネルギー」の厳密な微分。検証は
@@ -130,6 +132,8 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
 ### ビルド・CI・デプロイ
 - **`web/src/wasm/` はコミットする**（Vercel に Rust が無い）。作るのは `npm run build:wasm` だけ。
   rustflags を `RUSTFLAGS` で渡さない（`.cargo/config.toml` の `+simd128` が黙って消える）。
+- **`cargo fmt` を掛けない**（リポジトリは rustfmt で整えておらず、触っていないファイルにも差分が
+  出る）。触った行だけ手で 100 桁に収める。
 - **Rust を書き戻すときに `mv` や `cp -p` を使わない**（mtime が戻って cargo が再ビルドを飛ばし、
   古い `.wasm` ができる）。疑わしいときは定数がバイナリに入っているかを直接見る（dev-notes）。
 - **出荷されるのは CI（Linux）のビルド。** Mac のビルドは機能同一だがバイトが一致しない。CI は
