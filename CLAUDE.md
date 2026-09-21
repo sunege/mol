@@ -93,6 +93,8 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
 - **契約は `protocol.ts` が唯一の情報源。** 失敗は `error` で返し例外を越境させない。終端かは
   `isTerminal()`。進捗の段階名は `dft-wasm` の `mod stage` と `progressFromEngine()` の 2 箇所に
   あり、ずれても落ちずカードが止まるだけなので `engine.test.ts` が実物の `.wasm` で照合する。
+- **段（`ModelLevel = 'shape' | 'measure'`）は識別子だけが境界を越える**（基底名は越えない）。写すのは
+  `dft-wasm` の `basis_for` だけで、省略＝`'shape'` もそこ 1 か所、**知らない名前はエラー**。段が違う結果は比べない。
 - **キャンセルは `terminate()` + 再生成。** 保持中の `Calculation`（密度）も消えるので等値面は
   SCF からやり直し（`hasDensityRef`）。等値面の要求は App で合流させる（`wantedRef`）。
 - **起動時に SIMD を判定**し、非対応なら Worker を作らず案内（`engineSupport.ts`）。初期化失敗も

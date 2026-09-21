@@ -1462,6 +1462,54 @@ Coulomb 項 `Σ D_μν D_λσ ∂(μν|λσ)` が bra 側と ket 側に分解で
     クーロン項）。**`git checkout` で戻した**。
   - `cargo test --workspace` は 190 件通過、50 秒（この機械、並列）。
 
+### V3-3 の実装メモ（段を wasm 境界と Worker の契約に通す、2026-09-21）
+
+- **形**: `dft-wasm` の `basis_for(level: Option<&str>)` が `"shape"` → `Sto3g`、`"measure"` →
+  `B631Gs` に写し、それ以外は `Err`（`unknown model level "…": expected "shape" or "measure"`）。
+  `scf(z, xyz, on_progress?, level?)` / `optimize(z, xyz, on_step, on_progress?, level?)`。
+  TS は `protocol.ts` の `ModelLevel = 'shape' | 'measure'`、`scf` / `optimize` のリクエストに
+  `level?: ModelLevel`、`DftWorkerClient` は `scf(z, xyz, onProgress?, level?)` /
+  `optimize(z, xyz, onStep, onProgress?, budgetMs?, level?)`。App と `search/` はまだ渡さない。
+- **`level` を末尾の省略可能な引数にした**: `on_progress` の前に置くと、既存の
+  `scf(z, xyz, listener)` がリスナーを段として渡してしまう。末尾なら `engine.test.ts` の既存の
+  呼び方も、dev-notes の Node の計測スクリプト（`scf(z, xyz)`）も書き換えずに動く。
+- **既定の `'shape'` を書くのは Rust の `basis_for` の 1 か所だけ**: Worker は `request.level` を
+  そのまま渡し、クライアントも埋めない（2 か所で既定を持つと食い違える）。wasm-bindgen の
+  `Option<String>` は `undefined` も `null` も `None` にする。空文字列はエラー。
+  「省略 = `'shape'`」は `engine.test.ts` が要約全体の `toEqual` で固定している。
+- **知らない段は何も報告しないうちに投げる**（`basis_for` を `build_molecule` と `PREPARING` より
+  前に呼ぶ）。wasm-bindgen の `Err(JsValue)` は **`Error` ではなく文字列が投げられる**ので、
+  Worker の `error instanceof Error ? … : String(error)` で `error` の応答になる（vitest の
+  `toThrow('…')` は文字列の例外もそのまま読める）。
+- **`'shape'` と省略が以前とビット単位で同じことの確かめ方**: HEAD の `.wasm`（`git show` で
+  scratchpad に出した）と新しい `.wasm` を同じ Node プロセスに載せ、プリセット 5 つ（H₂O・O₂・
+  NH₃・CH₄・C₆H₆）× `scf` / `optimize` で、**旧・新（省略）・新（`'shape'`）**の 3 つを比べた。
+  比べたのは要約全体・進捗と step の列・結合チャネルの等値面（0.002）の頂点で、数値は f64 の
+  ビット列にしてから比べた。**全部一致**。スクリプトは消した（`crates/dft-core/src` は触って
+  いないので、Rust 側の比較は要らない）。
+- **Node での値段**（1 回だけ。この機械は ±30% ぶれる。`engine.test.ts` の水、Node 25）:
+
+  | 何 | shape | measure |
+  | --- | --- | --- |
+  | 一点計算 | 0.16〜0.22 s（7 関数、−74.732061） | 0.41 s（19 関数、−75.844393） |
+  | 緩和 | 0.67〜0.79 s（4 歩、−74.743110） | 1.70 s（5 歩、−75.844985） |
+
+  足したテストは水の `measure` を最後まで緩和しても 2 秒弱で、既存の 60 秒の枠に収まる。
+  ベンゼンは上の比較のついでに `shape` で一点 4 秒・緩和 13 秒（等値面 1 枚込み、3 回分の合計を
+  3 で割った目安）。
+- **テスト**: `engine.test.ts` に 3 本（両方の段の関数の数 7 と 19 を殻から数えて比べる・
+  省略は `'shape'` と要約ごと同じ / `measure` の緩和は最後の歩まで 19 関数で、進捗の段階名は
+  既存の照合を通る / 知らない段 `'fast'`・`'Shape'`・`''` は `scf` も `optimize` も拒否し、何も
+  報告しない）。`workerClient.test.ts` に 1 本（段を載せる・省略なら載せない）。`npm test`
+  287 件（283 → 287）、`cargo test --workspace` 通過、lint の警告は触る前と同じ顔ぶれ。
+- **生成物**: API が変わったので `.wasm`・`.js`・`.d.ts`・`_bg.wasm.d.ts` の 4 つとも変わる。
+  最初の版は `.d.ts` の doc が非公開の `basis_for` を指していたので書き直してビルドし直した
+  （コメントだけでも生成物は変わる）。Mac のビルドなので CI が作り直してコミットする。
+- **手元で `.wasm` を回すとき**: `vitest run --root /` で scratchpad のテストを走らせると
+  ファイルシステム全体を舐めて戻ってこない（3.6 GiB 食って止まらなかった）。**Node 25 は型を
+  剥がして `.mts` を直接動かせる**ので、`web/src/wasm/dft_wasm.js` の `initSync` と
+  `molecules/presets.ts` をそのまま import する素のスクリプトのほうが速くて確実。
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
