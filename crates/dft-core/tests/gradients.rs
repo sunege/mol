@@ -51,8 +51,8 @@ fn solve(system: &System) -> ScfResult {
 }
 
 /// Energy of a geometry on a grid that is *not* rebuilt for it.
-fn frozen_grid_energy(molecule: &Molecule, grid: &MolecularGrid) -> f64 {
-    let system = System::build_with_grid(molecule.clone(), BasisKind::Sto3g, grid.clone()).unwrap();
+fn frozen_grid_energy(molecule: &Molecule, kind: BasisKind, grid: &MolecularGrid) -> f64 {
+    let system = System::build_with_grid(molecule.clone(), kind, grid.clone()).unwrap();
     solve(&system).energy
 }
 
@@ -117,14 +117,14 @@ fn distorted_methyl() -> Molecule {
 
 /// Compares the analytic gradient with a central difference of the fixed-grid
 /// energy and returns the worst disagreement, having asserted it is small.
-fn check(name: &str, molecule: Molecule) -> f64 {
+fn check(name: &str, molecule: Molecule, kind: BasisKind) -> f64 {
     let grid = grid::build(&molecule, QUALITY);
-    let system = System::build_with_grid(molecule.clone(), BasisKind::Sto3g, grid.clone()).unwrap();
+    let system = System::build_with_grid(molecule.clone(), kind, grid.clone()).unwrap();
     let result = solve(&system);
     let analytic = gradient::energy_gradient(&system, &result);
 
     let numeric = finite_difference::scalar(&molecule, finite_difference::DEFAULT_STEP, |m| {
-        frozen_grid_energy(m, &grid)
+        frozen_grid_energy(m, kind, &grid)
     });
     let worst = finite_difference::max_deviation(&analytic, &numeric);
     let scale = finite_difference::max_component(&numeric);
@@ -142,7 +142,16 @@ fn check(name: &str, molecule: Molecule) -> f64 {
 
 #[test]
 fn distorted_water_restricted() {
-    check("H2O singlet", distorted_water(1));
+    check("H2O singlet", distorted_water(1), BasisKind::Sto3g);
+}
+
+/// The same water in 6-31G*. `integrals::deriv` differences the d shells'
+/// one- and two-electron derivative integrals on a made-up basis and density;
+/// this is where they are differenced together with the exchange-correlation
+/// gradient and the Pulay term, in a real basis at a converged density.
+#[test]
+fn distorted_water_restricted_in_631gs() {
+    check("H2O singlet, 6-31G*", distorted_water(1), BasisKind::B631Gs);
 }
 
 /// The same nuclei solved unrestricted. Water is not a triplet, but solving it
@@ -151,22 +160,22 @@ fn distorted_water_restricted() {
 /// same finite-difference microscope as the restricted one.
 #[test]
 fn distorted_water_unrestricted() {
-    check("H2O triplet", distorted_water(3));
+    check("H2O triplet", distorted_water(3), BasisKind::Sto3g);
 }
 
 #[test]
 fn distorted_methane_restricted() {
-    check("CH4", distorted_methane());
+    check("CH4", distorted_methane(), BasisKind::Sto3g);
 }
 
 #[test]
 fn stretched_oxygen_unrestricted() {
-    check("O2 triplet", stretched_oxygen());
+    check("O2 triplet", stretched_oxygen(), BasisKind::Sto3g);
 }
 
 #[test]
 fn distorted_methyl_radical_unrestricted() {
-    check("CH3 doublet", distorted_methyl());
+    check("CH3 doublet", distorted_methyl(), BasisKind::Sto3g);
 }
 
 /// Moving every nucleus together cannot change the energy, so the gradient has

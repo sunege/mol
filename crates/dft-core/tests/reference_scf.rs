@@ -1,4 +1,4 @@
-//! SVWN5/STO-3G energies against PySCF.
+//! SVWN5 energies against PySCF, in both of the engine's bases.
 //!
 //! Three levels of check, deliberately separated so a failure localises itself:
 //!
@@ -12,20 +12,23 @@
 mod common;
 
 use common::{load, AtomicReferences, ScfReference};
-use dft_core::basis::BasisKind;
 use dft_core::grid::GridQuality;
 use dft_core::molecule::{Atom, Molecule};
 use dft_core::scf::{self, Occupation, ScfOptions, System};
 use nalgebra::DMatrix;
 
-/// Molecules with a reference density matrix, smallest first.
-const WITH_DENSITY: [&str; 6] = [
+/// Molecules with a reference density matrix: STO-3G smallest first, then
+/// 6-31G*. Each file names its basis, and the engine solves in that one.
+const WITH_DENSITY: [&str; 9] = [
     "scf_h2.json",
     "scf_h2o.json",
     "scf_ch4.json",
     "scf_nh3.json",
     "scf_h2s.json",
     "scf_co2.json",
+    "scf_h2o_631gs.json",
+    "scf_ch4_631gs.json",
+    "scf_nh3_631gs.json",
 ];
 
 /// How far the engine's own grid may sit from PySCF's essentially converged one
@@ -34,12 +37,17 @@ const WITH_DENSITY: [&str; 6] = [
 /// This is purely a statement about quadrature: the terms that do not involve the
 /// grid are checked at 1e-8 below, and `finer_grids_converge_towards_the_reference`
 /// shows the remaining gap shrinking as the grid is refined. The largest error at
-/// the default quality is 5e-5 Hartree, on H2S.
+/// the default quality is 5e-5 Hartree, on H2S (in 6-31G*, 1.7e-5 on CH4).
 const GRID_TOLERANCE: f64 = 1e-4;
 
 fn system_of(reference: &ScfReference) -> System {
-    System::build(reference.molecule(), BasisKind::Sto3g, GridQuality::Medium)
-        .expect("basis must cover the molecule")
+    let system = System::build(reference.molecule(), reference.kind(), GridQuality::Medium)
+        .expect("basis must cover the molecule");
+    // Six Cartesian d functions against five spherical ones: a 6-31G* reference
+    // made without `cart=True` is for a different basis, and this is where that
+    // shows.
+    assert_eq!(system.n_functions(), reference.nbf, "{}: basis size", reference.molecule);
+    system
 }
 
 #[test]
@@ -48,7 +56,6 @@ fn energy_terms_match_at_the_reference_density() {
         let reference: ScfReference = load(file);
         let system = system_of(&reference);
         let n = reference.nbf;
-        assert_eq!(system.n_functions(), n, "{file}: basis size");
 
         let flat = reference.density_matrix.as_ref().expect("reference density");
         let density = DMatrix::from_row_slice(n, n, flat);
@@ -142,21 +149,24 @@ fn orbital_energies_match_the_reference() {
 /// exactly, so it is checked against PySCF directly.
 #[test]
 fn closed_shell_atoms_match_the_reference() {
-    let references: AtomicReferences = load("scf_atoms.json");
-    for atom in &references.atoms {
-        let molecule = Molecule::new(vec![Atom { z: atom.z, pos: [0.0; 3] }]).unwrap();
-        let system = System::build(molecule, BasisKind::Sto3g, GridQuality::Fine).unwrap();
-        let options =
-            ScfOptions { occupation: Occupation::SphericalAverage, ..ScfOptions::default() };
-        let result = scf::run_restricted(&system, &options);
-        assert!(result.converged, "{}: SCF did not converge", atom.symbol);
-        assert!(
-            (result.energy - atom.energy).abs() < GRID_TOLERANCE,
-            "{}: {} Ha, reference {} Ha",
-            atom.symbol,
-            result.energy,
-            atom.energy
-        );
+    for file in ["scf_atoms.json", "scf_atoms_631gs.json"] {
+        let references: AtomicReferences = load(file);
+        for atom in &references.atoms {
+            let molecule = Molecule::new(vec![Atom { z: atom.z, pos: [0.0; 3] }]).unwrap();
+            let system = System::build(molecule, references.kind(), GridQuality::Fine).unwrap();
+            assert_eq!(system.n_functions(), atom.nbf, "{file}: {}: basis size", atom.symbol);
+            let options =
+                ScfOptions { occupation: Occupation::SphericalAverage, ..ScfOptions::default() };
+            let result = scf::run_restricted(&system, &options);
+            assert!(result.converged, "{file}: {}: SCF did not converge", atom.symbol);
+            assert!(
+                (result.energy - atom.energy).abs() < GRID_TOLERANCE,
+                "{file}: {}: {} Ha, reference {} Ha",
+                atom.symbol,
+                result.energy,
+                atom.energy
+            );
+        }
     }
 }
 
@@ -170,7 +180,7 @@ fn finer_grids_converge_towards_the_reference() {
         let flat = reference.density_matrix.as_ref().expect("reference density");
         let density = DMatrix::from_row_slice(n, n, flat);
         let error = |quality: GridQuality| {
-            let system = System::build(reference.molecule(), BasisKind::Sto3g, quality).unwrap();
+            let system = System::build(reference.molecule(), reference.kind(), quality).unwrap();
             let (terms, _, _) = scf::energy_and_fock(&system, &density);
             (terms.total() - reference.energy).abs()
         };
@@ -185,6 +195,7 @@ fn finer_grids_converge_towards_the_reference() {
             "{file}: medium {medium:e} did not improve on {coarse:e}"
         );
         assert!(fine < medium.max(floor), "{file}: fine {fine:e} did not improve on {medium:e}");
+        // The closest to this is CH4 in 6-31G*, at 6.7e-6.
         assert!(fine < 1e-5, "{file}: fine grid error {fine:e} is too large");
     }
 }

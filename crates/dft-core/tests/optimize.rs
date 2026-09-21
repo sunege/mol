@@ -1,11 +1,11 @@
 //! Geometry optimisation: does it stop, does it stop in the right place, and
 //! does it produce something to watch on the way.
 //!
-//! "The right place" is decided from outside the engine. `gradients.json` holds
-//! structures relaxed by scipy's BFGS over PySCF energies and gradients - a
-//! different minimiser over a different program - so agreeing with it means two
-//! independent routes found the same minimum, not that this one is
-//! self-consistent.
+//! "The right place" is decided from outside the engine. `gradients.json` (and,
+//! for 6-31G*, `gradients_631gs.json`) holds structures relaxed by scipy's BFGS
+//! over PySCF energies and gradients - a different minimiser over a different
+//! program - so agreeing with it means two independent routes found the same
+//! minimum, not that this one is self-consistent.
 
 mod common;
 
@@ -25,9 +25,14 @@ const BOND_TOLERANCE: f64 = 5e-3;
 /// Degrees, for the same reason.
 const ANGLE_TOLERANCE: f64 = 0.5;
 
+/// The two files with relaxed structures, one per basis. Each names its basis,
+/// and the engine relaxes in that one.
+const STO3G: &str = "gradients.json";
+const B631GS: &str = "gradients_631gs.json";
+
 /// Relaxes a molecule, collecting the geometries it emitted.
-fn relax(molecule: Molecule) -> (opt::Relaxation, Vec<Vec<f64>>) {
-    let system = System::build(molecule, BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
+fn relax(molecule: Molecule, kind: BasisKind) -> (opt::Relaxation, Vec<Vec<f64>>) {
+    let system = System::build(molecule, kind, OPTIMIZER_GRID).unwrap();
     let mut trajectory = Vec::new();
     let relaxation = opt::relax(
         system,
@@ -53,20 +58,30 @@ fn distorted_water() -> Molecule {
 }
 
 fn water_reference() -> Molecule {
-    let references: GradientReferences = common::load("gradients.json");
+    let references: GradientReferences = common::load(STO3G);
     references.relaxed("h2o").starting_molecule(&[8, 1, 1])
 }
 
 #[test]
 fn water_relaxes_to_the_structure_pyscf_finds() {
-    let references: GradientReferences = common::load("gradients.json");
-    let reference = references.relaxed("h2o");
-    let (relaxation, trajectory) = relax(reference.starting_molecule(&[8, 1, 1]));
+    water_relaxes_as_pyscf_says(STO3G);
+}
 
-    assert_eq!(relaxation.status, Status::Converged, "{} steps", relaxation.steps);
+#[test]
+fn water_relaxes_to_the_structure_pyscf_finds_in_631gs() {
+    water_relaxes_as_pyscf_says(B631GS);
+}
+
+fn water_relaxes_as_pyscf_says(file: &str) {
+    let references: GradientReferences = common::load(file);
+    let reference = references.relaxed("h2o");
+    let (relaxation, trajectory) =
+        relax(reference.starting_molecule(&[8, 1, 1]), references.kind());
+
+    assert_eq!(relaxation.status, Status::Converged, "{file}: {} steps", relaxation.steps);
     assert!(
         relaxation.max_force < Options::default().max_force,
-        "stopped with a force of {:.3e}",
+        "{file}: stopped with a force of {:.3e}",
         relaxation.max_force
     );
 
@@ -75,34 +90,34 @@ fn water_relaxes_to_the_structure_pyscf_finds() {
         let got = bond_length(relaxed, 0, i + 1);
         assert!(
             (got - expected).abs() < BOND_TOLERANCE,
-            "O-H {} came out at {got:.5} Bohr against PySCF's {expected:.5}",
+            "{file}: O-H {} came out at {got:.5} Bohr against PySCF's {expected:.5}",
             i + 1
         );
     }
     let angle = bond_angle(relaxed, 1, 0, 2);
     assert!(
         (angle - reference.angle_1_0_2).abs() < ANGLE_TOLERANCE,
-        "H-O-H came out at {angle:.3} degrees against PySCF's {:.3}",
+        "{file}: H-O-H came out at {angle:.3} degrees against PySCF's {:.3}",
         reference.angle_1_0_2
     );
     assert!(
         (relaxation.energy() - reference.energy).abs() < 1e-4,
-        "energy {} against PySCF's {}",
+        "{file}: energy {} against PySCF's {}",
         relaxation.energy(),
         reference.energy
     );
 
     // And there is something to watch: the starting structure plus at least a
     // few moves. One frame would be a correct answer and a blank animation.
-    assert!(trajectory.len() >= 3, "only {} frames", trajectory.len());
+    assert!(trajectory.len() >= 3, "{file}: only {} frames", trajectory.len());
     assert_eq!(trajectory.len(), relaxation.steps + 1);
 }
 
 #[test]
 fn methane_relaxes_to_the_structure_pyscf_finds() {
-    let references: GradientReferences = common::load("gradients.json");
+    let references: GradientReferences = common::load(STO3G);
     let reference = references.relaxed("ch4");
-    let (relaxation, _) = relax(reference.starting_molecule(&[6, 1, 1, 1, 1]));
+    let (relaxation, _) = relax(reference.starting_molecule(&[6, 1, 1, 1, 1]), references.kind());
 
     assert_eq!(relaxation.status, Status::Converged);
     let relaxed = &relaxation.system.molecule;
@@ -125,28 +140,42 @@ fn methane_relaxes_to_the_structure_pyscf_finds() {
 /// where they think they go.
 #[test]
 fn a_distorted_start_reaches_the_same_minimum() {
-    let references: GradientReferences = common::load("gradients.json");
-    let reference = references.relaxed("h2o");
-    let (relaxation, trajectory) = relax(distorted_water());
+    distorted_water_reaches_pyscfs_minimum(STO3G);
+}
 
-    assert_eq!(relaxation.status, Status::Converged, "{} steps", relaxation.steps);
+#[test]
+fn a_distorted_start_reaches_the_same_minimum_in_631gs() {
+    distorted_water_reaches_pyscfs_minimum(B631GS);
+}
+
+fn distorted_water_reaches_pyscfs_minimum(file: &str) {
+    let references: GradientReferences = common::load(file);
+    let reference = references.relaxed("h2o");
+    let (relaxation, trajectory) = relax(distorted_water(), references.kind());
+
+    assert_eq!(relaxation.status, Status::Converged, "{file}: {} steps", relaxation.steps);
     let relaxed = &relaxation.system.molecule;
     for i in 1..=2 {
         let got = bond_length(relaxed, 0, i);
         let expected = reference.bonds_from_first_atom[i - 1];
         assert!(
             (got - expected).abs() < BOND_TOLERANCE,
-            "O-H {i} came out at {got:.5} Bohr against PySCF's {expected:.5}"
+            "{file}: O-H {i} came out at {got:.5} Bohr against PySCF's {expected:.5}"
         );
     }
-    assert!((bond_angle(relaxed, 1, 0, 2) - reference.angle_1_0_2).abs() < ANGLE_TOLERANCE);
+    let angle = bond_angle(relaxed, 1, 0, 2);
+    assert!(
+        (angle - reference.angle_1_0_2).abs() < ANGLE_TOLERANCE,
+        "{file}: H-O-H came out at {angle:.3} degrees against PySCF's {:.3}",
+        reference.angle_1_0_2
+    );
     // The two O-H bonds started 0.008 Bohr apart and have to end up equal: the
     // minimum is symmetric even though nothing on the way there was.
     assert!(
         (bond_length(relaxed, 0, 1) - bond_length(relaxed, 0, 2)).abs() < 1e-3,
-        "the relaxed structure is not symmetric"
+        "{file}: the relaxed structure is not symmetric"
     );
-    assert!(trajectory.len() >= 4, "only {} frames to animate", trajectory.len());
+    assert!(trajectory.len() >= 4, "{file}: only {} frames to animate", trajectory.len());
 }
 
 /// Every accepted step goes downhill. The optimiser rejects and shortens a step
@@ -289,7 +318,16 @@ fn oxygen_relaxes_as_a_triplet_throughout() {
 /// A structure that is already relaxed stops at once rather than wandering.
 #[test]
 fn an_already_relaxed_structure_converges_immediately() {
-    let references: GradientReferences = common::load("gradients.json");
+    stays_where_pyscf_relaxed_it(STO3G);
+}
+
+#[test]
+fn an_already_relaxed_structure_converges_immediately_in_631gs() {
+    stays_where_pyscf_relaxed_it(B631GS);
+}
+
+fn stays_where_pyscf_relaxed_it(file: &str) {
+    let references: GradientReferences = common::load(file);
     let reference = references.relaxed("h2o");
     let atoms = (0..3)
         .map(|i| Atom {
@@ -302,11 +340,11 @@ fn an_already_relaxed_structure_converges_immediately() {
         })
         .collect();
     let system =
-        System::build(Molecule::new(atoms).unwrap(), BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
+        System::build(Molecule::new(atoms).unwrap(), references.kind(), OPTIMIZER_GRID).unwrap();
     let relaxation =
         opt::relax(system, &Options::default(), None, &mut |_| true, &mut |_| {});
-    assert_eq!(relaxation.status, Status::Converged);
-    assert_eq!(relaxation.steps, 0, "a relaxed structure was moved anyway");
+    assert_eq!(relaxation.status, Status::Converged, "{file}");
+    assert_eq!(relaxation.steps, 0, "{file}: a relaxed structure was moved anyway");
 }
 
 /// What a relaxation told its caller, in the order it said it.

@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use dft_core::basis::{BasisSet, Shell};
+use dft_core::basis::{BasisKind, BasisSet, Shell};
 use dft_core::molecule::{Atom, Molecule};
 use serde::Deserialize;
 
@@ -51,10 +51,22 @@ pub struct IntegralReference {
     pub eri_samples: Vec<EriSample>,
 }
 
-/// Converged SVWN5/STO-3G results with the energy broken down term by term.
+/// The engine's basis for the name PySCF was given. Anything else is a reference
+/// this engine cannot reproduce, and says so rather than falling back to one.
+pub fn basis_kind(name: &str) -> BasisKind {
+    match name {
+        "sto-3g" => BasisKind::Sto3g,
+        "6-31G*" => BasisKind::B631Gs,
+        other => panic!("no engine basis for the reference basis {other:?}"),
+    }
+}
+
+/// Converged SVWN5 results with the energy broken down term by term.
 #[derive(Debug, Deserialize)]
 pub struct ScfReference {
     pub molecule: String,
+    /// PySCF's name for the basis; [`ScfReference::kind`] is the engine's.
+    pub basis: String,
     pub atoms: Vec<RefAtom>,
     pub n_electrons: usize,
     pub nbf: usize,
@@ -83,7 +95,14 @@ pub struct AtomReference {
 
 #[derive(Debug, Deserialize)]
 pub struct AtomicReferences {
+    pub basis: String,
     pub atoms: Vec<AtomReference>,
+}
+
+impl AtomicReferences {
+    pub fn kind(&self) -> BasisKind {
+        basis_kind(&self.basis)
+    }
 }
 
 /// One open-shell (or, for a comparison case, closed-shell) reference solved
@@ -187,6 +206,8 @@ pub struct RelaxedReference {
 
 #[derive(Debug, Deserialize)]
 pub struct GradientReferences {
+    /// PySCF's name for the basis every case and structure here was solved in.
+    pub basis: String,
     /// Whether PySCF included the grid response. It does not, which is the same
     /// approximation the engine makes.
     pub grid_response: bool,
@@ -195,6 +216,10 @@ pub struct GradientReferences {
 }
 
 impl GradientReferences {
+    pub fn kind(&self) -> BasisKind {
+        basis_kind(&self.basis)
+    }
+
     pub fn case(&self, key: &str) -> &GradientReference {
         self.cases
             .iter()
@@ -307,6 +332,10 @@ impl ScfReference {
     pub fn molecule(&self) -> Molecule {
         let atoms = self.atoms.iter().map(|a| Atom { z: a.z, pos: a.pos }).collect();
         Molecule::new(atoms).expect("reference geometry must be valid")
+    }
+
+    pub fn kind(&self) -> BasisKind {
+        basis_kind(&self.basis)
     }
 
     /// Quadrature spread of the reference itself, a floor on any comparison.

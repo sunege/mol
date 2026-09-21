@@ -1,0 +1,41 @@
+{
+ "atoms": [
+  {
+   "energy": -2.826697740789048,
+   "n_electrons": 2,
+   "nbf": 2,
+   "symbol": "He",
+   "z": 2
+  },
+  {
+   "energy": -14.442025497105698,
+   "n_electrons": 4,
+   "nbf": 15,
+   "symbol": "Be",
+   "z": 4
+  },
+  {
+   "energy": -128.14190167802286,
+   "n_electrons": 10,
+   "nbf": 15,
+   "symbol": "Ne",
+   "z": 10
+  },
+  {
+   "energy": -199.11016344178526,
+   "n_electrons": 12,
+   "nbf": 19,
+   "symbol": "Mg",
+   "z": 12
+  },
+  {
+   "energy": -525.8895873467485,
+   "n_electrons": 18,
+   "nbf": 19,
+   "symbol": "Ar",
+   "z": 18
+  }
+ ],
+ "basis": "6-31G*",
+ "functional": "lda,vwn5"
+}

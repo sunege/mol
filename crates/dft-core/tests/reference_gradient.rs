@@ -14,7 +14,6 @@
 mod common;
 
 use common::GradientReferences;
-use dft_core::basis::BasisKind;
 use dft_core::gradient::{self, finite_difference};
 use dft_core::opt::OPTIMIZER_GRID;
 use dft_core::scf::{self, ScfOptions, ScfResult, System};
@@ -24,7 +23,8 @@ use dft_core::scf::{self, ScfOptions, ScfResult, System};
 /// gradient is the term that notices. Measured, the worst case is 1.5e-6 for
 /// water and 1.2e-5 for methane, against forces of around 0.08 Hartree/Bohr -
 /// so this is a few parts in ten thousand, and a twentieth of the force at
-/// which the optimiser stops.
+/// which the optimiser stops. 6-31G* is no worse: 4.5e-6 for water, 1.2e-5 at
+/// most (the methyl radical).
 const TOLERANCE: f64 = 2e-5;
 
 fn tight() -> ScfOptions {
@@ -48,23 +48,32 @@ fn solve(system: &System) -> ScfResult {
 
 #[test]
 fn analytic_gradients_match_pyscf() {
-    let references: GradientReferences = common::load("gradients.json");
+    check("gradients.json");
+}
+
+#[test]
+fn analytic_gradients_match_pyscf_in_631gs() {
+    check("gradients_631gs.json");
+}
+
+fn check(file: &str) {
+    let references: GradientReferences = common::load(file);
     assert!(
         !references.grid_response,
-        "PySCF included the grid response, which the engine does not: the two \
-         are no longer computing the same quantity"
+        "{file}: PySCF included the grid response, which the engine does not: the \
+         two are no longer computing the same quantity"
     );
 
     for case in &references.cases {
         let molecule = case.molecule();
-        let system = System::build(molecule, BasisKind::Sto3g, OPTIMIZER_GRID).unwrap();
+        let system = System::build(molecule, references.kind(), OPTIMIZER_GRID).unwrap();
         let result = solve(&system);
 
         // The energies have to agree first; a gradient comparison on top of a
         // wrong energy says nothing.
         assert!(
             (result.energy - case.energy).abs() < 1e-4,
-            "{}: energy {} against PySCF's {}",
+            "{file}: {}: energy {} against PySCF's {}",
             case.key,
             result.energy,
             case.energy
@@ -75,11 +84,11 @@ fn analytic_gradients_match_pyscf() {
         let scale = finite_difference::max_component(&case.gradient);
         assert!(
             worst < TOLERANCE,
-            "{}: gradient differs from PySCF by {worst:.3e} (largest component \
-             {scale:.4} Ha/Bohr)\nengine {analytic:?}\npyscf  {:?}",
+            "{file}: {}: gradient differs from PySCF by {worst:.3e} (largest \
+             component {scale:.4} Ha/Bohr)\nengine {analytic:?}\npyscf  {:?}",
             case.key,
             case.gradient
         );
-        assert!(scale > 1e-3, "{}: the reference gradient is empty", case.key);
+        assert!(scale > 1e-3, "{file}: {}: the reference gradient is empty", case.key);
     }
 }

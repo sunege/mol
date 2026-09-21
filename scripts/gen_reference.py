@@ -370,17 +370,45 @@ GEOMETRIES = {
 }
 
 
-def build_mol(name: str, basis: str = "sto-3g", cart: bool = False, spin: int = 0):
+def make_mol(atoms, unit: str, basis: str, cart: bool, spin: int):
+    """One neutral PySCF molecule, refusing a basis the engine would build differently.
+
+    The engine builds every shell from Cartesian functions. For s and p shells
+    that is the same thing as PySCF's default spherical ones, which is why the
+    STO-3G references use `cart=False`; but a d shell has six Cartesian
+    functions and five spherical ones, so a 6-31G* reference made without
+    `cart=True` would be for a different basis (benzene: 102 functions
+    against 96).
+    """
     mol = gto.Mole()
-    mol.atom = [(sym, pos) for sym, pos in GEOMETRIES[name]]
+    mol.atom = atoms
     mol.basis = basis
-    mol.unit = "Angstrom"
+    mol.unit = unit
     mol.cart = cart
     mol.spin = spin
     mol.charge = 0
     mol.verbose = 0
     mol.build()
+    assert cart or all(mol.bas_angular(i) < 2 for i in range(mol.nbas)), (
+        f"{basis} has d shells and the engine's are Cartesian: pass cart=True"
+    )
     return mol
+
+
+def build_mol(name: str, basis: str = "sto-3g", cart: bool = False, spin: int = 0):
+    atoms = [(sym, pos) for sym, pos in GEOMETRIES[name]]
+    return make_mol(atoms, "Angstrom", basis, cart, spin)
+
+
+def engine_normalisation(mol):
+    """Factors taking PySCF's AO functions to the engine's.
+
+    libcint normalises a Cartesian shell as a whole, so with `cart=True` the d
+    functions do not have unit self-overlap (<xx|xx> = 3 <xy|xy>). The engine
+    normalises every Cartesian function individually: engine function i is
+    PySCF's times `scale[i]`. For s and p the factors are 1 to rounding.
+    """
+    return 1.0 / np.sqrt(np.diag(mol.intor("int1e_ovlp")))
 
 
 def shell_defs(mol) -> list[dict]:
@@ -419,11 +447,9 @@ def sample_eri(eri, count: int) -> list[dict]:
 
 def integral_reference(key: str, name: str, basis: str, cart: bool, full_eri: bool):
     mol = build_mol(name, basis=basis, cart=cart)
-    # libcint normalises a Cartesian shell as a whole, so with `cart=True` the
-    # d functions do not have unit self-overlap (<xx|xx> = 3 <xy|xy>). The engine
-    # normalises every Cartesian function individually, so scale the reference
-    # matrices into that convention here; for s and p the factors are all 1.
-    scale = 1.0 / np.sqrt(np.diag(mol.intor("int1e_ovlp")))
+    # Matrices over basis functions go into the engine's convention here, so the
+    # Rust test compares element for element.
+    scale = engine_normalisation(mol)
 
     def one(name_: str):
         return flat(mol.intor(name_) * scale[:, None] * scale[None, :])
@@ -458,8 +484,10 @@ def integral_reference(key: str, name: str, basis: str, cart: bool, full_eri: bo
     dump(f"integrals_{key}.json", payload)
 
 
-def scf_reference(key: str, name: str, with_density: bool = True):
-    mol = build_mol(name)
+def scf_reference(
+    key: str, name: str, with_density: bool = True, basis: str = "sto-3g", cart: bool = False
+):
+    mol = build_mol(name, basis=basis, cart=cart)
     mf = dft.RKS(mol)
     mf.xc = "lda,vwn5"
     mf.grids.level = REFERENCE_GRID_LEVEL
@@ -468,9 +496,16 @@ def scf_reference(key: str, name: str, with_density: bool = True):
     assert mf.converged, f"{name} did not converge"
 
     dm = mf.make_rdm1()
+    if cart:
+        # The density's coefficients go the opposite way to a matrix of
+        # integrals, so that the energy (a trace of the two) stays the same.
+        # Spherical s and p functions are left alone: their factors are 1 to
+        # rounding, and applying them would move the STO-3G files by an ulp.
+        scale = engine_normalisation(mol)
+        dm = dm / scale[:, None] / scale[None, :]
     payload = {
         "molecule": name,
-        "basis": "sto-3g",
+        "basis": basis,
         "functional": "lda,vwn5",
         # Bohr, so the Rust test rebuilds exactly this geometry.
         "atoms": [
@@ -507,16 +542,11 @@ def scf_reference(key: str, name: str, with_density: bool = True):
     dump(f"scf_{key}.json", payload)
 
 
-def atomic_reference():
+def atomic_reference(filename: str = "scf_atoms.json", basis: str = "sto-3g", cart: bool = False):
     """Closed-shell atoms: a spherical atomic solver must reproduce these exactly."""
     out = []
     for symbol in ("He", "Be", "Ne", "Mg", "Ar"):
-        mol = gto.Mole()
-        mol.atom = [(symbol, (0.0, 0.0, 0.0))]
-        mol.basis = "sto-3g"
-        mol.spin = 0
-        mol.verbose = 0
-        mol.build()
+        mol = make_mol([(symbol, (0.0, 0.0, 0.0))], "Angstrom", basis, cart, 0)
         mf = dft.RKS(mol)
         mf.xc = "lda,vwn5"
         mf.grids.level = REFERENCE_GRID_LEVEL
@@ -532,7 +562,7 @@ def atomic_reference():
                 "energy": energy,
             }
         )
-    dump("scf_atoms.json", {"functional": "lda,vwn5", "basis": "sto-3g", "atoms": out})
+    dump(filename, {"functional": "lda,vwn5", "basis": basis, "atoms": out})
 
 
 # --------------------------------------------------------------------------
@@ -691,10 +721,12 @@ def _analytic_gradient(mf):
     return grad.kernel()
 
 
-def gradient_reference() -> None:
+def gradient_reference(
+    filename: str, basis: str, cart: bool, relaxed: list[tuple[str, int]]
+) -> None:
     cases = []
     for key, name, multiplicity in GRADIENT_CASES:
-        mol = build_mol(name, spin=multiplicity - 1)
+        mol = build_mol(name, basis=basis, cart=cart, spin=multiplicity - 1)
         mf, energy = _mean_field(mol)
         gradient = _analytic_gradient(mf)
         cases.append(
@@ -715,26 +747,29 @@ def gradient_reference() -> None:
         )
 
     dump(
-        "gradients.json",
+        filename,
         {
             "functional": "lda,vwn5",
-            "basis": "sto-3g",
+            "basis": basis,
             "grid_level": REFERENCE_GRID_LEVEL,
             "grid_response": False,
             "source": "pyscf mf.nuc_grad_method().kernel()",
             "cases": cases,
-            "relaxed": [relaxed_geometry("h2o", 1), relaxed_geometry("ch4", 1)],
+            "relaxed": [
+                relaxed_geometry(name, multiplicity, basis, cart)
+                for name, multiplicity in relaxed
+            ],
         },
     )
 
 
-def relaxed_geometry(name: str, multiplicity: int) -> dict:
+def relaxed_geometry(name: str, multiplicity: int, basis: str, cart: bool) -> dict:
     """Minimises the energy with scipy's BFGS over PySCF energies and gradients.
 
-    Deliberately not PySCF's own geometry optimiser: geomeTRIC and pyberny are
-    not installed, and an independent optimiser over an independent engine is a
-    better reference anyway - if the Rust optimiser lands on the same structure,
-    two different minimisers agreed about where the minimum is.
+    Deliberately not PySCF's own geometry optimiser: an independent optimiser
+    over an independent engine is the better reference - if the Rust optimiser
+    lands on the same structure, two different minimisers agreed about where the
+    minimum is.
     """
     from scipy.optimize import minimize
 
@@ -742,18 +777,11 @@ def relaxed_geometry(name: str, multiplicity: int) -> dict:
     symbols = [symbol for symbol, _ in template]
 
     def build(flat_bohr):
-        mol = gto.Mole()
-        mol.atom = [
+        atoms = [
             (symbol, tuple(flat_bohr[3 * i : 3 * i + 3]))
             for i, symbol in enumerate(symbols)
         ]
-        mol.basis = "sto-3g"
-        mol.unit = "Bohr"
-        mol.spin = multiplicity - 1
-        mol.charge = 0
-        mol.verbose = 0
-        mol.build()
-        return mol
+        return make_mol(atoms, "Bohr", basis, cart, multiplicity - 1)
 
     def objective(flat_bohr):
         mf, energy = _mean_field(build(flat_bohr))
@@ -832,7 +860,16 @@ def main() -> None:
     scf_reference("benzene", "benzene", with_density=False)
     atomic_reference()
     open_shell_reference()
-    gradient_reference()
+    gradient_reference("gradients.json", "sto-3g", False, [("h2o", 1), ("ch4", 1)])
+
+    # 6-31G*, the basis of the "measure the shape" level. Benzene is left out:
+    # one 6-31G* SCF of it takes the engine about 10 s and the tests solve each
+    # file several times, while water, methane and ammonia already put the d
+    # shell on three different first-row atoms (the atoms add Mg and Ar).
+    for name in ("h2o", "ch4", "nh3"):
+        scf_reference(f"{name}_631gs", name, basis="6-31G*", cart=True)
+    atomic_reference("scf_atoms_631gs.json", "6-31G*", cart=True)
+    gradient_reference("gradients_631gs.json", "6-31G*", True, [("h2o", 1)])
 
 
 if __name__ == "__main__":
