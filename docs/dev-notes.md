@@ -1397,6 +1397,71 @@ Coulomb 項 `Σ D_μν D_λσ ∂(μν|λσ)` が bra 側と ket 側に分解で
   - **揺れただけの JSON はコミットせず `git checkout` で戻した**（このチケットでは参照値を作り直す
     理由が無い）。V3-2 のチケットの「差分なしで再現」は、この事実に合わせて書き直した。
 
+### V3-2 の実装メモ（6-31G\* の参照値とテスト、2026-09-21）
+
+- **足した生成物**（すべて `cart=True`、`lda,vwn5`、level 9）: `scf_{h2o,ch4,nh3}_631gs.json`・
+  `scf_atoms_631gs.json`（He・Be・Ne・Mg・Ar）・`gradients_631gs.json`（`GRADIENT_CASES` の 4 つ
+  と、緩和した水）。水の緩和構造は v3-0 と同じ r(OH) 0.9762 Å / ∠HOH 103.65°。
+  **原子はチケットに無かったが足した**: SAD の原子ソルバーを 6-31G\* で PySCF と比べる場所が
+  ほかに無く、第 3 周期（Mg・Ar）の 6-31G\* を SCF で通すのもここだけ（数秒）。ベンゼンは
+  入れない。
+- **6-31G\* の勾配と緩和は `gradients.json` に足さず別ファイルにした**: 足すと `gradients.json`
+  を書き直すことになり、STO-3G の値の揺れ（V3-1 の節）も一緒に入る。ファイルごとに基底が 1 つで、
+  最上位の `"basis"` をテストが読む。
+- **生成器**: PySCF の `Mole` を組むのは `make_mol()` 1 か所にし、**d 殻があるのに `cart=False`
+  なら assert で止まる**（チケットの「`cart=True` の渡し忘れ」は起こせない）。止まることは確かめた。
+  `scf_reference` / `atomic_reference` / `gradient_reference` / `relaxed_geometry` が基底と
+  `cart` を取る。`relaxed_geometry` の docstring の「geomeTRIC が入っていない」は今の venv では
+  誤りなので消した（入っている。使わない理由は変わらない）。
+- **SCF の密度行列はエンジンの規格化に直して書く**: libcint は Cartesian 殻をまとめて規格化する
+  ので（`integral_reference` と同じ話）、`D_engine = D_pyscf / (s_i s_j)`（`s` は
+  `engine_normalisation()`、積分行列とは逆向き）。直さないとコアエネルギーが 2.6e-2 Ha ずれる
+  （許容 1e-8）。直すと 1.8e-13。**STO-3G では直さない**: 球面の s・p の自己重なりは 1 ちょうど
+  ではなく（最大 4e-16 ずれる）、掛けると STO-3G の密度が ulp だけ動く。
+- **Rust**: `common::basis_kind()` が `"sto-3g"` / `"6-31G*"` を `BasisKind` に写し（それ以外は
+  panic）、`ScfReference`・`AtomicReferences`・`GradientReferences` が `basis` を読む。テストは
+  ファイルの基底で解く。`system_of()` は関数の数を参照の `nbf` と照らす（5D と 6D の取り違えは
+  ここで分かる）。
+- **両方の基底で回るようになったテスト**: `reference_scf.rs` 全部（6-31G\* の 3 分子と原子。
+  ベンゼンは STO-3G だけ）、`reference_gradient.rs`（`_in_631gs`）、`optimize.rs` の水の 3 本
+  （PySCF の構造へ緩和する / ゆがめた水から同じ谷へ / 緩和済みなら 0 歩）、`gradients.rs` の
+  有限差分（`distorted_water_restricted_in_631gs`。d 殻の積分の微分は `integrals::deriv` が
+  作り物の基底で見ているが、XC 勾配と Pulay 項まで含めて実基底で差分を取るのはこれだけ）。
+  メタンの緩和・開殻・探索のロジックの試験は STO-3G のまま。
+- **6-31G\* の余裕**（エンジン対 PySCF。STO-3G の既存の最悪値と並べる）:
+
+  | 何 | 6-31G\* の最悪 | STO-3G の最悪 | 許容 |
+  | --- | --- | --- | --- |
+  | 参照密度でのコア・クーロン | 1.8e-13 | 5.7e-13 | 1e-8 |
+  | Medium の全エネルギー | 1.7e-5（CH₄） | 5.2e-5（H₂S） | 1e-4 |
+  | Fine の全エネルギー | 6.7e-6（CH₄） | 6.2e-6（CH₄） | 1e-5 |
+  | 軌道エネルギー | 1.3e-5 | 2.7e-5 | 1e-4 |
+  | 電子数 | 9.6e-5 | 1.7e-4 | 5e-4 |
+  | 閉殻原子 | 1.6e-7（Ar） | 9.0e-8（Ar） | 1e-4 |
+  | 勾配の有限差分（水） | 2.3e-9 | 1.8e-9 | 1e-6 |
+  | 勾配 対 PySCF | 1.2e-5（CH₃） | 1.2e-5（CH₄） | 2e-5 |
+  | 緩和した水の O–H / 角 | 2e-4 Bohr / 0.018° | 3e-6 Bohr / 3e-4° | 5e-3 / 0.5° |
+
+  一番狭いのは Fine の CH₄（許容の 2/3。STO-3G の CH₄ とほぼ同じ）と、勾配の CH₃（6/10、
+  STO-3G の CH₄ と同じ）。緩和の差が
+  STO-3G より 2 桁大きいのは、最適化の停止判定（力 4.5e-4）の内側のどこで止まるかの差で、PySCF の
+  最小点での力は 7.7e-6 しかない（「緩和済みなら 0 歩」が通る）。**基底の取り違えは緩和で必ず
+  落ちる**: 水の谷は 2 つの基底で O–H が 0.10 Bohr（許容の 20 倍）、角が 7° 違う。
+  SCF の回数は 6-31G\* で 8〜9 回（STO-3G 6〜8 回）、原子は Mg・Ar が 4 回（STO-3G 2 回）。
+- **`src/` の非テストのコードは触っていない**ので、STO-3G の結果が動かないのは構造上そう
+  （ビット列の比較は不要）。`npm run build:wasm` も不要。
+- **`gen_reference.py` を丸ごと回した結果**: **6 分 44 秒**（V3-1 の 4 分半に 6-31G\* の分が
+  約 2 分半足された）。
+  - **バイト単位で同じ**: V3-1 と同じ顔ぶれ（表 2 つ・Lebedev・`xc_lda`・`integrals_*` 全部・
+    `scf_h2`・`scf_open_shell`・`units.json`）。生成器の書き換え（`make_mol` など）で STO-3G の
+    出力は変わっていない。
+  - **足した 6-31G\* の 5 ファイルは、単独で回したときと丸ごと回したときでバイト単位で同じ**
+    （先に何を解いたかに左右されていない。2 回しか見ていないので「決定的」とまでは言わない）。
+  - **揺れたのは V3-1 と同じ 8 ファイル**（`scf_{h2o,ch4,nh3,h2s,co2,benzene,atoms}`・
+    `gradients.json`）。最大は CO₂ の密度行列の 5.3e-11、エネルギーでは 1.5e-11 Ha（H₂O の
+    クーロン項）。**`git checkout` で戻した**。
+  - `cargo test --workspace` は 190 件通過、50 秒（この機械、並列）。
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は

@@ -39,7 +39,9 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   Browser ペインは非表示だと間引かれ、この機械（2 物理コア）は同じバイナリでも **±30% ぶれる**
   ので複数回の最小値で判断する。**WASM の高速化は WASM のプロファイルで決める**（内訳は
   ネイティブとまるで違う）。手順は dev-notes「コマンドの詳細」。
-- 参照値の再生成（`scripts/gen_reference.py`、PySCF）は基底・汎関数を変えるときだけ。
+- 参照値の再生成（`scripts/gen_reference.py`、PySCF）は基底・汎関数を変えるときだけ。丸ごと
+  回すと SCF の JSON が収束ノイズ（< 1e-10）だけ揺れるので、**意図して変えたファイル以外は
+  `git checkout` で戻す**（揺れる顔ぶれは dev-notes「V3-2 の実装メモ」）。
 
 ## 構成
 
