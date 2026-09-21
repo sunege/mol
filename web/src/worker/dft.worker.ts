@@ -91,7 +91,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         // Timed here rather than in Rust: `std::time::Instant` is not available
         // on wasm32-unknown-unknown.
         const started = performance.now();
-        const calculation = scf(request.z, request.xyz, reportProgress(request.id));
+        const calculation = scf(request.z, request.xyz, reportProgress(request.id), request.level);
         current?.free();
         current = calculation;
         const result = calculation.summary() as Omit<ScfOutcome, 'elapsedMs'>;
@@ -149,6 +149,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
             if (performance.now() >= deadline) throw new Error('candidate budget');
           },
           reportProgress(request.id),
+          request.level,
         );
         current?.free();
         current = calculation;

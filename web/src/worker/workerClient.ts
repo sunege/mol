@@ -29,6 +29,7 @@ import type {
   DensityRequest,
   ElementInfo,
   IsoMesh,
+  ModelLevel,
   OptimizationStep,
   ScfOutcome,
   WorkerRequest,
@@ -193,14 +194,18 @@ export class DftWorkerClient {
    * cannot be handled, or when the worker is replaced by `cancelAll`.
    *
    * `onProgress` hears which part of the work has started, while it runs.
+   *
+   * `level` is what the calculation is for; omitted means `'shape'`. Results
+   * at different levels cannot be compared (see {@link ModelLevel}).
    */
   async scf(
     z: Uint8Array,
     xyz: Float64Array,
     onProgress?: (progress: CalculationProgress) => void,
+    level?: ModelLevel,
   ): Promise<ScfOutcome> {
     const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>(
-      (id) => ({ id, type: 'scf', z, xyz }),
+      (id) => ({ id, type: 'scf', z, xyz, level }),
       (partial) => {
         if (partial.type === 'progress') onProgress?.(partial.progress);
       },
@@ -225,6 +230,9 @@ export class DftWorkerClient {
    * normally with `optimization.reason: 'interrupted'` and the structure the
    * optimiser had reached, so a relaxation stopped this way still has an answer,
    * unlike one thrown away with its worker by `cancelAll`.
+   *
+   * `level` is what the calculation is for, and holds for every step; omitted
+   * means `'shape'`.
    */
   async optimize(
     z: Uint8Array,
@@ -232,9 +240,10 @@ export class DftWorkerClient {
     onStep: (step: OptimizationStep) => void,
     onProgress?: (progress: CalculationProgress) => void,
     budgetMs?: number | null,
+    level?: ModelLevel,
   ): Promise<ScfOutcome> {
     const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>(
-      (id) => ({ id, type: 'optimize', z, xyz, budgetMs }),
+      (id) => ({ id, type: 'optimize', z, xyz, budgetMs, level }),
       (partial) => {
         if (partial.type === 'step') onStep(partial.step);
         else if (partial.type === 'progress') onProgress?.(partial.progress);

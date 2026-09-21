@@ -9,6 +9,10 @@
  * silently by design, so a mismatch would not fail anywhere else: the progress
  * card would just stop moving.
  *
+ * The level names (`ModelLevel`) are spelled twice in the same way. A mismatch
+ * there is loud - the engine refuses a name it does not know - but only the
+ * real module can say that each name reaches the basis it is meant to.
+ *
  * This runs the artifact in `web/src/wasm/`, which CI checks is current with
  * the Rust source, and needs WebAssembly SIMD (Node has had it since 16.4).
  */
@@ -19,6 +23,7 @@ import {
   hasUsableStructure,
   progressFromEngine,
   type CalculationProgress,
+  type ModelLevel,
   type OptimizationOutcome,
 } from './protocol';
 import { isFlat, perturb, PERTURB_AMPLITUDE } from '../records/perturb';
@@ -133,6 +138,103 @@ describe('the engine as the worker calls it', { timeout: 60_000 }, () => {
     calculation.free();
     expect(summary.converged).toBe(true);
     expect(summary.energy).toBeLessThan(-74);
+  });
+});
+
+/**
+ * Basis functions water is solved with at each level, counted from the shells
+ * rather than copied from anywhere.
+ *
+ * `shape` is STO-3G: one function per occupied atomic orbital - oxygen's 1s, 2s
+ * and three 2p, and one 1s on each hydrogen. `measure` is 6-31G*: the valence
+ * is split in two - oxygen's 1s, two 2s and two sets of three 2p - oxygen gets
+ * six Cartesian d functions, and each hydrogen two s. The second is also `nbf`
+ * in `crates/dft-core/tests/data/scf_h2o_631gs.json`.
+ *
+ * The count is a diagnostic in `ScfOutcome` and never reaches the screen
+ * (requirement F4); here it is simply the one number that says which level
+ * the engine actually solved at.
+ */
+const WATER_FUNCTIONS: Record<ModelLevel, number> = {
+  shape: 1 + 1 + 3 + 2 * 1,
+  measure: 1 + 2 + 2 * 3 + 6 + 2 * 2,
+};
+
+// The level travels from the request to the basis as one string, and this is
+// the only place that string meets the engine it names.
+describe('the level a calculation is asked for', { timeout: 60_000 }, () => {
+  it('reaches the engine, and leaving it out is exactly the shape level', () => {
+    const solve = (level?: ModelLevel) => {
+      const calculation = scf(WATER.z, WATER.xyz, undefined, level);
+      const summary = calculation.summary() as {
+        converged: boolean;
+        energy: number;
+        basisFunctions: number;
+      };
+      calculation.free();
+      expect(summary.converged).toBe(true);
+      return summary;
+    };
+    const omitted = solve();
+    const shape = solve('shape');
+    const measure = solve('measure');
+
+    expect(shape.basisFunctions).toBe(WATER_FUNCTIONS.shape);
+    expect(measure.basisFunctions).toBe(WATER_FUNCTIONS.measure);
+    // Not merely close: every caller that predates levels - the app until
+    // levels are offered, the benchmark scripts - must get the answer it
+    // always got, to the last bit.
+    expect(omitted).toEqual(shape);
+  });
+
+  it('holds for every step of a relaxation, which reports as it always does', () => {
+    const heard: Heard[] = [];
+    const calculation = optimize(
+      WATER.z,
+      WATER.xyz,
+      (raw: { step: number }) => {
+        heard.push({ step: raw.step });
+      },
+      listener(heard),
+      'measure',
+    );
+    const summary = calculation.summary() as {
+      basisFunctions: number;
+      optimization: { reason: string; steps: number };
+    };
+    calculation.free();
+
+    expect(summary.optimization.reason).toBe('converged');
+    expect(summary.optimization.steps).toBeGreaterThan(0);
+    // The summary describes the last geometry, which the optimiser built
+    // afresh from the one before it: the level survived every step.
+    expect(summary.basisFunctions).toBe(WATER_FUNCTIONS.measure);
+    // Every stage it reported is one the protocol knows (`listener` throws
+    // otherwise), in the same order as at the default level.
+    expect(heard.slice(0, 4)).toEqual([
+      { progress: { stage: 'preparing' } },
+      { progress: { stage: 'searching' } },
+      { progress: { stage: 'forces', step: 0 } },
+      { step: 0 },
+    ]);
+  });
+
+  it('refuses a level it does not know rather than solving at the default', () => {
+    // Solving in a smaller basis than was asked for would put numbers on the
+    // screen that claim an accuracy they do not have, so a misspelt level is
+    // an error - and one raised before any work starts or is reported.
+    const heard: Heard[] = [];
+    // The engine throws a string rather than an Error, which the worker posts as
+    // the `error` response's message.
+    for (const level of ['fast', 'Shape', '']) {
+      expect(() => scf(WATER.z, WATER.xyz, listener(heard), level)).toThrow(
+        'unknown model level',
+      );
+      expect(() => optimize(WATER.z, WATER.xyz, () => undefined, listener(heard), level)).toThrow(
+        'unknown model level',
+      );
+    }
+    expect(heard).toEqual([]);
   });
 });
 

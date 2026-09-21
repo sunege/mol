@@ -370,6 +370,28 @@ fn report(on_progress: Option<&js_sys::Function>, stage: &str, step: usize) {
     }
 }
 
+/// The basis a calculation is solved in, from the level it was asked for.
+///
+/// A level is named for what the user wants from the calculation - `"shape"`
+/// to see what a molecule settles into, `"measure"` to read its bond lengths
+/// and angles as numbers (`ModelLevel` in `web/src/worker/protocol.ts`) - and
+/// that name is all that crosses the boundary: which basis it means stays
+/// here, like every other DFT parameter (requirement F4).
+///
+/// Omitted means `"shape"`, which is what every calculation was before there
+/// were levels. A name this does not know is an error rather than the default:
+/// solving in a smaller basis than was asked for would put numbers on the
+/// screen that claim an accuracy they do not have.
+fn basis_for(level: Option<&str>) -> Result<BasisKind, JsValue> {
+    match level.unwrap_or("shape") {
+        "shape" => Ok(BasisKind::Sto3g),
+        "measure" => Ok(BasisKind::B631Gs),
+        other => Err(JsValue::from_str(&format!(
+            "unknown model level {other:?}: expected \"shape\" or \"measure\""
+        ))),
+    }
+}
+
 /// Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
 /// the charge and spin state itself (requirement F4).
 ///
@@ -379,16 +401,21 @@ fn report(on_progress: Option<&js_sys::Function>, stage: &str, step: usize) {
 ///
 /// `on_progress(stage, step)`, when given, is called as each part of the
 /// calculation starts (see [`stage`]).
+///
+/// `level` is what the calculation is for: `"shape"` (the default) or
+/// `"measure"`. Any other name throws rather than being solved at the default.
 #[wasm_bindgen(js_name = scf)]
 pub fn scf(
     z: &[u8],
     xyz_angstrom: &[f64],
     on_progress: Option<js_sys::Function>,
+    level: Option<String>,
 ) -> Result<Calculation, JsValue> {
     let on_progress = on_progress.as_ref();
+    let kind = basis_for(level.as_deref())?;
     let molecule = build_molecule(z, xyz_angstrom)?;
     report(on_progress, stage::PREPARING, 0);
-    let mut system = System::build(molecule, BasisKind::Sto3g, GridQuality::Medium)
+    let mut system = System::build(molecule, kind, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
     report(on_progress, stage::SEARCHING, 0);
     let deadline = js_sys::Date::now() + SEARCH_BUDGET_SECONDS * 1000.0;
@@ -443,14 +470,19 @@ const OPTIMIZE_BUDGET_SECONDS: f64 = 1800.0;
 /// `on_progress(stage, step)`, when given, is called as each part of the
 /// calculation starts (see [`stage`]). Most of the wait before the first step is
 /// in parts that move no atoms, and this is how the caller can say so.
+///
+/// `level` is what the calculation is for, as for [`scf`], and holds for every
+/// step: the optimiser builds each new geometry in the basis of the one before.
 #[wasm_bindgen(js_name = optimize)]
 pub fn optimize(
     z: &[u8],
     xyz_angstrom: &[f64],
     on_step: &js_sys::Function,
     on_progress: Option<js_sys::Function>,
+    level: Option<String>,
 ) -> Result<Calculation, JsValue> {
     let on_progress = on_progress.as_ref();
+    let kind = basis_for(level.as_deref())?;
     let molecule = build_molecule(z, xyz_angstrom)?;
     report(on_progress, stage::PREPARING, 0);
     // The spin state is chosen on the grid a single point uses and only the
@@ -458,7 +490,7 @@ pub fn optimize(
     // depend on the grid, and every losing state tried on the fine grid was
     // most of the first step's cost (see `driver::solve_then_refine`).
     let fine = dft_core::grid::build(&molecule, opt::OPTIMIZER_GRID);
-    let mut system = System::build(molecule, BasisKind::Sto3g, GridQuality::Medium)
+    let mut system = System::build(molecule, kind, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
 
     report(on_progress, stage::SEARCHING, 0);

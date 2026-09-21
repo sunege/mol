@@ -213,18 +213,24 @@ if (Symbol.dispose) IsoMesh.prototype[Symbol.dispose] = IsoMesh.prototype.free;
  * `on_progress(stage, step)`, when given, is called as each part of the
  * calculation starts (see [`stage`]). Most of the wait before the first step is
  * in parts that move no atoms, and this is how the caller can say so.
+ *
+ * `level` is what the calculation is for, as for [`scf`], and holds for every
+ * step: the optimiser builds each new geometry in the basis of the one before.
  * @param {Uint8Array} z
  * @param {Float64Array} xyz_angstrom
  * @param {Function} on_step
  * @param {Function | null} [on_progress]
+ * @param {string | null} [level]
  * @returns {Calculation}
  */
-export function optimize(z, xyz_angstrom, on_step, on_progress) {
+export function optimize(z, xyz_angstrom, on_step, on_progress, level) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.optimize(ptr0, len0, ptr1, len1, on_step, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress));
+    var ptr2 = isLikeNone(level) ? 0 : passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len2 = WASM_VECTOR_LEN;
+    const ret = wasm.optimize(ptr0, len0, ptr1, len1, on_step, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress), ptr2, len2);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -241,17 +247,23 @@ export function optimize(z, xyz_angstrom, on_step, on_progress) {
  *
  * `on_progress(stage, step)`, when given, is called as each part of the
  * calculation starts (see [`stage`]).
+ *
+ * `level` is what the calculation is for: `"shape"` (the default) or
+ * `"measure"`. Any other name throws rather than being solved at the default.
  * @param {Uint8Array} z
  * @param {Float64Array} xyz_angstrom
  * @param {Function | null} [on_progress]
+ * @param {string | null} [level]
  * @returns {Calculation}
  */
-export function scf(z, xyz_angstrom, on_progress) {
+export function scf(z, xyz_angstrom, on_progress, level) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.scf(ptr0, len0, ptr1, len1, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress));
+    var ptr2 = isLikeNone(level) ? 0 : passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len2 = WASM_VECTOR_LEN;
+    const ret = wasm.scf(ptr0, len0, ptr1, len1, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress), ptr2, len2);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

@@ -34,6 +34,27 @@ export interface ElementInfo {
   color: number;
 }
 
+/**
+ * What a calculation is for, which decides how carefully it is solved.
+ *
+ * - `shape` — see what a molecule settles into. Benzene relaxes in about fifteen
+ *   seconds. The default, and what every calculation was before there were
+ *   levels.
+ * - `measure` — read its bond lengths and angles as numbers. Several times
+ *   slower; benzene takes minutes.
+ *
+ * The level is the only thing about the method that crosses this boundary:
+ * the engine decides what each one means, like every other DFT parameter
+ * (requirement F4), and a name it does not know comes back as an `error`
+ * rather than being solved at the default.
+ *
+ * Results at different levels cannot be compared. Water solved at both has
+ * total energies 1.1 Hartree apart - thousands of kJ/mol, against the few that
+ * separate two structures - so an energy difference, or a ranking of
+ * structures, only means something between results at one level.
+ */
+export type ModelLevel = 'shape' | 'measure';
+
 /** The total energy split into its physical terms, in Hartree. */
 export interface EnergyComponents {
   /** Kinetic energy plus electron-nucleus attraction. */
@@ -256,8 +277,12 @@ export interface IsoMesh {
 
 export type WorkerRequest =
   | { id: number; type: 'elements' }
-  /** A single point, answering with `progress` as it goes and then one `scf`. */
-  | { id: number; type: 'scf'; z: Uint8Array; xyz: Float64Array }
+  /**
+   * A single point, answering with `progress` as it goes and then one `scf`.
+   *
+   * `level` is the {@link ModelLevel} to solve at; omitted means `'shape'`.
+   */
+  | { id: number; type: 'scf'; z: Uint8Array; xyz: Float64Array; level?: ModelLevel }
   /**
    * Relaxes the structure, answering with a `step` per accepted geometry and
    * `progress` as each part of the work starts, and then one `scf` for the final
@@ -270,6 +295,9 @@ export type WorkerRequest =
    * length of a lecture (`web/src/search/`); the front worker sends no budget
    * and is stopped by the user instead. Omitted or null means the engine's own
    * budget is the only one.
+   *
+   * `level` is the {@link ModelLevel} every step is solved at; omitted means
+   * `'shape'`.
    */
   | {
       id: number;
@@ -277,6 +305,7 @@ export type WorkerRequest =
       z: Uint8Array;
       xyz: Float64Array;
       budgetMs?: number | null;
+      level?: ModelLevel;
     }
   /** Cuts the density of the last `scf` or `optimize` request at a new level. */
   | { id: number; type: 'isosurface'; channel: DensityRequest; isoLevel: number };

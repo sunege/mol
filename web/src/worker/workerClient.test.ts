@@ -232,6 +232,31 @@ describe('the worker client', () => {
     expect(second).toEqual(['preparing', 'forces 0']);
   });
 
+  it('sends the level a calculation is asked for, and none when it is not', async () => {
+    const { client, workers } = setUp();
+    const pending = [
+      client.scf(WATER.z, WATER.xyz, undefined, 'measure'),
+      client.optimize(WATER.z, WATER.xyz, () => {}, undefined, null, 'measure'),
+      client.scf(WATER.z, WATER.xyz),
+      client.optimize(WATER.z, WATER.xyz, () => {}),
+    ];
+
+    const sent: WorkerRequest[] = [];
+    for (let i = 0; i < pending.length; i++) sent.push(await workers[0].request(i));
+    // Left out, the worker hands the engine nothing and the engine solves at
+    // 'shape' - the one place that default is spelled (`engine.test.ts` pins
+    // it). The client does not fill it in, so the two cannot disagree.
+    expect(sent.map((request) => ('level' in request ? request.level : 'no level'))).toEqual([
+      'measure',
+      'measure',
+      undefined,
+      undefined,
+    ]);
+
+    workers[0].reply(...sent.map(({ id }) => ({ id, type: 'scf' as const, result: outcome() })));
+    await Promise.all(pending);
+  });
+
   it('ends a request on an error, whatever it reported before', async () => {
     const { client, workers } = setUp();
     const heard: CalculationProgress[] = [];
