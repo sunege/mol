@@ -1559,6 +1559,61 @@ Coulomb 項 `Σ D_μν D_λσ ∂(μν|λσ)` が bra 側と ket 側に分解で
   を使わない・F4 の禁止語に `6-31G` を足したもの）。`npm test` 292 件（287 → 292）、lint の
   警告は触る前と同じ 9 件。Rust と `web/src/wasm/` は触っていない。
 
+### V3-5 の実装メモ（記録が段を持つ、2026-09-22）
+
+- **形**: `records/record.ts` の `ENGINE_MODEL` を **`engineModel(level)`**（表は
+  `ENGINE_MODELS: Record<ModelLevel, string>`）と逆引きの **`levelOfModel(model)`**（知らない
+  文字列は `null`）にした。`'shape'` は **`'sto-3g/lda-vwn5/fine'` のまま**（テストでリテラルに
+  固定）、`'measure'` は `'6-31gs/lda-vwn5/fine'`。`comparisonKey` は `model|charge|formula` の
+  まま触っていない＝段が違えば別の群。`RecordDraft.level` は**必須**（渡し忘れを型で止める）。
+  `relax()` はその緩和の `level`、探索の `onFinished` は `'shape'` を書く（プールは段を省略して
+  投げていて、Worker は省略を `'shape'` と読む）。
+- **段は `model` から引き、フィールドを足さなかった**。したがって**記録の形は変わっておらず、
+  `LOG_VERSION` は 1 のまま**（ユーザーの指示「形を変えるなら version を上げる」）。チケットの
+  「やること 4」と完了条件の「古い version が混ざれば全部拒否」はこの理由で当てはまらない。
+  代わりのテスト: 知らない `model` が 1 件でも混ざれば**ファイルごと拒否**、version 0 と 2 の
+  拒否、V3-5 より前の v1 ファイル（`model` をリテラルで書いたもの）が「形を探す」の群に入る。
+  **却下した案**: `level` フィールドを足して version を上げる → IndexedDB の記録（`load()` は
+  検査しない）では `undefined` になり読むところで補うことになる、`model` と二重になって食い違い
+  うる、講義用に作った v1 のファイルが全部拒否される。
+- **知らない `model`**: `ENGINE_MODEL` は P9 で入ってから一度も変わっていない（`git log -S`）ので、
+  今あるのは手で書き換えたファイルだけ。**ファイルの読み込みで拒否**（`kind: 'shape'`、
+  「model が違います」。元素と同じく「その段で解き直せない記録を講義で開かせない」）。
+  V3-5 より前に読み込まれて IndexedDB にある分は検査されないので、`levelOfRecord()` が `null` を
+  返し、**数値は記録のまま・選択は変えない・等値面は解かない・状態の行は段なしの「完了」**
+  （`resultLevel` を `ModelLevel | null` にした）。群の見出しも段なし。**却下した案**:
+  知らなければ `'shape'` → その記録の段でないかもしれない段で等値面を解く（段が違う結果を
+  並べる）。`model` の先頭（基底）で振り分ける → 文字列の解析に頼る。
+- **将来 `engineModel` の文字列を変えるとき**: 古い文字列を `levelOfModel` が知ったままに
+  しないと、その記録はファイルから拒否され、ブラウザでは等値面なしで開く（コメントに書いた）。
+- **見出し**: `H₂O · 形を探す · 3 件（2 種類の形）`。段は**いつも出す**（片方の段しか無くても。
+  同じ分子の 2 群が同じ見出しに読めないように）。電荷で割れた群の見出しは今までどおり同じ
+  （F4）で、テストはそれを「電荷だけ違う 2 群の見出しが一致する」で見ている。
+- **App**: V3-4 のガード（`level === 'shape'` のときだけ記録）を外し、`createRecord` に `level`。
+  記録の段を読むのは App では `levelOfRecord()`（中身は `levelOfModel(record.model)`）だけ。
+  群の段は `log.ts` の `groupRecords` が同じ `levelOfModel` で `LogGroup.level` に入れる。
+- **Claude のブラウザでの確認**（dev サーバー、`Worker.prototype.postMessage` を差し替えて
+  リクエストの `type` と `level` を読んだ。前からある記録は 9/20 の CH₄ 10 件で、キーに `level` は
+  無く `model` は `'sto-3g/lda-vwn5/fine'`）:
+
+  | 操作 | 送った | 結果 |
+  | --- | --- | --- |
+  | 読み込み直後 | — | 「CH₄ · 形を探す · 10 件」 |
+  | 水（プリセット）・形を探す・安定な形にする | `optimize` `shape` | −74.743110 Ha、4 回。「H₂O · 形を探す · 1 件」 |
+  | 水（プリセット）・形を測る・安定な形にする | `optimize` `measure` | −75.844985 Ha、5 回。「H₂O · 形を測る · 1 件」が別に立つ。IndexedDB の `model` は `6-31gs/lda-vwn5/fine` |
+  | 形を探すを選んで形を測るの記録を開く（雲オン） | `scf` `measure` | 選択が形を測るに、状態は「完了（形を測る）」、数値は記録の −75.844985 |
+  | 形を測るを選んだまま CH₄ の古い記録を開く | `scf` `shape` | 選択が形を探すに、「完了（形を探す）」、−39.617140 |
+  | 雲オフで形を測るの記録を開き、雲オン | 開いた時は無し → `scf` `measure` | `openedLevel` の effect も記録の段 |
+  | 再読み込み | — | 3 群のまま |
+
+  確認で作った水の 2 件は Claude のブラウザの IndexedDB に残してある。
+- **テスト**: `record.test.ts` +5（段で別の群・段ごとに別の文字列と逆引き・形を探すの文字列の
+  固定・知らない文字列は `null`・記録が段を持つ）、`log.test.ts` +3（2 段は別の群で段が読める・
+  V3-5 前の記録が形を探すの群・知らない `model` の群は段なし）、`components/records.test.ts` +3
+  （見出しの段・段なし・F4、禁止語に `6-31G` と `VWN` を足して表示文にも共有）、`file.test.ts` +3
+  （段が往復する・V3-5 前の v1 ファイル・知らない `model` で全部拒否）。`npm test` 306 件
+  （292 → 306）、lint の警告は触る前と同じ 9 件。Rust と `web/src/wasm/` は触っていない。
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
