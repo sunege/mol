@@ -32,6 +32,12 @@ export interface JobState {
   drawsSurface: boolean;
   /** The engine has answered and the first surface is being cut. */
   drawing: boolean;
+  /**
+   * The user asked a relaxation to stop, and it is finishing the step it is on
+   * - which it has to, since only then is there a structure with numbers to
+   * keep. The checklist goes on showing that step.
+   */
+  stopping: boolean;
 }
 
 /** The parts of the work, in the order they happen. */
@@ -109,6 +115,7 @@ export function checklist(job: JobState): ChecklistItem[] {
 /** One sentence for what is happening now. */
 export function headline(job: JobState): string {
   const id = currentId(job);
+  if (job.stopping && id !== 'draw') return '止めています · いまの一歩が終わるまで';
   const engine = job.engine;
   switch (id) {
     case 'prepare':

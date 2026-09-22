@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  canStopInPlace,
   checkEngineSupport,
   engineNotice,
   EngineUnavailableError,
@@ -77,6 +78,30 @@ describe('checking a browser', () => {
       },
     };
     expect(checkEngineSupport(broken)).toBe('no-simd');
+  });
+});
+
+/**
+ * Whether 中止 can keep the numbers too. Never a reason not to calculate: a
+ * page without it stops the way it always did, by replacing the worker.
+ */
+describe('stopping a worker in place', () => {
+  it('needs a page that is cross-origin isolated', () => {
+    expect(canStopInPlace({ crossOriginIsolated: true, SharedArrayBuffer })).toBe(true);
+    // Served without COOP/COEP, or embedded by a page that is not isolated:
+    // the constructor may be there, and memory still cannot be shared.
+    expect(canStopInPlace({ crossOriginIsolated: false, SharedArrayBuffer })).toBe(false);
+    expect(canStopInPlace({ SharedArrayBuffer })).toBe(false);
+  });
+
+  it('needs SharedArrayBuffer itself', () => {
+    expect(canStopInPlace({ crossOriginIsolated: true })).toBe(false);
+  });
+
+  it('is not something the engine support check knows about', () => {
+    // Node is not a page and is not isolated, and the engine runs in it.
+    expect(canStopInPlace()).toBe(false);
+    expect(checkEngineSupport()).toBeNull();
   });
 });
 

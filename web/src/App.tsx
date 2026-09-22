@@ -4,7 +4,7 @@ import { probeWebGl, type WebGlProbe } from './scene/webgl';
 import { keyAction, type ViewerMode } from './scene/gestures';
 import { measureAtoms, toggleMeasured } from './scene/measure';
 import { LiveMeasurement } from './scene/liveMeasurement';
-import { DftWorkerClient } from './worker/workerClient';
+import { DftWorkerClient, RelaxationStopped } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
 import { PeriodicPicker } from './components/PeriodicPicker';
 import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
@@ -143,6 +143,11 @@ export default function App() {
   // wherever `result` gets an answer; null only for a record whose level this
   // program does not know (`levelOfRecord`).
   const [resultLevel, setResultLevel] = useState<ModelLevel | null>(DEFAULT_LEVEL);
+  // Set when the user stopped a relaxation part way and the structure on screen
+  // is where it got to: how many moves that was, and what it was solved for.
+  // Beside `result`, which has no numbers for it unless the worker survived the
+  // stop. Cleared wherever `result` is.
+  const [stopped, setStopped] = useState<{ steps: number; level: ModelLevel } | null>(null);
   const [computing, setComputing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Set when this browser cannot run the engine at all, which is a notice in
@@ -226,6 +231,10 @@ export default function App() {
   // Whether the calculation in flight is a relaxation, which is the only kind
   // that leaves a before-and-after behind when it is cancelled.
   const relaxingRef = useRef(false);
+  // Whether the user has asked the relaxation in flight to stop after its
+  // step. It is what tells their stop from the engine's own budget, which end
+  // with the same reason, and what makes a second press stop at once.
+  const stopRequestedRef = useRef(false);
   // The mode to go back to if the calculation that switched to observe mode
   // ends with nothing to observe. Cleared when it succeeds, and when the user
   // picks a mode themselves - their choice is not undone afterwards.
@@ -312,6 +321,33 @@ export default function App() {
   }, [stopAnimation, restoreMode]);
 
   /**
+   * The 中止 button, and only that: a relaxation keeps the structure it had
+   * reached rather than going back to where it started.
+   *
+   * Not `cancelCalculation`, which every edit, preset and record also goes
+   * through - after writing the atoms they want, so keeping a step there would
+   * overwrite them. Here nothing is replaced, and the relaxation's own
+   * handlers keep what it reached: on a page that can share memory with the
+   * worker it is asked to stop after its step and `.then` hears the numbers
+   * too, as for a budget that ran out; anywhere else the worker goes, and
+   * `.catch` hears how far it got (`RelaxationStopped`). A second press is the
+   * user who will not wait for the step. A single point has nothing part way
+   * to keep, and is cancelled as it always was.
+   */
+  const stopCalculation = useCallback(() => {
+    if (!inFlightRef.current) return;
+    if (!relaxingRef.current) {
+      cancelCalculation();
+      return;
+    }
+    const outcome = clientRef.current?.stopRelaxations(stopRequestedRef.current);
+    if (outcome === 'stopping') {
+      stopRequestedRef.current = true;
+      setJob((current) => current && { ...current, stopping: true });
+    }
+  }, [cancelCalculation]);
+
+  /**
    * Hands the viewer back to React once the frames have run out for good.
    *
    * Called from the player when it runs dry, and directly when the producer
@@ -333,6 +369,7 @@ export default function App() {
    */
   const invalidateResult = useCallback(() => {
     setResult(null);
+    setStopped(null);
     setError(null);
     // Whatever changed, the atoms are no longer where a relaxation left them,
     // nor the ones a record was opened at.
@@ -754,6 +791,7 @@ export default function App() {
       engine: null,
       drawsSurface: showDensity,
       drawing: false,
+      stopping: false,
     });
     return (progress: CalculationProgress) => {
       if (requestRef.current !== token) return;
@@ -782,6 +820,7 @@ export default function App() {
     // Drop the previous answer immediately: leaving it on screen next to
     // "計算中…" reads as though it belonged to the run in progress.
     setResult(null);
+    setStopped(null);
     setError(null);
     const onProgress = beginJob('single', token);
     client
@@ -860,12 +899,14 @@ export default function App() {
     const token = ++requestRef.current;
     inFlightRef.current = true;
     relaxingRef.current = true;
+    stopRequestedRef.current = false;
     stopAnimation();
     observeWhileRunning();
     // Measurements compare against this, live while the molecule moves.
     setRelaxedFrom(original);
     setComputing(true);
     setResult(null);
+    setStopped(null);
     setError(null);
     // The geometry is about to change under it, so the surface on screen belongs
     // to a molecule that will not exist in a moment.
@@ -901,6 +942,10 @@ export default function App() {
         setResultLevel(level);
 
         const relaxed = outcome.optimization;
+        // One that settled on the step it was asked to stop after has simply
+        // settled; only one that ended short of that was stopped.
+        const stoppedByUser = stopRequestedRef.current && relaxed?.reason === 'interrupted';
+        stopRequestedRef.current = false;
         if (!outcome.converged || !relaxed || !hasUsableStructure(relaxed)) {
           endJob(false);
           // The structure stays as built, so there is no before and after.
@@ -910,10 +955,11 @@ export default function App() {
           return;
         }
         keepObserving();
-        // A shape worth keeping: into the log, whether it settled or ran out of
-        // time, under the level it was solved at - which keeps it apart from
-        // the other level's records. What it was built from is the structure
-        // before the nudge.
+        if (stoppedByUser) setStopped({ steps: relaxed.steps, level });
+        // A shape worth keeping: into the log, whether it settled, ran out of
+        // time or was stopped, under the level it was solved at - which keeps
+        // it apart from the other level's records. What it was built from is
+        // the structure before the nudge.
         const record = createRecord(
           {
             z: Array.from(z),
@@ -947,12 +993,30 @@ export default function App() {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
         relaxingRef.current = false;
+        stopRequestedRef.current = false;
         setComputing(false);
         endJob(false);
+        if (e instanceof RelaxationStopped && e.last !== null) {
+          // Stopped by the user part way, by replacing the worker. The
+          // structure it reached is one the electrons were solved for, so it
+          // is the molecule now, as when the budget runs out - committed at
+          // once for the same reason, and with the frames already queued left
+          // to play up to it. Its numbers went with the worker, so there is no
+          // record and no surface, and the readouts say how far it got.
+          keepObserving();
+          setAtoms(withPositions(original, Array.from(e.last.xyz)));
+          setPresetId(null);
+          setOpenRecordId(null);
+          setStopped({ steps: e.last.step, level });
+          producerDoneRef.current = true;
+          if (!player.playing) finishAnimation();
+          return;
+        }
         stopAnimation();
         setRelaxedFrom(null);
         restoreMode();
-        reportFailure(e);
+        // Stopped before anything moved: as if it had never started.
+        if (!(e instanceof RelaxationStopped)) reportFailure(e);
       });
   }, [
     atoms,
@@ -1056,6 +1120,7 @@ export default function App() {
       setMeasured([]);
       setError(null);
       setResult(record.outcome);
+      setStopped(null);
       const recorded = levelOfRecord(record);
       setResultLevel(recorded);
       if (recorded !== null) setLevel(recorded);
@@ -1135,6 +1200,7 @@ export default function App() {
       setMeasured([]);
       setError(null);
       setResult(null);
+      setStopped(null);
       setRelaxedFrom(null);
       setOpenRecordId(null);
       setRecordNotice(null);
@@ -1454,10 +1520,10 @@ export default function App() {
           <button
             type="button"
             className={computing ? '' : 'active'}
-            onClick={computing ? cancelCalculation : relax}
+            onClick={computing ? stopCalculation : relax}
             disabled={unavailable !== null || atoms.length === 0}
           >
-            {computing ? '中止' : '安定な形にする'}
+            {computing ? (job?.stopping ? 'すぐ止める' : '中止') : '安定な形にする'}
           </button>
           <button
             type="button"
@@ -1468,11 +1534,15 @@ export default function App() {
           </button>
         </div>
         <p className="hint">
-          {relaxation !== null && solved && relaxation.reason !== 'converged'
-            ? 'いまの形は途中までのものです。もう一度「安定な形にする」を押すと、' +
-              'ここから続きを計算します。'
-            : '「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
-              '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
+          {computing && job?.stopping
+            ? 'いまの一歩が終わったところで止まり、そこまでの形と数値が残ります。' +
+              '待たずに止めるときは「すぐ止める」を押してください（形だけが残ります）。'
+            : (relaxation !== null && solved && relaxation.reason !== 'converged') ||
+                stopped !== null
+              ? 'いまの形は途中までのものです。もう一度「安定な形にする」を押すと、' +
+                'ここから続きを計算します。'
+              : '「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
+                '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
         </p>
 
         <SearchPanel
@@ -1564,8 +1634,12 @@ export default function App() {
             ) : solved ? (
               // Which of the two the numbers are from, since the choice in the
               // panel is free to differ once the calculation is over.
-              (settled ? '完了' : '途中で終了') +
+              (settled ? '完了' : stopped !== null ? '途中で止めました' : '途中で終了') +
               (resultLevel === null ? '' : `（${levelLabel(resultLevel)}）`)
+            ) : stopped !== null ? (
+              // A structure without numbers, which is not the blank below: it
+              // was solved at every step, and only the stop lost the last one.
+              `途中で止めました（${levelLabel(stopped.level)}）`
             ) : (
               // A calculation that did not converge is deliberately blank rather
               // than described: the molecule flying apart on screen is what says
@@ -1575,7 +1649,7 @@ export default function App() {
             )}
           </dd>
           <dt>形の調整</dt>
-          <dd>{describeRelaxation(relaxation, solved)}</dd>
+          <dd>{describeRelaxation(relaxation, solved, stopped)}</dd>
           <dt>全エネルギー</dt>
           {/* The energy of the structure on screen, which is a real number
               about a real structure even when the optimiser ran out of time
@@ -1637,15 +1711,23 @@ function withPositions(atoms: SceneAtom[], xyz: number[]): SceneAtom[] {
  *
  * Only reached when the electrons were solved, so `'scf'` cannot appear here -
  * that case is the molecule coming apart on screen and gets no words at all
- * (requirement F5). The other two do get words, and they are about the clock
- * rather than about chemistry: "it ran out of time" is a fact about this
- * computer, and hiding it would leave a half-relaxed structure looking like a
- * finished one.
+ * (requirement F5). The other two do get words, and they are about the
+ * relaxation rather than about chemistry: hiding them would leave a
+ * half-relaxed structure looking like a finished one.
+ *
+ * `'interrupted'` is said without saying why, because a record cannot tell: the
+ * engine's budget and the user's 中止 end a relaxation the same way. Only the
+ * relaxation that has just been stopped is known to be the user's (`stopped`),
+ * and it is also the one exception to "only when solved": stopped by replacing
+ * the worker, its structure is kept without the numbers, and how far it got is
+ * still true.
  */
 function describeRelaxation(
   relaxation: OptimizationOutcome | null,
   solved: boolean,
+  stopped: { steps: number } | null,
 ): string {
+  if (stopped !== null) return `中止 · ${stopped.steps} 回動いたところまで`;
   if (relaxation === null || !solved) return '—';
   const moved = `${relaxation.steps} 回動いたところまで`;
   switch (relaxation.reason) {
@@ -1654,7 +1736,7 @@ function describeRelaxation(
         ? 'すでに安定な形でした'
         : `${relaxation.steps} 回動いて落ち着きました`;
     case 'interrupted':
-      return `時間切れ · ${moved}`;
+      return `途中で止まりました · ${moved}`;
     case 'maxSteps':
       return `回数の上限 · ${moved}`;
     case 'scf':

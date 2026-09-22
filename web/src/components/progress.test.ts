@@ -6,7 +6,15 @@ const job = (
   kind: JobKind,
   engine: CalculationProgress | null,
   extra: Partial<JobState> = {},
-): JobState => ({ kind, startedAt: 0, engine, drawsSurface: true, drawing: false, ...extra });
+): JobState => ({
+  kind,
+  startedAt: 0,
+  engine,
+  drawsSurface: true,
+  drawing: false,
+  stopping: false,
+  ...extra,
+});
 
 const states = (state: JobState) => checklist(state).map((item) => `${item.id}:${item.state}`);
 
@@ -135,14 +143,28 @@ describe('the progress checklist', () => {
       for (const engine of RELAXATION) {
         for (const drawing of [false, true]) {
           for (const drawsSurface of [false, true]) {
-            const state = job(kind, engine, { drawing, drawsSurface });
-            text.push(headline(state));
-            for (const item of checklist(state)) text.push(item.label, item.detail ?? '');
+            for (const stopping of [false, true]) {
+              const state = job(kind, engine, { drawing, drawsSurface, stopping });
+              text.push(headline(state));
+              for (const item of checklist(state)) text.push(item.label, item.detail ?? '');
+            }
           }
         }
       }
     }
     for (const line of text) expect(line).not.toMatch(forbidden);
+  });
+});
+
+describe('a relaxation the user is stopping', () => {
+  it('says so until the step it is on is over, and then draws as usual', () => {
+    const moving = job('relax', { stage: 'solving', step: 3 }, { stopping: true });
+    expect(headline(moving)).toBe('止めています · いまの一歩が終わるまで');
+    // The step it is finishing is still the part under way.
+    expect(states(moving)).toContain('move:active');
+    expect(checklist(moving).find((item) => item.id === 'move')?.detail).toBe('3 回目');
+    // Stopped in place, it has a density: the surface is cut like any other.
+    expect(headline({ ...moving, drawing: true })).toBe('電子の雲を描いています');
   });
 });
 

@@ -22,6 +22,9 @@ import { initSync, optimize, scf } from '../wasm/dft_wasm.js';
 import {
   hasUsableStructure,
   progressFromEngine,
+  raiseStop,
+  stopFlag,
+  stopRequested,
   type CalculationProgress,
   type ModelLevel,
   type OptimizationOutcome,
@@ -128,6 +131,50 @@ describe('the engine as the worker calls it', { timeout: 60_000 }, () => {
     expect(summary.converged).toBe(true);
     expect(hasUsableStructure(summary.optimization as OptimizationOutcome)).toBe(true);
     expect(summary.optimization.xyz).toHaveLength(WATER.z.length * 3);
+  });
+
+  it('stops at the step after the page raises its flag, and keeps the calculation', () => {
+    // The user's 中止 on a page that shares memory with its worker: the flag is
+    // raised from outside while a step is being solved, and the worker's step
+    // callback reads it afterwards the way it reads the budget
+    // (`dft.worker.ts`). Here the raising happens on the same thread, from the
+    // progress report that says step 1 is being solved.
+    const flag = stopFlag();
+    const seen: number[] = [];
+    const calculation = optimize(
+      WATER.z,
+      WATER.xyz,
+      (raw: { step: number }) => {
+        seen.push(raw.step);
+        if (stopRequested(flag)) throw new Error('stopped by the user');
+      },
+      (stage: string, step: number) => {
+        if (stage === 'solving' && step === 1) raiseStop(flag);
+      },
+    );
+    const summary = calculation.summary() as {
+      converged: boolean;
+      energy: number;
+      optimization: { reason: string; converged: boolean; steps: number; xyz: number[] };
+    };
+
+    // Step 1 was finished and sent, and nothing after it was started.
+    expect(seen).toEqual([0, 1]);
+    // The reason is the budget's: to the user, both are "not finished".
+    expect(summary.optimization.reason).toBe('interrupted');
+    expect(summary.optimization.steps).toBe(1);
+    expect(summary.converged).toBe(true);
+    expect(summary.energy).toBeLessThan(-74);
+    expect(hasUsableStructure(summary.optimization as OptimizationOutcome)).toBe(true);
+    expect(summary.optimization.xyz).toHaveLength(WATER.z.length * 3);
+
+    // And the calculation it ended on still has its density, which is what
+    // lets the surface be drawn without solving the electrons again.
+    const iso = calculation.isosurface('total', 0.05);
+    const faces = iso.positiveIndices.length / 3;
+    iso.free();
+    calculation.free();
+    expect(faces).toBeGreaterThan(0);
   });
 
   it('still calculates when nobody is listening', () => {

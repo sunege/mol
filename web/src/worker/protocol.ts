@@ -298,6 +298,13 @@ export type WorkerRequest =
    *
    * `level` is the {@link ModelLevel} every step is solved at; omitted means
    * `'shape'`.
+   *
+   * `stop` is how the user's 中止 reaches a worker that is busy: memory shared
+   * with the page ({@link raiseStop}), read after every step the way the budget
+   * is, and ending the relaxation the same way - `reason: 'interrupted'`, the
+   * structure reached, and the calculation kept for its surface. Only a page
+   * that can share memory sends one (`canStopInPlace`); without it the worker
+   * is terminated instead, and only the streamed steps survive.
    */
   | {
       id: number;
@@ -306,9 +313,33 @@ export type WorkerRequest =
       xyz: Float64Array;
       budgetMs?: number | null;
       level?: ModelLevel;
+      stop?: Int32Array | null;
     }
   /** Cuts the density of the last `scf` or `optimize` request at a new level. */
   | { id: number; type: 'isosurface'; channel: DensityRequest; isoLevel: number };
+
+/**
+ * A stop flag for an `optimize` request: one shared 32-bit word, zero until
+ * the page raises it. Call only where `canStopInPlace` holds - elsewhere there
+ * is no `SharedArrayBuffer` to make it from.
+ */
+export function stopFlag(): Int32Array {
+  return new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+}
+
+/** Asks the relaxation that carries `flag` to stop after its current step. */
+export function raiseStop(flag: Int32Array): void {
+  Atomics.store(flag, 0, 1);
+}
+
+/**
+ * Whether the page has asked the relaxation to stop. The worker reads it after
+ * posting each step, so the step that ends the relaxation reaches the page
+ * like every other.
+ */
+export function stopRequested(flag: Int32Array | null | undefined): boolean {
+  return flag != null && Atomics.load(flag, 0) !== 0;
+}
 
 export type WorkerResponse =
   /** Emitted once, unsolicited, when the WASM module has finished loading. */

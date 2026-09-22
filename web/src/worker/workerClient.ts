@@ -5,7 +5,11 @@
  * cannot be interrupted from outside, so `cancelAll` terminates the worker and
  * spawns a fresh one. That keeps the UI responsive when the user edits the
  * molecule mid-calculation, at the cost of re-initialising the module (a few
- * milliseconds).
+ * milliseconds). The user's 中止 keeps what a relaxation reached instead
+ * (`stopRelaxations`): on a page that can share memory with the worker it is
+ * asked to stop after its current step, and answers with the numbers as well;
+ * anywhere else it is terminated the same way, and only the structure is kept -
+ * the steps have already crossed.
  *
  * A request is not one message each way. A geometry optimisation sends a `step`
  * for every structure it accepts and only then the calculation that ends it, and
@@ -22,8 +26,13 @@
  * and so is every request after it - rather than all of them waiting for a
  * `ready` that will never come, which is what used to happen.
  */
-import { isTerminal } from './protocol';
-import { checkEngineSupport, EngineUnavailableError, type EngineProblem } from './engineSupport';
+import { isTerminal, raiseStop, stopFlag } from './protocol';
+import {
+  canStopInPlace,
+  checkEngineSupport,
+  EngineUnavailableError,
+  type EngineProblem,
+} from './engineSupport';
 import type {
   CalculationProgress,
   DensityRequest,
@@ -51,7 +60,46 @@ type Pending = {
   reject: (error: Error) => void;
   /** Called for each intermediate response, which does not settle the promise. */
   onPartial?: (response: WorkerResponse) => void;
+  /**
+   * Set for an `optimize` request: the last geometry it streamed, which is
+   * what {@link DftWorkerClient.stopRelaxations} keeps, and the flag that
+   * stops it in place where the page can share memory.
+   */
+  relaxation?: { last: OptimizationStep | null; flag: Int32Array | null };
 };
+
+/**
+ * What {@link DftWorkerClient.stopRelaxations} did.
+ *
+ * - `idle` — no relaxation was in flight, and nothing changed.
+ * - `stopping` — each was asked to stop after the step it is on, and will
+ *   answer normally, with `reason: 'interrupted'` and the calculation at the
+ *   structure it reached.
+ * - `stopped` — the worker was replaced, and each rejected with a
+ *   {@link RelaxationStopped}.
+ */
+export type StopOutcome = 'idle' | 'stopping' | 'stopped';
+
+/**
+ * A relaxation the user stopped, and how far it had got.
+ *
+ * What {@link DftWorkerClient.stopRelaxations} rejects a relaxation with. The
+ * worker is replaced to stop it, and the calculation it was holding goes with
+ * it - but every accepted geometry has already crossed the boundary as a
+ * `step`, so the last of them is still here to keep. Not a failure: the
+ * structure it reached is a real, partly relaxed one, and only the numbers of
+ * it are lost.
+ */
+export class RelaxationStopped extends Error {
+  /** The last geometry the optimiser accepted, or null if none had arrived. */
+  readonly last: OptimizationStep | null;
+
+  constructor(last: OptimizationStep | null) {
+    super(last === null ? 'stopped before the first step' : `stopped after step ${last.step}`);
+    this.name = 'RelaxationStopped';
+    this.last = last;
+  }
+}
 
 export class DftWorkerClient {
   #worker: Worker | null = null;
@@ -65,15 +113,21 @@ export class DftWorkerClient {
   /** Set once the engine is known not to run here; every request rejects with it. */
   #unavailable: EngineUnavailableError | null = null;
 
+  /** Whether a relaxation can be asked to stop rather than terminated. */
+  readonly #stopInPlace: boolean;
+
   /**
    * `support` is what `checkEngineSupport()` says about this browser; the tests
-   * pass it in to play one without WebAssembly SIMD.
+   * pass it in to play one without WebAssembly SIMD. `stopInPlace` is what
+   * `canStopInPlace()` says about this page, which the tests play both ways.
    */
   constructor(
     spawnWorker: SpawnWorker = spawnDftWorker,
     support: EngineProblem | null = checkEngineSupport(),
+    stopInPlace: boolean = canStopInPlace(),
   ) {
     this.#spawnWorker = spawnWorker;
+    this.#stopInPlace = stopInPlace;
     if (support !== null) {
       // Not even worth downloading the module: it cannot compile here.
       this.#giveUp(new EngineUnavailableError(support));
@@ -146,8 +200,10 @@ export class DftWorkerClient {
     this.#worker = worker;
   }
 
-  #rejectAll(error: Error) {
-    for (const pending of this.#pending.values()) pending.reject(error);
+  #rejectAll(error: Error | ((pending: Pending) => Error)) {
+    for (const pending of this.#pending.values()) {
+      pending.reject(typeof error === 'function' ? error(pending) : error);
+    }
     this.#pending.clear();
   }
 
@@ -162,6 +218,7 @@ export class DftWorkerClient {
   #send<T extends WorkerResponse>(
     build: (id: number) => WorkerRequest,
     onPartial?: Pending['onPartial'],
+    relaxation?: Pending['relaxation'],
     transfer: Transferable[] = [],
   ): Promise<T> {
     if (this.#unavailable) return Promise.reject(this.#unavailable);
@@ -172,6 +229,7 @@ export class DftWorkerClient {
         resolve: resolve as Pending['resolve'],
         reject,
         onPartial,
+        relaxation,
       });
       this.#ready.then(() => this.#worker?.postMessage(request, transfer));
     });
@@ -233,6 +291,11 @@ export class DftWorkerClient {
    *
    * `level` is what the calculation is for, and holds for every step; omitted
    * means `'shape'`.
+   *
+   * {@link stopRelaxations} ends it early the way the user does: normally
+   * with `reason: 'interrupted'` where the worker can be asked to, and
+   * otherwise by rejecting with a {@link RelaxationStopped} that carries the
+   * last step.
    */
   async optimize(
     z: Uint8Array,
@@ -242,12 +305,19 @@ export class DftWorkerClient {
     budgetMs?: number | null,
     level?: ModelLevel,
   ): Promise<ScfOutcome> {
+    const relaxation: NonNullable<Pending['relaxation']> = {
+      last: null,
+      flag: this.#stopInPlace ? stopFlag() : null,
+    };
     const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>(
-      (id) => ({ id, type: 'optimize', z, xyz, budgetMs, level }),
+      (id) => ({ id, type: 'optimize', z, xyz, budgetMs, level, stop: relaxation.flag }),
       (partial) => {
-        if (partial.type === 'step') onStep(partial.step);
-        else if (partial.type === 'progress') onProgress?.(partial.progress);
+        if (partial.type === 'step') {
+          relaxation.last = partial.step;
+          onStep(partial.step);
+        } else if (partial.type === 'progress') onProgress?.(partial.progress);
       },
+      relaxation,
     );
     return response.result;
   }
@@ -277,8 +347,44 @@ export class DftWorkerClient {
    * isosurface cannot be drawn again until the next `scf`.
    */
   cancelAll() {
+    this.#replaceWorker(() => new Error('cancelled'));
+  }
+
+  /**
+   * Stops the relaxations in flight where they are, as the user's 中止 does.
+   *
+   * Unlike {@link cancelAll}, which is for a molecule about to be replaced,
+   * this keeps what a relaxation reached. Where the page can share memory
+   * with the worker, each is asked to stop after the step it is on and
+   * answers normally - numbers, record and surface included - and the worker
+   * and anything else it is doing are left alone. That waits for the step to
+   * finish, so it is only done for a relaxation that has a step to show for
+   * it, and `immediately` skips it for a user who will not wait.
+   *
+   * Otherwise the worker is replaced: each relaxation rejects with a
+   * {@link RelaxationStopped} carrying the last geometry it streamed, and
+   * anything else in flight is cancelled as `cancelAll` would. Nothing happens
+   * when no relaxation is in flight - one that has just answered keeps its
+   * worker, and the density the worker is holding for it.
+   */
+  stopRelaxations(immediately = false): StopOutcome {
+    const relaxations = [...this.#pending.values()].flatMap((pending) =>
+      pending.relaxation ? [pending.relaxation] : [],
+    );
+    if (relaxations.length === 0) return 'idle';
+    if (!immediately && relaxations.every(({ flag, last }) => flag !== null && last !== null)) {
+      for (const { flag } of relaxations) if (flag) raiseStop(flag);
+      return 'stopping';
+    }
+    this.#replaceWorker((pending) =>
+      pending.relaxation ? new RelaxationStopped(pending.relaxation.last) : new Error('cancelled'),
+    );
+    return 'stopped';
+  }
+
+  #replaceWorker(reasonFor: (pending: Pending) => Error) {
     this.#worker?.terminate();
-    this.#rejectAll(new Error('cancelled'));
+    this.#rejectAll(reasonFor);
     // An engine that could not start the first time will not the second.
     if (!this.#unavailable) this.#spawn();
   }

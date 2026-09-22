@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DftWorkerClient } from './workerClient';
+import { DftWorkerClient, RelaxationStopped } from './workerClient';
 import { EngineUnavailableError } from './engineSupport';
+import { stopRequested } from './protocol';
 import type {
   CalculationProgress,
   OptimizationStep,
@@ -65,14 +66,22 @@ class FakeWorker {
   }
 }
 
-/** A client over fake workers, with every worker it has spawned. */
-function setUp(opening?: WorkerResponse | null) {
+/**
+ * A client over fake workers, with every worker it has spawned. It plays a
+ * page that cannot share memory with them unless `stopInPlace` says otherwise
+ * - which is what Node is, and what a page served without COOP/COEP is.
+ */
+function setUp(opening?: WorkerResponse | null, { stopInPlace = false } = {}) {
   const workers: FakeWorker[] = [];
-  const client = new DftWorkerClient(() => {
-    const worker = new FakeWorker(opening);
-    workers.push(worker);
-    return worker as unknown as Worker;
-  }, null);
+  const client = new DftWorkerClient(
+    () => {
+      const worker = new FakeWorker(opening);
+      workers.push(worker);
+      return worker as unknown as Worker;
+    },
+    null,
+    stopInPlace,
+  );
   return { client, workers };
 }
 
@@ -307,6 +316,178 @@ describe('the worker client', () => {
     expect(request.id).not.toBe(id);
     workers[1].reply({ id: request.id, type: 'scf', result: outcome() });
     expect((await next).converged).toBe(true);
+  });
+});
+
+/**
+ * The user's 中止, which is not the cancel every edit makes: a relaxation keeps
+ * the structure it had reached (`App.tsx`, `stopCalculation`).
+ *
+ * These play a page that cannot share memory with its worker, which is where
+ * 中止 falls back to terminating it: served without the COOP/COEP headers, or
+ * embedded by a page that is not isolated.
+ */
+describe('stopping a relaxation by replacing the worker', () => {
+  it('keeps the last step it streamed, and replaces the worker', async () => {
+    const { client, workers } = setUp();
+    const streamed: OptimizationStep[] = [];
+    const pending = client.optimize(WATER.z, WATER.xyz, (received) => streamed.push(received));
+    const request = await workers[0].request(0);
+    // Nothing to raise: the worker is only ever told to stop by terminating it.
+    expect(request.type === 'optimize' && request.stop).toBeNull();
+    const { id } = request;
+    workers[0].reply(
+      { id, type: 'step', step: step(0) },
+      { id, type: 'step', step: step(1) },
+      { id, type: 'step', step: step(2) },
+    );
+    await vi.waitFor(() => expect(streamed).toHaveLength(3));
+
+    expect(client.stopRelaxations()).toBe('stopped');
+    const error = await pending.then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(RelaxationStopped);
+    const { last } = error as RelaxationStopped;
+    // The structure the optimiser had reached, as it arrived.
+    expect(last?.step).toBe(2);
+    expect(last?.xyz).toBeInstanceOf(Float32Array);
+    expect([...(last?.xyz ?? [])]).toEqual([...step(2).xyz]);
+    expect(last?.energy).toBe(step(2).energy);
+
+    // Stopped by replacing the worker, which serves nothing from here on.
+    expect(workers[0].terminated).toBe(true);
+    expect(workers).toHaveLength(2);
+    const next = client.scf(WATER.z, WATER.xyz);
+    const served = await workers[1].request(0);
+    workers[1].reply({ id: served.id, type: 'scf', result: outcome() });
+    expect((await next).converged).toBe(true);
+  });
+
+  it('has nothing to keep before the first step', async () => {
+    const { client, workers } = setUp();
+    const pending = client.optimize(WATER.z, WATER.xyz, () => {});
+    const { id } = await workers[0].request(0);
+    workers[0].reply({ id, type: 'progress', progress: { stage: 'searching' } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    client.stopRelaxations();
+    await expect(pending).rejects.toMatchObject({ name: 'RelaxationStopped', last: null });
+  });
+
+  it('cancels a single point in flight beside it, as an edit would', async () => {
+    const { client, workers } = setUp();
+    const relaxation = client.optimize(WATER.z, WATER.xyz, () => {});
+    const single = client.scf(WATER.z, WATER.xyz);
+    await workers[0].request(1);
+
+    client.stopRelaxations();
+    await expect(relaxation).rejects.toBeInstanceOf(RelaxationStopped);
+    await expect(single).rejects.toThrow('cancelled');
+  });
+
+  it('leaves the worker alone when no relaxation is in flight', async () => {
+    // A relaxation that answered a moment before the button was pressed: its
+    // worker is holding the density the surface is about to be cut from.
+    const { client, workers } = setUp();
+    const pending = client.optimize(WATER.z, WATER.xyz, () => {});
+    const { id } = await workers[0].request(0);
+    workers[0].reply({ id, type: 'scf', result: outcome() });
+    await pending;
+
+    expect(client.stopRelaxations()).toBe('idle');
+    expect(workers[0].terminated).toBe(false);
+    expect(workers).toHaveLength(1);
+  });
+});
+
+/**
+ * The same 中止 on a page that is cross-origin isolated, where the worker can
+ * be asked to stop through memory it shares with the page - and answers with
+ * the numbers of the structure it reached, not only the structure.
+ */
+describe('stopping a relaxation in place', () => {
+  it('raises the flag the request carries, and hears the worker answer', async () => {
+    const { client, workers } = setUp(undefined, { stopInPlace: true });
+    const streamed: OptimizationStep[] = [];
+    const pending = client.optimize(WATER.z, WATER.xyz, (received) => streamed.push(received));
+    const request = await workers[0].request(0);
+    if (request.type !== 'optimize') throw new Error('unreachable');
+    // Shared, so the copy the worker holds is the page's own word.
+    expect(request.stop).toBeInstanceOf(Int32Array);
+    expect(request.stop?.buffer).toBeInstanceOf(SharedArrayBuffer);
+    expect(stopRequested(request.stop)).toBe(false);
+
+    const { id } = request;
+    workers[0].reply({ id, type: 'step', step: step(0) }, { id, type: 'step', step: step(1) });
+    await vi.waitFor(() => expect(streamed).toHaveLength(2));
+
+    expect(client.stopRelaxations()).toBe('stopping');
+    // What the worker reads after posting a step (`dft.worker.ts`).
+    expect(stopRequested(request.stop)).toBe(true);
+    expect(workers[0].terminated).toBe(false);
+
+    // It finishes the step it was on, and ends there, as a budget would.
+    workers[0].reply(
+      { id, type: 'step', step: step(2) },
+      {
+        id,
+        type: 'scf',
+        result: outcome({
+          optimization: {
+            converged: false,
+            reason: 'interrupted',
+            steps: 2,
+            xyz: [...step(2).xyz],
+            maxForce: 0.02,
+          },
+        }),
+      },
+    );
+    const result = await pending;
+    expect(result.optimization?.reason).toBe('interrupted');
+    expect(result.energy).toBe(outcome().energy);
+    expect(streamed.map((each) => each.step)).toEqual([0, 1, 2]);
+    // The worker - and the calculation it holds for the surface - is still the one.
+    expect(workers).toHaveLength(1);
+    const surface = client.isosurface('total', 0.05);
+    const cut = await workers[0].request(1);
+    expect(cut.type).toBe('isosurface');
+    workers[0].reply({ id: cut.id, type: 'error', message: 'fake' });
+    await expect(surface).rejects.toThrow('fake');
+  });
+
+  it('does not wait for a first step that has not come', async () => {
+    // Before the first step there is nothing reached to keep numbers for, and
+    // the wait is the longest one: the search for the electrons comes first.
+    const { client, workers } = setUp(undefined, { stopInPlace: true });
+    const pending = client.optimize(WATER.z, WATER.xyz, () => {});
+    await workers[0].request(0);
+
+    expect(client.stopRelaxations()).toBe('stopped');
+    await expect(pending).rejects.toMatchObject({ name: 'RelaxationStopped', last: null });
+    expect(workers[0].terminated).toBe(true);
+  });
+
+  it('stops at once when asked again, keeping the structure', async () => {
+    // The user who would rather not wait for the step: the second press.
+    const { client, workers } = setUp(undefined, { stopInPlace: true });
+    const streamed: OptimizationStep[] = [];
+    const pending = client.optimize(WATER.z, WATER.xyz, (received) => streamed.push(received));
+    const { id } = await workers[0].request(0);
+    workers[0].reply({ id, type: 'step', step: step(0) }, { id, type: 'step', step: step(1) });
+    await vi.waitFor(() => expect(streamed).toHaveLength(2));
+    expect(client.stopRelaxations()).toBe('stopping');
+
+    expect(client.stopRelaxations(true)).toBe('stopped');
+    const error = await pending.then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(RelaxationStopped);
+    expect((error as RelaxationStopped).last?.step).toBe(1);
+    expect(workers[0].terminated).toBe(true);
   });
 });
 

@@ -27,7 +27,7 @@ import init, {
   type Calculation,
 } from '../wasm/dft_wasm.js';
 import wasmUrl from '../wasm/dft_wasm_bg.wasm?url';
-import { progressFromEngine } from './protocol';
+import { progressFromEngine, stopRequested } from './protocol';
 import type {
   DensityChannel,
   ElementInfo,
@@ -122,6 +122,11 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         // worker would throw that structure away with it. Like the engine's own
         // budget it is only tested between steps, so a single step always runs
         // to the end.
+        //
+        // The user's 中止 takes the same way out, through the flag the page
+        // shares with this worker: the one thing that reaches it while the
+        // relaxation is blocking its message loop. The calculation it ends on
+        // is kept like any other, so the surface can still be cut from it.
         const deadline =
           request.budgetMs === undefined || request.budgetMs === null
             ? Infinity
@@ -147,6 +152,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
               [xyz.buffer],
             );
             if (performance.now() >= deadline) throw new Error('candidate budget');
+            if (stopRequested(request.stop)) throw new Error('stopped by the user');
           },
           reportProgress(request.id),
           request.level,

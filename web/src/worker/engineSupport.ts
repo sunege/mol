@@ -71,6 +71,31 @@ export function checkEngineSupport(
   }
 }
 
+/** The part of the global scope {@link canStopInPlace} reads. */
+export interface IsolationLike {
+  crossOriginIsolated?: boolean;
+  SharedArrayBuffer?: unknown;
+}
+
+/**
+ * Whether a busy worker can be told to stop, rather than only terminated.
+ *
+ * A relaxation blocks its worker's message loop, so the only thing that can
+ * reach it mid-calculation is memory it shares with this thread - a
+ * `SharedArrayBuffer`, which browsers hand out only to a page that is
+ * cross-origin isolated (the COOP/COEP headers in `vercel.json` and
+ * `vite.config.ts`). Where it can, the user's 中止 keeps the numbers of the
+ * structure reached, not only the structure (`workerClient.ts`).
+ *
+ * Deliberately not an {@link EngineProblem}: the engine runs the same without
+ * it, and a page embedded somewhere that does not isolate it - or served
+ * without the headers - must still calculate. It only decides how 中止 works.
+ * `scope` is injectable so the tests can play both kinds of page.
+ */
+export function canStopInPlace(scope: IsolationLike = globalThis): boolean {
+  return scope.crossOriginIsolated === true && typeof scope.SharedArrayBuffer === 'function';
+}
+
 /**
  * The engine could not be started, and nothing sent to it will be answered.
  *
