@@ -603,3 +603,17 @@ ul.candidates {
   font-variant-numeric: tabular-nums;
   color: #9aa6b8;
 }
+
+/* 形を探す / 形を測る, above the buttons that start a calculation. Two equal
+   halves like the mode switch, because one of the two is always chosen. */
+.level-switch {
+  flex-wrap: nowrap;
+}
+
+.level-switch button {
+  flex: 1;
+}
+
+.hint.level-hint {
+  margin: 6px 0 10px;
+}

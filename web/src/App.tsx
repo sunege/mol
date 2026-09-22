@@ -22,6 +22,13 @@ import { RecordsPanel } from './components/RecordsPanel';
 import { exportFileName, importProblemText, importedText, settledCount } from './components/records';
 import { SearchPanel } from './components/SearchPanel';
 import { NUDGED_COUNT } from './components/search';
+import {
+  DEFAULT_LEVEL,
+  LEVEL_GROUP_LABEL,
+  LEVEL_ORDER,
+  levelHint,
+  levelLabel,
+} from './components/level';
 import { SearchPool, poolSize, type Candidate } from './search/pool';
 import { candidateAsBuilt, nudgedCandidates } from './search/candidates';
 import { hasUsableStructure } from './worker/protocol';
@@ -32,6 +39,7 @@ import type {
   DensityRequest,
   ElementInfo,
   IsoMesh,
+  ModelLevel,
   OptimizationOutcome,
   ScfOutcome,
 } from './worker/protocol';
@@ -122,6 +130,13 @@ export default function App() {
   // `LiveMeasurement` for why the viewer and not `atoms`.
   const [liveMeasurement] = useState(() => new LiveMeasurement());
   const [result, setResult] = useState<ScfOutcome | null>(null);
+  // What the next calculation is for (`components/level.ts`). Chosen per
+  // calculation and fixed while one runs.
+  const [level, setLevel] = useState<ModelLevel>(DEFAULT_LEVEL);
+  // What the numbers in `result` were solved for, which is not necessarily the
+  // choice above: that can change as soon as the calculation is over. Set
+  // wherever `result` gets an answer.
+  const [resultLevel, setResultLevel] = useState<ModelLevel>(DEFAULT_LEVEL);
   const [computing, setComputing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Set when this browser cannot run the engine at all, which is a notice in
@@ -760,12 +775,13 @@ export default function App() {
     setError(null);
     const onProgress = beginJob('single', token);
     client
-      .scf(z, xyz, onProgress)
+      .scf(z, xyz, onProgress, level)
       .then((outcome) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
         setComputing(false);
         setResult(outcome);
+        setResultLevel(level);
         if (!outcome.converged) {
           endJob(false);
           restoreMode();
@@ -789,6 +805,7 @@ export default function App() {
       });
   }, [
     atoms,
+    level,
     showDensity,
     channel,
     isoLevel,
@@ -861,6 +878,9 @@ export default function App() {
           player.push(step.xyz);
         },
         onProgress,
+        // The front worker has no budget of its own: the user stops it.
+        null,
+        level,
       )
       .then((outcome) => {
         if (requestRef.current !== token) return;
@@ -868,6 +888,7 @@ export default function App() {
         relaxingRef.current = false;
         setComputing(false);
         setResult(outcome);
+        setResultLevel(level);
 
         const relaxed = outcome.optimization;
         if (!outcome.converged || !relaxed || !hasUsableStructure(relaxed)) {
@@ -879,20 +900,30 @@ export default function App() {
           return;
         }
         keepObserving();
-        // A shape worth keeping: into the log, whether it settled or ran out of
-        // time. What it was built from is the structure before the nudge.
-        const record = createRecord(
-          {
-            z: Array.from(z),
-            built: Array.from(xyz),
-            trajectory: stepsRef.current.map((step) => step.xyz),
-            stepEnergies: stepsRef.current.map((step) => step.energy),
-            outcome,
-          },
-          symbolOfRef.current,
-        );
-        keepRecord(record);
-        setOpenRecordId(record.id);
+        if (level === 'shape') {
+          // A shape worth keeping: into the log, whether it settled or ran out
+          // of time. What it was built from is the structure before the nudge.
+          const record = createRecord(
+            {
+              z: Array.from(z),
+              built: Array.from(xyz),
+              trajectory: stepsRef.current.map((step) => step.xyz),
+              stepEnergies: stepsRef.current.map((step) => step.energy),
+              outcome,
+            },
+            symbolOfRef.current,
+          );
+          keepRecord(record);
+          setOpenRecordId(record.id);
+        } else {
+          // Not recorded until records carry their level (V3-5 removes this
+          // branch). `createRecord` stamps every record with the model of
+          // "形を探す" (`ENGINE_MODEL`), so this one would be ranked among
+          // those - on an energy scale thousands of kJ/mol away - and would
+          // stay in the browser doing it. The record that was open is closed
+          // all the same: the atoms have moved off it.
+          setOpenRecordId(null);
+        }
         // Whatever stopped it, the structure it reached is one the electrons
         // were solved for, so it is the molecule now - partly relaxed if the
         // budget ran out, fully relaxed if it settled. It is committed here
@@ -923,6 +954,7 @@ export default function App() {
   }, [
     atoms,
     presetId,
+    level,
     showDensity,
     channel,
     isoLevel,
@@ -947,9 +979,13 @@ export default function App() {
    * worker. Nothing here touches `result` - the numbers on screen stay the
    * record's, computed on the optimiser's finer grid - and a structure that
    * will not solve simply gets no surface.
+   *
+   * It is solved at `recordLevel`, never at the level chosen in the panel: the
+   * surface has to belong to the numbers beside it, and the choice may have
+   * moved on.
    */
   const solveForSurface = useCallback(
-    (structure: SceneAtom[]) => {
+    (structure: SceneAtom[], recordLevel: ModelLevel) => {
       const client = clientRef.current;
       if (!client || structure.length === 0) return;
       const { z, xyz } = toWorkerArrays(structure);
@@ -959,7 +995,7 @@ export default function App() {
       setComputing(true);
       const onProgress = beginJob('single', token);
       client
-        .scf(z, xyz, onProgress)
+        .scf(z, xyz, onProgress, recordLevel)
         .then((outcome) => {
           if (requestRef.current !== token) return;
           inFlightRef.current = false;
@@ -999,6 +1035,9 @@ export default function App() {
    * being shown, the electrons are solved again at the structure the record
    * ended on and only the surface is taken from that. A structure that will not
    * solve simply gets no surface; its record still says what it said.
+   *
+   * The choice of what to calculate for goes back to what the record was made
+   * for, so that pressing a button next continues the way it was made.
    */
   const openRecord = useCallback(
     (record: StructureRecord) => {
@@ -1014,6 +1053,9 @@ export default function App() {
       setMeasured([]);
       setError(null);
       setResult(record.outcome);
+      const recorded = levelOfRecord(record);
+      setResultLevel(recorded);
+      setLevel(recorded);
       // "Before" is the structure this record was built from, so the observe
       // panel reads the same as it did when the relaxation finished.
       setRelaxedFrom(atomsOfRecord(record, record.built));
@@ -1024,7 +1066,7 @@ export default function App() {
       wantedRef.current = null;
       meshRequestRef.current += 1;
       setMesh(null);
-      if (showDensity) solveForSurface(opened);
+      if (showDensity) solveForSurface(opened, recorded);
     },
     [atomsOfRecord, cancelCalculation, stopAnimation, switchMode, showDensity, solveForSurface],
   );
@@ -1111,6 +1153,11 @@ export default function App() {
     ],
   );
 
+  const openedRecord = records.find((record) => record.id === openRecordId) ?? null;
+  // A string rather than the record, so the effect below does not run again
+  // every time the log changes around it.
+  const openedLevel = openedRecord === null ? null : levelOfRecord(openedRecord);
+
   /**
    * Turning the cloud on while a record is open.
    *
@@ -1119,10 +1166,10 @@ export default function App() {
    * the toggle has a density to cut already.
    */
   useEffect(() => {
-    if (!showDensity || hasDensityRef.current || openRecordId === null) return;
+    if (!showDensity || hasDensityRef.current || openedLevel === null) return;
     if (inFlightRef.current) return;
-    solveForSurface(atoms);
-  }, [showDensity, openRecordId, atoms, solveForSurface]);
+    solveForSurface(atoms, openedLevel);
+  }, [showDensity, openRecordId, openedLevel, atoms, solveForSurface]);
 
   /**
    * Plays the relaxation this record was made by, from the structure it started
@@ -1254,8 +1301,6 @@ export default function App() {
     },
     [recordGroups],
   );
-  const openedRecord = records.find((record) => record.id === openRecordId) ?? null;
-
   const relaxation = result?.optimization ?? null;
   const solved = result !== null && result.converged;
   const settled = solved && (relaxation === null || relaxation.converged);
@@ -1384,6 +1429,23 @@ export default function App() {
         </div>
 
         <h2>計算</h2>
+        {/* Fixed while a calculation runs: the answer on its way belongs to
+            the choice it was started with. */}
+        <div className="row level-switch" role="group" aria-label={LEVEL_GROUP_LABEL}>
+          {LEVEL_ORDER.map((each) => (
+            <button
+              key={each}
+              type="button"
+              className={level === each ? 'active' : ''}
+              aria-pressed={level === each}
+              disabled={unavailable !== null || computing}
+              onClick={() => setLevel(each)}
+            >
+              {levelLabel(each)}
+            </button>
+          ))}
+        </div>
+        <p className="hint level-hint">{levelHint(level)}</p>
         <div className="row">
           <button
             type="button"
@@ -1496,7 +1558,9 @@ export default function App() {
                 '計算中…'
               )
             ) : solved ? (
-              settled ? '完了' : '途中で終了'
+              // Which of the two the numbers are from, since the choice in the
+              // panel is free to differ once the calculation is over.
+              `${settled ? '完了' : '途中で終了'}（${levelLabel(resultLevel)}）`
             ) : (
               // A calculation that did not converge is deliberately blank rather
               // than described: the molecule flying apart on screen is what says
@@ -1534,6 +1598,17 @@ export default function App() {
       </aside>
     </div>
   );
+}
+
+/**
+ * What a record was calculated for.
+ *
+ * Every record is at "形を探す" until records carry their level (V3-5, which
+ * reads it here): a "形を測る" relaxation is not recorded before then (`relax`),
+ * and the search runs at "形を探す".
+ */
+function levelOfRecord(_record: StructureRecord): ModelLevel {
+  return 'shape';
 }
 
 /**
