@@ -1510,6 +1510,55 @@ Coulomb 項 `Σ D_μν D_λσ ∂(μν|λσ)` が bra 側と ket 側に分解で
   剥がして `.mts` を直接動かせる**ので、`web/src/wasm/dft_wasm.js` の `initSync` と
   `molecules/presets.ts` をそのまま import する素のスクリプトのほうが速くて確実。
 
+### V3-4 の実装メモ（計算ごとに段を選ぶ UI、2026-09-22）
+
+- **形**: 文言は `components/level.ts`（`WORDS: Record<ModelLevel, …>` に名前・目的・時間、
+  `LEVEL_ORDER`・`DEFAULT_LEVEL`・`LEVEL_GROUP_LABEL`＝「計算の目的」・`levelLabel()`・
+  `levelHint()`）。パネルは「計算」の見出しの下、ボタンの上に 2 等分のスイッチ
+  （`.level-switch`、観測/編集と同じ作り）と 1 行のヒント。**`computing` の間は無効**なので、
+  記録を開いたときの等値面の一点計算の間も固まる。
+- **App の状態は 2 つ**: `level`（次の計算のための選択）と `resultLevel`（`result` の数値を
+  出した段）。計算が終われば選択は自由に変えられるので、選択と画面の数値は食い違いうる。
+  そこで**状態の行を「完了（形を探す）」の形にした**（チケットに無い追加。段の名前は F4 で
+  出してよい語）。`resultLevel` は `setResult` に答えを入れる 3 か所（`calculate`・`relax`・
+  `openRecord`）でだけ書く。
+- **段を渡す 3 か所**: `calculate()` → `scf(…, level)`、`relax()` → `optimize(…, onProgress,
+  null, level)`（前面は予算を持たないので `null` を明示。Worker は `null` と省略を同じに扱う）、
+  `solveForSurface(structure, recordLevel)`。最後のものは引数名を `recordLevel` にして、
+  選択の `level` を影で隠さないようにした。
+- **記録の等値面の段**: `openRecord` は `levelOfRecord(record)` を渡し、「記録を開いたまま雲を
+  オンにする」effect は `openedLevel`（開いている記録の段の**文字列**）を渡す。
+  **却下した案**: effect の依存に `resultLevel` を入れる → 記録を開いたまま別の段で計算して
+  発散すると `resultLevel` が変わって effect が走り、発散のアニメーションの裏で一点計算を
+  やり直す。依存に `records` を入れる → 記録の追加や名前の変更のたびに走り直す（一点計算が
+  解けなかった記録では毎回やり直す）。`levelOfRecord()` は App.tsx の末尾で**いつも
+  `'shape'`**（V3-5 がここで記録の段を読む）。
+- **記録を開くと選択も記録の段に戻す**（`setLevel(recorded)`、チケットの 4、V3-5 の 5 と同じ）。
+- **`'measure'` の緩和は記録しない**（V3-3 のメモどおり。`level === 'shape'` のときだけ
+  `createRecord` → `keepRecord` → `setOpenRecordId`、それ以外は `setOpenRecordId(null)`。
+  コメントに「V3-5 で外す」）。
+- **Claude のブラウザでの確認**（dev サーバー、水。`Worker.prototype.postMessage` を差し替えて
+  リクエストの `level` を読んだ）:
+
+  | 操作 | 送った `level` | 結果 |
+  | --- | --- | --- |
+  | 形を探す・この形のまま計算 | `shape` | −74.732061 Ha、8 回、0.29 s、完了（形を探す） |
+  | 形を測る・この形のまま計算 | `measure` | −75.844393 Ha、9 回、0.46 s、完了（形を測る） |
+  | 形を探す・安定な形にする | `shape`（`budgetMs: null`） | −74.743110 Ha、4 回、記録 10 → 11 件、開いた |
+  | 続けて形を測る・安定な形にする | `measure` | −75.844985 Ha、7 回、記録は 11 件のまま、開いていた記録は閉じた |
+  | 形を測るを選んだまま記録を開く | `shape` | 選択が形を探すに戻る、数値は記録の −74.743110 |
+  | 雲オフで記録を開き、形を測るを選んで雲オン | `shape` | 記録の段で解く。状態は「完了（形を探す）」 |
+  | 形を測るの緩和を 0.15 秒で中止 | `measure` | 計算中は両方とも無効、中止で戻る、記録は増えない |
+
+  `measure` の緩和が V3-3 の 5 歩でなく 7 歩なのは、プリセットではなく `shape` で緩和した後の
+  形から始めたため。確認で作った水の記録は消した。
+- **気づいたこと（直していない）**: パネルでは新しい「形を探す」のすぐ下に、v2 の探索の見出し
+  **「形をさがす」**がある。読みが同じで、講義では同じものに聞こえる。段の名前は確定なので
+  触らず、V3-6 のチケットに書いた。
+- **テスト**: `level.test.ts` 5 本（名前と順・既定・ヒントの文言・「精度/正確/正しく/高い/低い」
+  を使わない・F4 の禁止語に `6-31G` を足したもの）。`npm test` 292 件（287 → 292）、lint の
+  警告は触る前と同じ 9 件。Rust と `web/src/wasm/` は触っていない。
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
