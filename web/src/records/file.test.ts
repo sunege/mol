@@ -7,6 +7,7 @@ import {
   writeStructureLog,
 } from './file';
 import { fakeRecord, isSupportedElement } from './fixtures';
+import { groupRecords } from './log';
 
 const WATER = fakeRecord({ energy: -74.74311011, id: 'water' });
 const METHANE = fakeRecord({ energy: -39.61713241, z: [6, 1, 1, 1, 1], id: 'methane' });
@@ -36,6 +37,33 @@ describe('writing and reading back', () => {
     expect(file.exportedAt).toBe('2026-09-20T09:00:00.000Z');
   });
 
+  it('keeps the level each record was solved at', () => {
+    const measured = fakeRecord({ energy: -75.84498516, level: 'measure', id: 'measured' });
+    const result = readStructureLog(writeStructureLog([WATER, measured]), isSupportedElement);
+    expect(result).toEqual({ ok: true, records: [WATER, measured] });
+    if (!result.ok) return;
+    expect(groupRecords(result.records).map((group) => group.level).sort()).toEqual([
+      'measure',
+      'shape',
+    ]);
+  });
+
+  it('opens a file written before records had levels, into the groups of finding the shape', () => {
+    // Files prepared for a lecture before V3-5: version 1, as now, and every
+    // record with the one model there was. Nothing about them has to change.
+    const before = { ...WATER, model: 'sto-3g/lda-vwn5/fine' };
+    const text = JSON.stringify({
+      format: LOG_FORMAT,
+      version: 1,
+      exportedAt: '2026-09-20T09:00:00.000Z',
+      records: [before],
+    });
+    const result = readStructureLog(text, isSupportedElement);
+    expect(result).toEqual({ ok: true, records: [before] });
+    if (!result.ok) return;
+    expect(groupRecords(result.records)[0].level).toBe('shape');
+  });
+
   it('writes an empty log rather than nothing', () => {
     expect(readStructureLog(writeStructureLog([]), isSupportedElement)).toEqual({
       ok: true,
@@ -62,9 +90,22 @@ describe('refusing a file, with a reason', () => {
   });
 
   it('refuses a version it does not know, and says which', () => {
-    expect(readStructureLog(fileOf([], { version: 2 }), isSupportedElement)).toEqual({
+    for (const version of [0, 2]) {
+      expect(readStructureLog(fileOf([WATER], { version }), isSupportedElement)).toEqual({
+        ok: false,
+        problem: { kind: 'version', version },
+      });
+    }
+  });
+
+  it('refuses the whole file for one record of a model it never wrote', () => {
+    // A record that cannot be solved again at its own level would open with no
+    // surface in front of a class; the ones beside it are refused with it.
+    const odd = { ...METHANE, model: 'sto-3g/lda-vwn5/medium' };
+    const result = readStructureLog(fileOf([WATER, odd]), isSupportedElement);
+    expect(result).toEqual({
       ok: false,
-      problem: { kind: 'version', version: 2 },
+      problem: { kind: 'shape', detail: 'model が違います', index: 1 },
     });
   });
 

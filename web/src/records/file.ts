@@ -15,7 +15,7 @@
  * records already in the browser are left alone.
  */
 import type { OptimizationReason } from '../worker/protocol';
-import type { RecordSource, StructureRecord } from './record';
+import { levelOfModel, type RecordSource, type StructureRecord } from './record';
 
 export const LOG_FORMAT = 'mol-structure-log';
 
@@ -26,6 +26,13 @@ export const LOG_FORMAT = 'mol-structure-log';
  * first. A file whose version is not this one is refused rather than guessed
  * at, and when the format does change, this is where the reading of the earlier
  * version goes.
+ *
+ * Records came to carry their level (V3-5) without a new version, because the
+ * shape of a record did not change: the level is read from `model`, which every
+ * record already had, and every file written before then carries the one
+ * string that means "形を探す". So files prepared before it still open, into the
+ * groups they were in. What changed is that a `model` this program never wrote
+ * is now refused, since such a record could not be solved again at its level.
  */
 export const LOG_VERSION = 1;
 
@@ -147,6 +154,7 @@ function checkRecord(raw: unknown, isSupportedElement: (z: number) => boolean): 
   for (const field of ['id', 'savedAt', 'name', 'model', 'formula'] as const) {
     if (typeof raw[field] !== 'string' || raw[field] === '') return bad(`${field} がありません`);
   }
+  if (levelOfModel(raw.model as string) === null) return bad('model が違います');
   if (!Array.isArray(raw.z) || raw.z.length === 0) return bad('原子がありません');
   for (const z of raw.z) {
     if (!Number.isInteger(z) || (z as number) < 1) return bad('原子番号が数ではありません');

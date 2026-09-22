@@ -5,11 +5,13 @@
  * compares with the others of the same molecule - a difference in kJ/mol and a
  * bar for how deep the valley is. Nothing about the calculation itself reaches
  * this file (requirement F4): the charge that separates one comparable set from
- * another is in the key, not on the screen.
+ * another is in the key, not on the screen, and the level that separates them
+ * is named by what it is for (`levelLabel`), never by its basis.
  */
 import type { LogEntry, LogGroup } from '../records/log';
 import { SAME_VALLEY_KJ_PER_MOL } from '../records/log';
 import type { ImportProblem } from '../records/file';
+import { levelLabel } from './level';
 
 export const NO_RECORDS =
   'まだ記録がありません。「安定な形にする」を押すと、落ち着いた形がここに残ります。';
@@ -84,10 +86,17 @@ export function spreadOf(group: LogGroup): number {
   return group.entries.reduce((most, entry) => Math.max(most, entry.relative ?? 0), 0);
 }
 
-/** `H₂O · 3 件（2 種類の形）`, or just the count when there is one shape. */
+/**
+ * `H₂O · 形を探す · 3 件（2 種類の形）`, without the shapes when there is one.
+ *
+ * The level is always there, because the same molecule can have a group at
+ * each and they must not read as one. A group whose level is not known says
+ * none rather than a guess.
+ */
 export function groupHeading(group: LogGroup): string {
+  const level = group.level === null ? '' : ` · ${levelLabel(group.level)}`;
   const shapes = group.valleys >= 2 ? `（${group.valleys} 種類の形）` : '';
-  return `${group.formula} · ${group.entries.length} 件${shapes}`;
+  return `${group.formula}${level} · ${group.entries.length} 件${shapes}`;
 }
 
 /** `14:32` for a record made today, `9/20 14:32` for an older one. */

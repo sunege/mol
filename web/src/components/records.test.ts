@@ -83,11 +83,48 @@ describe('the bar', () => {
   });
 });
 
+/** Everything a calculation must not be described by on screen (requirement F4). */
+const FORBIDDEN = ['基底', 'STO-3G', '6-31G', '汎関数', 'LDA', 'VWN', '電荷', '多重度', 'DFT'];
+
 describe('the heading of a group', () => {
   it('counts the records, and the shapes once there are two', () => {
-    expect(groupHeading(group({ kj: 0 }))).toBe('H₂O · 1 件');
-    expect(groupHeading(group({ kj: 0 }, { kj: 0.1 }))).toBe('H₂O · 2 件');
-    expect(groupHeading(group({ kj: 0 }, { kj: 38.7 }))).toBe('H₂O · 2 件（2 種類の形）');
+    expect(groupHeading(group({ kj: 0 }))).toBe('H₂O · 形を探す · 1 件');
+    expect(groupHeading(group({ kj: 0 }, { kj: 0.1 }))).toBe('H₂O · 形を探す · 2 件');
+    expect(groupHeading(group({ kj: 0 }, { kj: 38.7 }))).toBe(
+      'H₂O · 形を探す · 2 件（2 種類の形）',
+    );
+  });
+
+  it('says which level the group is at, in the words of the choice', () => {
+    const groups = groupRecords([
+      fakeRecord({ energy: BOTTOM, id: 'shape' }),
+      fakeRecord({ energy: BOTTOM - 1, level: 'measure', id: 'measure' }),
+    ]);
+    expect(groups.map(groupHeading).sort()).toEqual(['H₂O · 形を探す · 1 件', 'H₂O · 形を測る · 1 件']);
+  });
+
+  it('says no level for a model it does not know', () => {
+    const odd = { ...fakeRecord({ energy: BOTTOM }), model: 'sto-3g/lda-vwn5/medium' };
+    expect(groupHeading(groupRecords([odd])[0])).toBe('H₂O · 1 件');
+  });
+
+  it('names no DFT parameter, whichever the level and the charge (requirement F4)', () => {
+    const groups = groupRecords(
+      (['shape', 'measure'] as const).flatMap((level) =>
+        [0, 1].map((charge) =>
+          fakeRecord({ energy: BOTTOM, level, charge, id: `${level}-${charge}` }),
+        ),
+      ),
+    );
+    expect(groups).toHaveLength(4);
+    for (const each of groups) {
+      const heading = groupHeading(each).toLowerCase();
+      for (const word of FORBIDDEN) expect(heading).not.toContain(word.toLowerCase());
+      expect(heading).not.toContain(each.entries[0].record.model);
+    }
+    // The charge splits the groups and changes nothing that is shown.
+    const [neutral, ion] = groups.filter((each) => each.level === 'measure');
+    expect(groupHeading(neutral)).toBe(groupHeading(ion));
   });
 });
 
@@ -140,8 +177,6 @@ describe('what the section says the comparison is for', () => {
   });
 
   it('says it without naming a single DFT parameter (requirement F4)', () => {
-    for (const word of ['基底', 'STO-3G', '汎関数', 'LDA', '電荷', '多重度', 'DFT']) {
-      expect(`${RECORDS_HINT}${ISOMER_CAVEAT}`).not.toContain(word);
-    }
+    for (const word of FORBIDDEN) expect(`${RECORDS_HINT}${ISOMER_CAVEAT}`).not.toContain(word);
   });
 });

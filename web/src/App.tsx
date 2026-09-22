@@ -14,7 +14,12 @@ import { headline, type JobKind, type JobState } from './components/progress';
 import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
 import { isFlat, perturb, randomSeed, PERTURB_AMPLITUDE } from './records/perturb';
-import { createRecord, hillFormula, type StructureRecord } from './records/record';
+import {
+  createRecord,
+  hillFormula,
+  levelOfModel,
+  type StructureRecord,
+} from './records/record';
 import { entryFor, groupRecords } from './records/log';
 import { openRecordStore, type RecordStore } from './records/store';
 import { mergeRecords, readStructureLog, writeStructureLog } from './records/file';
@@ -135,8 +140,9 @@ export default function App() {
   const [level, setLevel] = useState<ModelLevel>(DEFAULT_LEVEL);
   // What the numbers in `result` were solved for, which is not necessarily the
   // choice above: that can change as soon as the calculation is over. Set
-  // wherever `result` gets an answer.
-  const [resultLevel, setResultLevel] = useState<ModelLevel>(DEFAULT_LEVEL);
+  // wherever `result` gets an answer; null only for a record whose level this
+  // program does not know (`levelOfRecord`).
+  const [resultLevel, setResultLevel] = useState<ModelLevel | null>(DEFAULT_LEVEL);
   const [computing, setComputing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Set when this browser cannot run the engine at all, which is a notice in
@@ -527,6 +533,8 @@ export default function App() {
               trajectory: candidate.trajectory,
               stepEnergies: candidate.stepEnergies,
               outcome: candidate.outcome,
+              // The pool asks for no level, which the worker takes as this one.
+              level: 'shape',
               source: 'search',
               batch: candidate.batch,
             },
@@ -900,30 +908,23 @@ export default function App() {
           return;
         }
         keepObserving();
-        if (level === 'shape') {
-          // A shape worth keeping: into the log, whether it settled or ran out
-          // of time. What it was built from is the structure before the nudge.
-          const record = createRecord(
-            {
-              z: Array.from(z),
-              built: Array.from(xyz),
-              trajectory: stepsRef.current.map((step) => step.xyz),
-              stepEnergies: stepsRef.current.map((step) => step.energy),
-              outcome,
-            },
-            symbolOfRef.current,
-          );
-          keepRecord(record);
-          setOpenRecordId(record.id);
-        } else {
-          // Not recorded until records carry their level (V3-5 removes this
-          // branch). `createRecord` stamps every record with the model of
-          // "形を探す" (`ENGINE_MODEL`), so this one would be ranked among
-          // those - on an energy scale thousands of kJ/mol away - and would
-          // stay in the browser doing it. The record that was open is closed
-          // all the same: the atoms have moved off it.
-          setOpenRecordId(null);
-        }
+        // A shape worth keeping: into the log, whether it settled or ran out of
+        // time, under the level it was solved at - which keeps it apart from
+        // the other level's records. What it was built from is the structure
+        // before the nudge.
+        const record = createRecord(
+          {
+            z: Array.from(z),
+            built: Array.from(xyz),
+            trajectory: stepsRef.current.map((step) => step.xyz),
+            stepEnergies: stepsRef.current.map((step) => step.energy),
+            outcome,
+            level,
+          },
+          symbolOfRef.current,
+        );
+        keepRecord(record);
+        setOpenRecordId(record.id);
         // Whatever stopped it, the structure it reached is one the electrons
         // were solved for, so it is the molecule now - partly relaxed if the
         // budget ran out, fully relaxed if it settled. It is committed here
@@ -1055,7 +1056,7 @@ export default function App() {
       setResult(record.outcome);
       const recorded = levelOfRecord(record);
       setResultLevel(recorded);
-      setLevel(recorded);
+      if (recorded !== null) setLevel(recorded);
       // "Before" is the structure this record was built from, so the observe
       // panel reads the same as it did when the relaxation finished.
       setRelaxedFrom(atomsOfRecord(record, record.built));
@@ -1066,7 +1067,7 @@ export default function App() {
       wantedRef.current = null;
       meshRequestRef.current += 1;
       setMesh(null);
-      if (showDensity) solveForSurface(opened, recorded);
+      if (showDensity && recorded !== null) solveForSurface(opened, recorded);
     },
     [atomsOfRecord, cancelCalculation, stopAnimation, switchMode, showDensity, solveForSurface],
   );
@@ -1155,7 +1156,8 @@ export default function App() {
 
   const openedRecord = records.find((record) => record.id === openRecordId) ?? null;
   // A string rather than the record, so the effect below does not run again
-  // every time the log changes around it.
+  // every time the log changes around it. Null with no record open, and for a
+  // record whose level is not known: neither has a level to solve a surface at.
   const openedLevel = openedRecord === null ? null : levelOfRecord(openedRecord);
 
   /**
@@ -1560,7 +1562,8 @@ export default function App() {
             ) : solved ? (
               // Which of the two the numbers are from, since the choice in the
               // panel is free to differ once the calculation is over.
-              `${settled ? '完了' : '途中で終了'}（${levelLabel(resultLevel)}）`
+              (settled ? '完了' : '途中で終了') +
+              (resultLevel === null ? '' : `（${levelLabel(resultLevel)}）`)
             ) : (
               // A calculation that did not converge is deliberately blank rather
               // than described: the molecule flying apart on screen is what says
@@ -1601,14 +1604,17 @@ export default function App() {
 }
 
 /**
- * What a record was calculated for.
+ * What a record was calculated for: the one place the App reads it.
  *
- * Every record is at "形を探す" until records carry their level (V3-5, which
- * reads it here): a "形を測る" relaxation is not recorded before then (`relax`),
- * and the search runs at "形を探す".
+ * Opening a record sets the choice back to this, and its surface is solved at
+ * this rather than at whatever is chosen, so that the surface belongs to the
+ * numbers beside it. Null for a model this program does not know, which only a
+ * record let in before files were checked for it could carry: that one opens
+ * with its numbers, and without a surface, since there is no level it could be
+ * solved again at.
  */
-function levelOfRecord(_record: StructureRecord): ModelLevel {
-  return 'shape';
+function levelOfRecord(record: StructureRecord): ModelLevel | null {
+  return levelOfModel(record.model);
 }
 
 /**

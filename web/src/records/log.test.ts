@@ -20,6 +20,39 @@ describe('gathering records into what may be compared', () => {
     expect(groups.map((group) => group.formula).sort()).toEqual(['CH₄', 'H₂O', 'H₂O']);
   });
 
+  it('keeps the two levels of one molecule apart, and says which each is', () => {
+    // The same water at each level: -74.74 and -75.84 Ha. In one group the
+    // second would be the deepest shape by 2900 kJ/mol.
+    const groups = groupRecords([
+      fakeRecord({ energy: BOTTOM, id: 'shape' }),
+      fakeRecord({ energy: -75.84498516, level: 'measure', id: 'measure' }),
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.level).sort()).toEqual(['measure', 'shape']);
+    for (const group of groups) {
+      expect(group.formula).toBe('H₂O');
+      expect(group.entries[0].relative).toBe(0);
+    }
+  });
+
+  it('puts a record kept before levels existed in the group of finding the shape', () => {
+    // What is in the browser's database from before V3-5: nothing says a
+    // level, and the model is the only string records were written with then.
+    const before = {
+      ...fakeRecord({ energy: BOTTOM, id: 'before' }),
+      model: 'sto-3g/lda-vwn5/fine',
+    };
+    const groups = groupRecords([before, fakeRecord({ energy: BOTTOM - 0.001, id: 'now' })]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].level).toBe('shape');
+    expect(groups[0].entries.map((entry) => entry.record.id)).toEqual(['now', 'before']);
+  });
+
+  it('gives a group of a model it does not know no level rather than a guess', () => {
+    const odd = { ...fakeRecord({ energy: BOTTOM }), model: 'sto-3g/lda-vwn5/medium' };
+    expect(groupRecords([odd])[0].level).toBeNull();
+  });
+
   it('puts the group with the newest record first', () => {
     const groups = groupRecords([
       fakeRecord({ energy: BOTTOM, savedAt: '2026-09-20T09:00:00.000Z', id: 'a' }),

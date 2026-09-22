@@ -5,7 +5,7 @@
  * optimisation ended, the atoms, when it was saved. The rest is filled in so
  * that a record is a whole one, because the file reader checks that it is.
  */
-import type { OptimizationReason, ScfOutcome } from '../worker/protocol';
+import type { ModelLevel, OptimizationReason, ScfOutcome } from '../worker/protocol';
 import { createRecord, type StructureRecord } from './record';
 
 /** The engine's element symbols, for the few elements the tests use. */
@@ -28,6 +28,8 @@ export interface FakeRelaxation {
   reason?: OptimizationReason;
   /** The charge the engine had to choose, which splits comparable sets. */
   charge?: number;
+  /** What it was solved for, which splits them too; "形を探す" unless said. */
+  level?: ModelLevel;
   savedAt?: string;
   id?: string;
 }
@@ -67,6 +69,7 @@ export function fakeRecord(relaxation: FakeRelaxation): StructureRecord {
       trajectory: [xyz, xyz],
       stepEnergies: [relaxation.energy + 0.01, relaxation.energy],
       outcome: fakeOutcome(relaxation, xyz),
+      level: relaxation.level ?? 'shape',
     },
     symbolOf,
     new Date(relaxation.savedAt ?? '2026-09-20T09:00:00.000Z'),

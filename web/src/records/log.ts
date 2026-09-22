@@ -5,16 +5,17 @@
  * The question the log answers is "which of these shapes is the deepest, and
  * how many different ones did we find". So two things happen here. Records that
  * cannot be compared - a different molecule, a different charge the engine had
- * to pick, a different engine - are kept apart (`comparisonKey`); and within a
- * set, records whose energies are within {@link SAME_VALLEY_KJ_PER_MOL} of each
- * other are one valley, because the same minimum reached from two directions
- * does not come out to the same digit.
+ * to pick, a different engine or level - are kept apart (`comparisonKey`); and
+ * within a set, records whose energies are within {@link SAME_VALLEY_KJ_PER_MOL}
+ * of each other are one valley, because the same minimum reached from two
+ * directions does not come out to the same digit.
  *
  * Only settled structures take part. One that ran out of time or steps is real
  * and is listed, but it was still moving when it stopped: ranking it against a
  * minimum would be comparing a finished thing with an unfinished one.
  */
-import { comparisonKey, isSettled, type StructureRecord } from './record';
+import type { ModelLevel } from '../worker/protocol';
+import { comparisonKey, isSettled, levelOfModel, type StructureRecord } from './record';
 import { kilojoulesPerMole } from './units';
 
 /**
@@ -51,6 +52,12 @@ export interface LogGroup {
   key: string;
   /** What the group is called on screen. */
   formula: string;
+  /**
+   * What its records were calculated for, which the heading says in the words
+   * of the choice. Null for a model this program does not know
+   * (`levelOfModel`); every record of a group has the same model.
+   */
+  level: ModelLevel | null;
   /** Settled entries first, deepest valley first; then the unsettled ones. */
   entries: LogEntry[];
   /** Distinct valleys among the settled records. */
@@ -120,6 +127,7 @@ export function groupRecords(records: readonly StructureRecord[]): LogGroup[] {
     return {
       key,
       formula: members[0].formula,
+      level: levelOfModel(members[0].model),
       entries,
       valleys: sizes.length,
       latest: members.reduce((newest, r) => (r.savedAt > newest ? r.savedAt : newest), ''),

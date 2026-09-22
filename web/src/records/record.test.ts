@@ -4,8 +4,9 @@ import {
   createRecord,
   defaultRecordName,
   hillFormula,
+  engineModel,
   isSettled,
-  ENGINE_MODEL,
+  levelOfModel,
   TRAJECTORY_DECIMALS,
 } from './record';
 import { fakeOutcome, fakeRecord, symbolOf } from './fixtures';
@@ -54,13 +55,43 @@ describe('which records may be compared', () => {
     const record = fakeRecord({ energy: -1 });
     const older = { ...record, model: 'sto-3g/lda-vwn5/medium' };
     expect(comparisonKey(record)).not.toBe(comparisonKey(older));
-    expect(record.model).toBe(ENGINE_MODEL);
+    expect(record.model).toBe(engineModel('shape'));
+  });
+
+  it('separates the same molecule solved at the two levels', () => {
+    // Two bases: the energies are thousands of kJ/mol apart for the same shape,
+    // and ranking one against the other would say nothing about the shapes.
+    expect(comparisonKey(fakeRecord({ energy: -1 }))).not.toBe(
+      comparisonKey(fakeRecord({ energy: -1, level: 'measure' })),
+    );
   });
 
   it('puts two shapes of the same molecule together', () => {
     expect(comparisonKey(fakeRecord({ energy: -1 }))).toBe(
       comparisonKey(fakeRecord({ energy: -2, id: 'other' })),
     );
+  });
+});
+
+describe('the model a record carries', () => {
+  it('is its own for each level, and gives the level back', () => {
+    expect(engineModel('shape')).not.toBe(engineModel('measure'));
+    for (const level of ['shape', 'measure'] as const) {
+      expect(levelOfModel(engineModel(level))).toBe(level);
+    }
+  });
+
+  it('is, for finding the shape, the string every record before levels carries', () => {
+    // Copied from the records made before V3-5, which are in browsers and in
+    // files prepared for a lecture: changing it would put all of them in a
+    // group of their own, and leave them with no level to be solved again at.
+    expect(engineModel('shape')).toBe('sto-3g/lda-vwn5/fine');
+    expect(levelOfModel('sto-3g/lda-vwn5/fine')).toBe('shape');
+  });
+
+  it('gives no level for a string this program never wrote', () => {
+    expect(levelOfModel('sto-3g/lda-vwn5/medium')).toBeNull();
+    expect(levelOfModel('')).toBeNull();
   });
 });
 
@@ -72,6 +103,7 @@ describe('turning a finished relaxation into a record', () => {
     trajectory: [new Float32Array(xyz), new Float32Array(xyz)],
     stepEnergies: [-74.7, -74.74311011],
     outcome: fakeOutcome({ energy: -74.74311011 }, xyz),
+    level: 'shape' as const,
   };
 
   it('names it after the molecule and the time of day', () => {
@@ -100,6 +132,13 @@ describe('turning a finished relaxation into a record', () => {
     mutable.built[0] = 99;
     expect(record.z).toEqual([8, 1, 1]);
     expect(record.built[0]).toBe(0);
+  });
+
+  it('carries the level it was solved at', () => {
+    const measured = createRecord({ ...draft, level: 'measure' }, symbolOf, new Date(), 'id');
+    expect(measured.model).toBe(engineModel('measure'));
+    expect(levelOfModel(measured.model)).toBe('measure');
+    expect(levelOfModel(createRecord(draft, symbolOf, new Date(), 'id').model)).toBe('shape');
   });
 
   it('is a manual one unless a search made it', () => {

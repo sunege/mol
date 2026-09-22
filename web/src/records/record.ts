@@ -15,19 +15,47 @@
  * charges are not the same system and their energies cannot be subtracted, so
  * it goes into {@link comparisonKey} without ever being shown.
  */
-import type { ScfOutcome } from '../worker/protocol';
+import type { ModelLevel, ScfOutcome } from '../worker/protocol';
 
 /**
- * What the engine is, as a string a record can be compared on.
+ * What the engine is at each level, as strings a record can be compared on.
  *
  * Energies from different bases or functionals are not on the same scale, so
- * records made with one must never be ranked against another's. There is no way
- * to ask the WebAssembly module what it is, so this is written here and
- * **changed whenever the basis, the functional or the optimiser's grid
- * changes** - see CLAUDE.md. Records carrying an older string stay readable and
- * simply group apart.
+ * records made with one must never be ranked against another's - and the two
+ * levels are two bases (`ModelLevel`). There is no way to ask the WebAssembly
+ * module what it is, so these are written here and **changed whenever the
+ * basis, the functional or the optimiser's grid changes** - see CLAUDE.md.
+ * Records carrying an older string stay readable and simply group apart; for
+ * them still to open at their own level, the older string has to stay known to
+ * {@link levelOfModel} as the level it was.
+ *
+ * The string for "形を探す" is the one every record before V3-5 was written with,
+ * so those records fall into its groups as they are.
  */
-export const ENGINE_MODEL = 'sto-3g/lda-vwn5/fine';
+const ENGINE_MODELS: Readonly<Record<ModelLevel, string>> = {
+  shape: 'sto-3g/lda-vwn5/fine',
+  measure: '6-31gs/lda-vwn5/fine',
+};
+
+/** The model a record made at `level` carries. */
+export function engineModel(level: ModelLevel): string {
+  return ENGINE_MODELS[level];
+}
+
+/**
+ * The level a record was calculated at, from the model it carries.
+ *
+ * Null for a string this program never wrote. Such a record cannot be solved
+ * again at its own level - which is what opening one with its surface does - so
+ * a file carrying one is refused (`file.ts`), and the App opens one already in
+ * the browser with its numbers and no surface.
+ */
+export function levelOfModel(model: string): ModelLevel | null {
+  for (const level of Object.keys(ENGINE_MODELS) as ModelLevel[]) {
+    if (ENGINE_MODELS[level] === model) return level;
+  }
+  return null;
+}
 
 /** Where a record came from: the button, or (P10) a background search. */
 export type RecordSource = 'manual' | 'search';
@@ -38,7 +66,11 @@ export interface StructureRecord {
   savedAt: string;
   /** Shown in the list and editable; defaults to formula and time of day. */
   name: string;
-  /** {@link ENGINE_MODEL} as it was when this was recorded. */
+  /**
+   * {@link engineModel} of the level it was calculated at, as it was when this
+   * was recorded. The level itself is read back from this ({@link levelOfModel})
+   * rather than kept beside it, so the two cannot disagree.
+   */
   model: string;
   /** Hill formula, with subscript digits, as the interface spells it. */
   formula: string;
@@ -86,7 +118,8 @@ export function isSettled(record: StructureRecord): boolean {
 
 /**
  * The records that may be compared with this one: same molecule, same charge,
- * same engine.
+ * same engine - which includes the same level, since each level is its own
+ * {@link engineModel}.
  *
  * Same molecule means the same formula, not the same structure - that is the
  * whole point. Charge is in here because the engine picks it: a molecule it
@@ -142,6 +175,8 @@ export interface RecordDraft {
   trajectory: ArrayLike<number>[];
   stepEnergies: number[];
   outcome: ScfOutcome;
+  /** What the relaxation was solved at: the one choice a record must not guess. */
+  level: ModelLevel;
   source?: RecordSource;
   batch?: string;
 }
@@ -163,7 +198,7 @@ export function createRecord(
     id,
     savedAt: savedAt.toISOString(),
     name: defaultRecordName(formula, savedAt),
-    model: ENGINE_MODEL,
+    model: engineModel(draft.level),
     formula,
     z: [...draft.z],
     built: [...draft.built],
