@@ -15,6 +15,7 @@ import type { LogEntry } from '../records/log';
 import {
   NUDGED_COUNT,
   SEARCH_EMPTY,
+  SEARCH_HEADING,
   SEARCH_HINT,
   canCancel,
   canOpen,
@@ -72,7 +73,7 @@ export function SearchPanel({
 
   return (
     <>
-      <h2>形をさがす</h2>
+      <h2>{SEARCH_HEADING}</h2>
       <div className="row">
         <button type="button" onClick={onTryCurrent} disabled={disabled}>
           今の形を試す

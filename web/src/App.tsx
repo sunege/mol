@@ -34,7 +34,7 @@ import {
   levelHint,
   levelLabel,
 } from './components/level';
-import { SearchPool, poolSize, type Candidate } from './search/pool';
+import { SEARCH_LEVEL, SearchPool, poolSize, type Candidate } from './search/pool';
 import { candidateAsBuilt, nudgedCandidates } from './search/candidates';
 import { hasUsableStructure } from './worker/protocol';
 import { EngineUnavailableError, engineNotice, type EngineProblem } from './worker/engineSupport';
@@ -513,7 +513,9 @@ export default function App() {
    *
    * How many run at once is decided from the machine rather than from what the
    * browser reports having (`search/pool.ts`), because the one thing the size
-   * must not cost is the front worker's answering speed.
+   * must not cost is the front worker's answering speed. Nor does it read
+   * `level`: every candidate is solved for its shape (`SEARCH_LEVEL`), whatever
+   * the calculations in front are for.
    *
    * A candidate that ends with a structure worth keeping becomes a record here,
    * under the candidate's own id - which is what lets a row in the search
@@ -533,8 +535,8 @@ export default function App() {
               trajectory: candidate.trajectory,
               stepEnergies: candidate.stepEnergies,
               outcome: candidate.outcome,
-              // The pool asks for no level, which the worker takes as this one.
-              level: 'shape',
+              // The level the pool asked for, from the one place both read.
+              level: SEARCH_LEVEL,
               source: 'search',
               batch: candidate.batch,
             },

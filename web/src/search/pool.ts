@@ -30,7 +30,7 @@
  */
 import { DftWorkerClient, type SpawnWorker } from '../worker/workerClient';
 import { EngineUnavailableError, type EngineProblem } from '../worker/engineSupport';
-import { hasUsableStructure, type ScfOutcome } from '../worker/protocol';
+import { hasUsableStructure, type ModelLevel, type ScfOutcome } from '../worker/protocol';
 
 /**
  * The most candidates run at once, whatever the machine reports.
@@ -58,6 +58,23 @@ export const MAX_CONCURRENT = 3;
  * steps.
  */
 export const CANDIDATE_BUDGET_MS = 10 * 60 * 1000;
+
+/**
+ * What every candidate is solved for - always finding the shape, whatever the
+ * user has chosen for the calculations in front.
+ *
+ * That is what a search is for: which shapes a molecule can fall into, and the
+ * minima it finds do not change when the level does (`docs/dev-notes.md`,
+ * "v3-0 の実測"). Memory would decide it anyway. A worker that relaxed benzene
+ * at `'measure'` holds about 250 MiB - its two-electron integrals alone are
+ * 105 MiB - and {@link MAX_CONCURRENT} of them come near a gigabyte that does
+ * not shrink until they are terminated.
+ *
+ * The pool takes no level, so nothing the front chooses can reach it. The App
+ * writes its records of candidates at this level too, which keeps what was
+ * asked for and what a record says it was from drifting apart.
+ */
+export const SEARCH_LEVEL: ModelLevel = 'shape';
 
 /**
  * How many candidates to run at once on a machine reporting `hardwareConcurrency`.
@@ -373,6 +390,8 @@ export class SearchPool {
         },
         undefined,
         this.#budgetMs,
+        // Never the front's level: at 'measure' three workers would hold ~750 MiB.
+        SEARCH_LEVEL,
       )
       .then((outcome) => {
         if (this.#disposed || candidate.status !== 'running') return;

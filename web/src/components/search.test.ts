@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   NUDGED_COUNT,
   SEARCH_EMPTY,
+  SEARCH_HEADING,
   SEARCH_HINT,
   canCancel,
   canOpen,
@@ -17,6 +18,7 @@ import { groupRecords } from '../records/log';
 import { fakeRecord } from '../records/fixtures';
 import { HARTREE_TO_KJ_PER_MOL } from '../records/units';
 import { settledCount } from './records';
+import { levelLabel } from './level';
 
 const ALL_STATUSES: CandidateStatus[] = [
   'waiting',
@@ -65,8 +67,24 @@ describe('what a row says', () => {
   });
 
   it('keeps every DFT parameter off the screen', () => {
-    const forbidden = ['基底', 'STO', '電荷', '多重度', 'スピン', '一重項', '三重項', 'SCF'];
+    const forbidden = [
+      '基底',
+      'STO',
+      'STO-3G',
+      '6-31G',
+      '汎関数',
+      'LDA',
+      'VWN',
+      'DFT',
+      '電荷',
+      '多重度',
+      'スピン',
+      '一重項',
+      '三重項',
+      'SCF',
+    ];
     const said = [
+      SEARCH_HEADING,
       SEARCH_HINT,
       SEARCH_EMPTY,
       searchDisabledReason(0) ?? '',
@@ -74,6 +92,30 @@ describe('what a row says', () => {
       searchSummary([candidate('running'), candidate('waiting'), candidate('settled')]),
     ].join(' ');
     for (const word of forbidden) expect(said).not.toContain(word);
+  });
+});
+
+describe('which level the search runs at', () => {
+  it('says so by the name the choice above gives it', () => {
+    // Choosing the other level for the calculations in front changes nothing
+    // here, and the hint is where a class finds that out.
+    expect(SEARCH_HINT).toContain(
+      `上で何を選んでいても、ここで試す形は「${levelLabel('shape')}」で計算します。`,
+    );
+    expect(SEARCH_HINT).not.toContain(levelLabel('measure'));
+  });
+
+  it('does not call either level better or worse', () => {
+    for (const word of ['精度', '正確', '正しく', '高い', '低い', '粗い', '簡易']) {
+      expect(SEARCH_HINT).not.toContain(word);
+    }
+  });
+
+  it('has a heading that does not sound like a level', () => {
+    // "形をさがす" was read out the same as "形を探す" just above it.
+    for (const word of ['探す', 'さがす', '測る', 'はかる']) {
+      expect(SEARCH_HEADING).not.toContain(word);
+    }
   });
 });
 

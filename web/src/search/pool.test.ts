@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CANDIDATE_BUDGET_MS,
   MAX_CONCURRENT,
+  SEARCH_LEVEL,
   SearchPool,
   poolSize,
   type Candidate,
@@ -258,6 +259,58 @@ describe('the budget a candidate gets', () => {
     pool.add([request('a')]);
     await vi.waitFor(() => expect(workers.length).toBe(1));
     expect((await workers[0].optimizeRequest()).budgetMs).toBeNull();
+  });
+});
+
+describe('the level a candidate is solved at', () => {
+  /** Every optimise request the workers have been given, in order. */
+  const optimizeRequests = (workers: FakeWorker[]) =>
+    workers.flatMap((worker) => worker.received).filter((each) => each.type === 'optimize');
+
+  it('is always finding the shape, on every worker and for every candidate', async () => {
+    const { pool, workers, latest } = setUp(1);
+    pool.add([request('a'), request('b'), request('c')]);
+
+    // `a` finishes and its worker is reused for `b`; stopping `b` replaces the
+    // worker, and `c` goes to the new one. Every way a request can be sent.
+    await vi.waitFor(() => expect(workers.length).toBe(1));
+    const first = await workers[0].optimizeRequest();
+    workers[0].reply({ id: first.id, type: 'scf', result: outcome(-74.1, 'converged') });
+    await vi.waitFor(() => expect(find(latest(), 'b').status).toBe('running'));
+    pool.cancel('b');
+    await vi.waitFor(() => expect(find(latest(), 'c').status).toBe('running'));
+
+    // The new worker sends once it has said it is ready.
+    await vi.waitFor(() => expect(optimizeRequests(workers)).toHaveLength(3));
+    const sent = optimizeRequests(workers);
+    expect(workers).toHaveLength(2);
+    // Written out rather than read from the constant: this is what fixes it.
+    // Measuring would hold about 250 MiB a worker, and never shrink.
+    for (const each of sent) expect(each.level).toBe('shape');
+    expect(SEARCH_LEVEL).toBe('shape');
+  });
+
+  it('cannot be told another, whatever the calculations in front are for', async () => {
+    // The front's choice lives in the App, and the pool has nowhere to take it:
+    // there is no such option, and one smuggled in anyway changes nothing.
+    const workers: FakeWorker[] = [];
+    const pool = new SearchPool({
+      size: 1,
+      onChange: () => {},
+      spawnWorker: () => {
+        const worker = new FakeWorker();
+        workers.push(worker);
+        return worker as unknown as Worker;
+      },
+      support: null,
+      // @ts-expect-error - the search takes no level.
+      level: 'measure',
+    });
+    pool.add([request('a')]);
+
+    await vi.waitFor(() => expect(workers.length).toBe(1));
+    expect((await workers[0].optimizeRequest()).level).toBe('shape');
+    pool.dispose();
   });
 });
 

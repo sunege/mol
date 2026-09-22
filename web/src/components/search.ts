@@ -8,8 +8,9 @@
  * gets no number and no word for it (requirement F5): the row is a dash, and
  * opening it plays the molecule coming apart, which is the whole answer.
  */
-import type { Candidate, CandidateStatus } from '../search/pool';
+import { SEARCH_LEVEL, type Candidate, type CandidateStatus } from '../search/pool';
 import type { LogEntry } from '../records/log';
+import { levelLabel } from './level';
 import { formatElapsed } from './progress';
 import { relativeText } from './records';
 
@@ -23,8 +24,25 @@ import { relativeText } from './records';
  */
 export const NUDGED_COUNT = 3;
 
+/**
+ * The heading of the section.
+ *
+ * Its verb is the buttons' own, and deliberately not "探す": that word belongs
+ * to the level the calculation section offers just above, and the search once
+ * had a heading that sounded the same when read out in a lecture.
+ */
+export const SEARCH_HEADING = 'いろいろな形を試す';
+
+/**
+ * The line under the buttons.
+ *
+ * It names the level the search always runs at, by the name the choice above
+ * gives it, because choosing the other one up there does nothing down here - and
+ * it is also why the records of these candidates sit in that level's group.
+ */
 export const SEARCH_HINT =
   '押すと裏側で計算します。そのあいだも画面は動かせますし、「安定な形にする」も今までどおり使えます。' +
+  `上で何を選んでいても、ここで試す形は「${levelLabel(SEARCH_LEVEL)}」で計算します。` +
   '落ち着いた形は記録に入ります。';
 
 export const SEARCH_EMPTY =
