@@ -103,7 +103,8 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   （`min(MAX_CONCURRENT, max(1, floor(値/2) − 1))`）。**決め手は処理量ではなく前面の応答**
   （裏で 2 本回すと前面が 2.5 倍遅い）。**WASM の線形メモリは縮まない**ので Worker はバッチの
   間だけ使い回し、キューが尽きたら捨てる（ベンゼンで 1 本 139 MiB）。**候補は `atoms`・
-  `FramePlayer`・前面の Worker を触らない。**
+  `FramePlayer`・前面の Worker を触らない。** **段は `SEARCH_LEVEL`（`'shape'`）固定**で、プールの
+  要求も候補の記録もそこから取る（プールは段を受け取らず、前面の `level` を読まない）。
 - **1 候補の予算は `budgetMs`**（10 分）。step コールバックから**例外を投げて**止める＝
   `reason: 'interrupted'` と**そこまでの構造**が返る（`terminate()` と違って構造が残る）。
   前面は送らない。`dft-wasm` の `on_step` の**戻り値は読まれない**。
@@ -155,7 +156,7 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
 ## 状態と今後
 
 - **v1・v2 完了**、いずれも Firefox 確認済み。v2 で足したのは観測モード・安定構造の記録・
-  並列探索（パネルの「形をさがす」）。
+  並列探索（パネルの「いろいろな形を試す」。v2 では「形をさがす」）。
 - **v3 は「目的に合わせて段を選ぶ」2 段**（2026-09-21 決定）: **「形を探す」**（STO-3G/LDA、
   今のまま、既定）と **「形を測る」**（6-31G\*/LDA）。コード上は `ModelLevel = 'shape' | 'measure'`。
   **段は計算ごとに選ぶ**／**探索は「形を探す」に固定**（メモリ）／**ベンゼンも「形を測る」可**
