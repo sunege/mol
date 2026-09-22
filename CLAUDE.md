@@ -97,6 +97,9 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   `dft-wasm` の `basis_for` だけで、省略＝`'shape'` もそこ 1 か所、**知らない名前はエラー**。段が違う結果は比べない。
 - **キャンセルは `terminate()` + 再生成。** 保持中の `Calculation`（密度）も消えるので等値面は
   SCF からやり直し（`hasDensityRef`）。等値面の要求は App で合流させる（`wantedRef`）。
+  **「中止」ボタンだけは `stopRelaxations()`** で形を残す（分離されたページでは共有の停止フラグで
+  一歩の後に止め、数値・記録・等値面も残る。`reason` は `'interrupted'` のまま）。編集・プリセット・
+  記録の `cancelCalculation()` は形を残さない。`canStopInPlace()` は `EngineProblem` にしない。
 - **起動時に SIMD を判定**し、非対応なら Worker を作らず案内（`engineSupport.ts`）。初期化失敗も
   `EngineUnavailableError`。下限は Chrome/Edge 96・Firefox 114・Safari 16.4。
 - **前面 1 本 + 探索のプール。** 大きさは `hardwareConcurrency` そのものではなく `poolSize`
@@ -150,6 +153,8 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   作り直して違えばコミットする → **push したら `git pull`**。**コメントだけの Rust の変更でも
   生成物は変わる**（doc は `.d.ts`/`.js` に写り、行が増えるとパニック位置の行番号が動く）。
   Rust 1.98.1 と wasm-pack 0.15.0 は揃えて上げる。
+- **ページは cross-origin isolated**（COOP `same-origin` + COEP `require-corp`、`vercel.json` と
+  `vite.config.ts`）。**cross-origin の資源（Web フォント・CDN・解析）を足すと読めなくなる。**
 - **Vercel の Root Directory はリポジトリ直下（空）**、設定は直下の `vercel.json`。正しい
   ビルドログには `> mol@0.1.0 build` が出る。
 

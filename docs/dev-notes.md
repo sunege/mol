@@ -1655,6 +1655,79 @@ Coulomb 項 `Σ D_μν D_λσ ∂(μν|λσ)` が bra 側と ket 側に分解で
   計算中、段のスイッチは「形を測る」のまま両方無効。確認で作った NH₃ の 5 件は Claude の
   ブラウザの IndexedDB に残してある。
 
+### V3-7 の実装メモ（中断してもそこまでの形と数値を残す、2026-09-22）
+
+- **2 段構えのまま入れた。** (a) クライアントに **`stopRelaxations(immediately = false)`**
+  （`workerClient.ts`）。緩和ごとに最後に届いた step を覚えておき、Worker を差し替えて止めるときは
+  **`RelaxationStopped`（`last` がその step）で reject** する（一緒に走っていた一点計算は
+  `'cancelled'`）。App は **「中止」ボタンだけ** `stopCalculation` → `stopRelaxations()` を呼び、
+  `relax()` の `.catch` が `RelaxationStopped` を見て形を残す（即 `setAtoms`、`keepObserving()`、
+  前の形 `relaxedFrom` は残す、`openRecordId` は外す、記録と等値面は無し）。**`cancelCalculation()`
+  は変えていない**（V3-4 の注意: 編集・プリセット・記録が `setAtoms` を先に呼ぶので、そこで
+  step を書くと上書きになる）。step 0 より前の中止は今までどおり開始前へ戻す。
+  (b) **`canStopInPlace()`**（`engineSupport.ts`、`crossOriginIsolated` と `SharedArrayBuffer`）が
+  真なら、クライアントが `optimize` の要求ごとに **`stop`（`stopFlag()`、4 バイトの共有
+  `Int32Array`）** を載せ、Worker は `on_step` で step を post した**後**に `stopRequested()` を見て
+  投げる（`budgetMs` と同じ道、`reason: 'interrupted'`）。`raiseStop`/`stopRequested`/`stopFlag` は
+  `protocol.ts`。`stopRelaxations()` は、すべての緩和にフラグと step があればフラグを立てて
+  `'stopping'` を返し、Worker は生き残る → `relax()` の `.then` がそのまま通り、数値・記録
+  （「途中」）・等値面が出る。**使えないことは `EngineProblem` にしない**（その場合は (a) に落ちる）。
+- **`optimize` に引数は足していない。** フラグはクライアントが自分で作る。プールも同じクライアント
+  なので分離されたページではプールの要求にもフラグが載るが、プールは `stopRelaxations()` を呼ば
+  ないので立たない（候補の中止・予算・段は変わらない）。
+- **ユーザーの判断 3 つ**:
+  1. **一歩を待つ・2 回目は即時。** 立てたあとはカードが「止めています · いまの一歩が終わるまで」、
+     ボタンが **「すぐ止める」**、ボタン下の説明が「…形と数値が残ります。待たずに止めるときは…
+     （形だけが残ります）」。2 回目は `stopRelaxations(true)` ＝ (a)。**step 0 より前はフラグを
+     立てずに即 (a)**（残す形が無く、待ちがいちばん長い: 電子の並び方の探索が先に来る）。
+     カードの状態は `JobState.stopping`（`components/progress.ts`）。
+  2. **記録の `'interrupted'` は中立な文言**: `describeRelaxation` の `'interrupted'` を
+     「時間切れ · …」→ **「途中で止まりました · N 回動いたところまで」**（探索の行と同じ言葉）。
+     エンジンの予算とユーザーの中止は同じ理由で終わり、記録からは区別できないため。止めた直後
+     だけは App が知っている（`stopRequestedRef`）ので **「中止 · N 回動いたところまで」**、状態の行は
+     「途中で止めました（段）」。一歩の途中で落ち着いた（`converged`）ならただの完了として扱う。
+  3. **header は `/(.*)` に COOP `same-origin` + COEP `require-corp`**（`vercel.json`、
+     `vite.config.ts` の `server.headers`/`preview.headers`）。`credentialless` にしなかったのは、
+     `require-corp` なら対象の 3 ブラウザすべてが対応しているから。**cross-origin の資源が無いことの
+     確認**: ソース（`web/src`・`index.html`・`public`）とビルド成果物の絶対 URL は XML 名前空間・
+     React のエラー URL の文字列・three.js のシェーダ内コメント・WebGL 案内文の
+     `localhost:5173` だけで、どれも取得されない。フォントは system-ui 系だけ、CDN・解析・iframe・
+     `window.open` 無し、取得は同一オリジンの `.wasm` だけ。副作用になりうるのは Vercel の
+     プレビュー配信のツールバー（vercel.live、cross-origin）と、他サイトの iframe に埋め込まれた
+     とき（分離されず (a) に落ちる）。本番 URL がリポジトリに無いので、本番の今の header は見ていない。
+- **dev サーバは再起動しないと header が付かない。** 確認のときは 9/18 から動いていた 5173 に
+  手を付けず、`mol-preview`（4173、`web/dist`）で見た。
+- **Claude のブラウザでの確認**（`Worker.prototype.postMessage` を差し替え、Worker の `message` も
+  読んだ）。(a) は 5173（分離されていない）で、ベンゼンを step 1 で中止 → 状態「途中で止めました
+  （形を探す）」・形の調整「中止 · 1 回動いたところまで」・数値 `—`・観測のまま、「この形のまま
+  計算」の座標が step 1 と完全一致（開始前とは 0.004 Å）、記録は増えない。step 0 前の中止は
+  編集モードに戻り `—`。計算中のプリセット（H₂O）は上書きされない。(b) は 4173 で
+  `crossOriginIsolated` が true、要求の `stop` は `Int32Array on SharedArrayBuffer`。
+
+  | 操作（ベンゼン、形を探す） | 結果 |
+  | --- | --- |
+  | step 1 が届いた時に「中止」 | step 2 が 4.0 秒後に終わってそこで止まった。−227.264328 Ha、2 回、記録「途中」1 件、等値面 12,832 面、観測のまま |
+  | 同じ（別の回） | **8 ms 後に step 1 で止まった**。Worker が step 1 を post した直後にフラグを読んだ競合で、無害（「いまの一歩の後で止まる」はどちらでも成り立つ） |
+  | 「中止」の 0.2 秒後に「すぐ止める」 | (a) と同じ: 形は step 1、数値 `—`、記録は増えない |
+  | 止めた記録を開く | 形の調整「途中で止まりました · 2 回動いたところまで」 |
+  | 止めたあと押し直す | 続きから動いて **17 回で落ち着いた（87.8 秒）** |
+
+  このブラウザで step 0 は要求から約 11 秒、1 歩は約 4 秒（形を探す）。「形を測る」の 1 歩
+  ＝中止してから止まるまでの待ちは測っていない（V3-8）。確認で作ったベンゼンの記録 3 件は
+  4173 のオリジンの IndexedDB に残してある。
+- **押し直すと揺らされる（既存の挙動、今回は変えていない）**: 緩和の後は `presetId` が null に
+  なるので、平らなベンゼンは次の「安定な形にする」で `perturb` され、3 歩で済まず 17 歩になった。
+  時間切れのあとも同じ。「緩和から出てきた構造は揺らさない」にするかは別の判断。
+- **テスト**: `npm test` 323 件（311 → 323）。`workerClient.test.ts` +7（差し替えで止める 4:
+  最後の step が残る／step 0 前は `last: null`／並んだ一点計算は `'cancelled'`／緩和が無ければ
+  Worker に触らない。その場で止める 3: 共有のフラグが立ち Worker は同じまま `.then` と等値面が
+  通る／step 0 前は差し替え／2 回目は即時）。`engineSupport.test.ts` +3（分離・SAB の有無、Node は
+  偽でもエンジンは動く）。`engine.test.ts` +1（実物の `.wasm` が `solving 1` で立てたフラグで
+  step 1 の後に止まり、`interrupted`・1 回・構造・等値面が出る）。`progress.test.ts` +1。lint の
+  警告は触る前と同じ 9 件。Rust・`web/src/wasm/`・プール・予算・段は触っていない。
+
+**2026-09-22、ユーザーの Firefox 確認が完了し、V3-7 完了となった。指摘による手直しは無し。**
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
