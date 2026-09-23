@@ -2138,6 +2138,62 @@ UI は「コンパイルが落ちる分」だけ。**`dft-core` は 1 行も触�
   protocol.test.ts に `isTerminal` と軌道の要求を 1 行ずつ）。`cargo test --workspace` は 155 件で
   変化なし。
 
+### V4-4 の実装メモ（「分子軌道」の節と軌道の等値面、2026-09-23）
+
+UI だけ（`components/orbital.ts` と `components/OrbitalPanel.tsx` が新規、`App.tsx` /
+`density.ts` / `IsoLevelSlider.tsx` / `App.css` / `viewer.ts` のコメント 1 か所）。
+**Rust も `web/src/wasm/` も触っていない**（境界は V4-3 で通っている）。
+
+- **「同時に 2 つ描かない」を分岐ではなく状態の形で保証した。** `channel` を state から
+  **導出**に変え（`orbitalPick === null ? densityRequest : 'orbital'`）、密度のボタンの state は
+  `DensitySurface`（＝ `Exclude<DensityRequest, 'orbital'>`）にした。**チケットが警告していた
+  落とし穴**（`offeredChannels` に無い要求を `'total'` に戻す effect が `'orbital'` を蹴る）は、
+  `channel !== 'orbital'` を足すのではなく**その effect が `densityRequest` を見る**ことで消えた。
+  両方が点く状態が型として作れない。
+- **`components/density.ts` から軌道の文言（V4-3 の仮）を外した。** `Record` の網羅性は
+  `DensitySurface` と `Exclude<DensityChannel, 'orbital'>` で満たす。文言は `orbital.ts` に
+  移したので、`density.test.ts` の禁止語 '軌道' はそのまま効く。`explainChannel` に渡す `mesh` は
+  **軌道が出ているあいだ `null`**（返ってきた `channel` が `'orbital'` の面を密度の説明が読むと
+  「待っています」の行になる）。
+- **`hasDensityRef` は ref のまま、世代カウンタ `density = { held, generation }` を state で
+  並走させた**（`setHasDensity()` が両方書く）。真偽だけでは足りない:
+  **`calculate()`（この形のまま計算）は開始時に密度を落とさない**ので `true → true` になり、
+  段を変えて計算し直しても古いはしごが残ってしまう。**「計算が 1 回あった」を見るものは
+  この世代を見る。**
+- **一覧の取得は effect 1 本**（依存は `[orbitalsOpen, density, resultLevel, forgetOrbital]`）。
+  **しきい値は依存に入っていない**ので、スライダーを動かしても取り直さない。実測（水、
+  Chromium。`Worker.prototype.postMessage` を差し替えて数えた）: ArrowRight 12 回で
+  `orbitals` は **1 回のまま**、`isosurface` は合流で **2 回**に間引かれた。
+- **節を閉じると選択も捨てる**（`forgetOrbital`）。閉じた節の中にしか操作が無い面を画面に
+  残さないため。**軌道を選ぶと「電子の雲を表示する」を自動で入れる**（切っていると押しても
+  何も出ず、失敗に見える）。
+- **`<summary>` に置けるのは phrasing content か h1〜h6 が 1 つだけ**なので、`<h2>分子軌道</h2>`
+  を入れると**閉じているときの 1 行は中に置けない**。`</details>` の外に出し、開くと節の中の
+  言葉に置き換わるようにした。
+- **行は上が高い**（返ってくる順の逆）。縮退の注記は行の 2 行目（`flex-basis: 100%`）:
+  パネルは 300px で、開殻の 2 列では 1 列 ≈ 124px しかなく「同じ高さの軌道が 2 つ」は
+  1 行に入らない。1 段に 1 つの丸印（`●●` / `●` / `○`）＋ その段の軌道の数、という形なので、
+  開殻では `●` と `1 / 2` のボタンだけが並ぶ。
+- **`spin` は必ず明示して送る**（省略＝`'both'` は開殻でエラー。`level` と同じ作法）。
+- **ブラウザでの確認**（Chromium、WebGL 無しでパネルだけ）:
+  - 水: 7 段・1 列、HOMO が下から 5 段目・LUMO がその上。HOMO を選ぶと **2,412 + 2,412 面**
+    （正負そろって出る）。しきい値を 0.030 → 0.037 にすると **2,164 + 2,164 面が 5 ms**
+    ＝ 格子は使い回し。密度のボタンに戻すと選択が外れ、総電子密度（2,964 面）が戻る。
+  - O₂: **2 列・16 段**で、`count × occupation` の和が**上向き 9・下向き 7**。上向きの HOMO が
+    `1 / 2` の縮退（π\*）、下向きの LUMO が同じ組＝教科書の絵。π\* の面は **3,184 + 3,184 面**で、
+    1 と 2 で同じ面数。**緩和した O₂ では段の並びが変わる**（σ と π が入れ替わり、上向きの
+    2 段目と 3 段目の縮退が動く）。
+  - 「形を測る」で計算すると節は 1 行だけになり、`orbitals` は**呼ばれない**。
+  - エラーは 0 件。**3D の位相の色（青・赤）は V4-10 でユーザーが Firefox で見る。**
+- **却下した案**: 密度のスライダー 1 本で兼ねる（節が別なので「電子密度」の見出しの下で
+  軌道のしきい値を動かすことになる）。段に通し番号を振る（F4。番号は基底の事実）。
+  縮退の組を 1 本だけ見せる（決定 5）。
+- lint の警告が 2 件増えた（`set-state-in-effect`、一覧を捨てる effect）。既にある同種の警告と
+  同じ理由で、外部（Worker）との同期そのもの。`npm test` は 372 件（+16、すべて `orbital.test.ts`）。
+- **V4-5 / V4-6 が乗れるもの**: `orbitalColumns()`（列・行・HOMO/LUMO の判定）、`OrbitalPick` と
+  `samePick`、`ORBITAL_SCALE` と `IsoLevelSlider` の `scale` prop、`density` の世代カウンタ、
+  `selectOrbital` / `forgetOrbital`。**`IsoMesh.lobes` はまだ読んでいない**（V4-5）。
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
