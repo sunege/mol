@@ -123,6 +123,10 @@ impl GridSpec {
 }
 
 /// Sampled electron density, in electrons per cubic Bohr.
+///
+/// The same type also carries an orbital amplitude, which [`evaluate_orbital`]
+/// fills it with: that is a wavefunction rather than a density, so it is signed
+/// and its unit is not electrons per cubic Bohr.
 #[derive(Debug, Clone)]
 pub struct DensityGrid {
     pub spec: GridSpec,
@@ -216,12 +220,100 @@ pub fn evaluate(basis: &BasisSet, density: &DMatrix<f64>, spec: &GridSpec) -> De
     DensityGrid { spec: *spec, values }
 }
 
+/// Evaluates one orbital, `psi(r) = sum_mu c_mu phi_mu(r)`, on `spec`.
+///
+/// The blocks are the ones [`evaluate`] uses - the cost is dominated by
+/// evaluating every basis function at every point, which is the same work - but
+/// the contraction is linear in the coefficients rather than quadratic. Feeding
+/// the rank-one matrix `c c^T` to [`evaluate`] would give `psi^2` instead, and
+/// the sign is the whole point of drawing an orbital, so this cannot be reduced
+/// to a call of the other.
+pub fn evaluate_orbital(basis: &BasisSet, coefficients: &[f64], spec: &GridSpec) -> DensityGrid {
+    let n = basis.n_functions();
+    debug_assert_eq!(coefficients.len(), n);
+
+    let total = spec.n_points();
+    let mut values = vec![0.0; total];
+    let mut phi_values = vec![0.0; n * BLOCK];
+
+    let mut start = 0;
+    while start < total {
+        let count = BLOCK.min(total - start);
+        for j in 0..count {
+            basis.evaluate_into(spec.point_at(start + j), &mut phi_values[j * n..(j + 1) * n]);
+        }
+        for j in 0..count {
+            let phi = &phi_values[j * n..(j + 1) * n];
+            values[start + j] =
+                coefficients.iter().zip(phi).map(|(c, value)| c * value).sum::<f64>();
+        }
+        start += count;
+    }
+
+    DensityGrid { spec: *spec, values }
+}
+
+/// How many separate lobes a signed field has above `+level` and below
+/// `-level`: the count of connected components of each.
+///
+/// This is how an orbital's nodes are counted without meshing it. Two lobes of
+/// the same sign that the surface would draw as separate blobs are separate
+/// components here, and the node between them is what separates them.
+///
+/// Samples are neighbours when they share a face, and the box does not wrap:
+/// a lobe that runs off the edge of the lattice is cut there rather than joined
+/// to whatever sits on the opposite face, which would be a different molecule's
+/// worth of space away.
+pub fn count_lobes(grid: &DensityGrid, level: f64) -> (usize, usize) {
+    (
+        count_components(grid, |value| value > level),
+        count_components(grid, |value| value < -level),
+    )
+}
+
+/// Connected components of the samples `inside` accepts, by flood fill.
+fn count_components(grid: &DensityGrid, inside: impl Fn(f64) -> bool) -> usize {
+    let limit @ [nx, ny, _] = grid.spec.dims;
+    let mut visited = vec![false; grid.values.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut components = 0;
+
+    for seed in 0..grid.values.len() {
+        if visited[seed] || !inside(grid.values[seed]) {
+            continue;
+        }
+        components += 1;
+        visited[seed] = true;
+        stack.push(seed);
+        while let Some(i) = stack.pop() {
+            let index = [i % nx, (i / nx) % ny, i / (nx * ny)];
+            for axis in 0..3 {
+                for step in [-1isize, 1] {
+                    let moved = index[axis] as isize + step;
+                    if moved < 0 || moved as usize >= limit[axis] {
+                        continue;
+                    }
+                    let mut neighbour = index;
+                    neighbour[axis] = moved as usize;
+                    let j = grid.spec.index(neighbour[0], neighbour[1], neighbour[2]);
+                    if !visited[j] && inside(grid.values[j]) {
+                        visited[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+    }
+    components
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::basis::Shell;
     use crate::molecule::Atom;
     use approx::assert_relative_eq;
+    use nalgebra::DVector;
 
     #[test]
     fn the_box_encloses_every_nucleus_with_the_requested_padding() {
@@ -325,6 +417,81 @@ mod tests {
         let lowest = grid.values.iter().copied().fold(f64::INFINITY, f64::min);
         assert!(lowest > -1e-12, "sample at {lowest}");
         assert!(grid.max() > 0.0);
+    }
+
+    /// The orbital route against the density route: the density of a single
+    /// orbital is its amplitude squared, so squaring one has to give the other,
+    /// and the amplitude has the sign the density has lost.
+    #[test]
+    fn an_orbital_is_the_signed_combination_whose_square_is_its_density() {
+        let mol = Molecule::from_angstrom(&[(1, [0.0; 3]), (1, [0.0, 0.0, 0.74])]).unwrap();
+        // Wide enough that the display lattice resolves both.
+        let basis = BasisSet::from_shells(vec![
+            Shell::new(0, [0.0; 3], 0, &[0.4], &[1.0]),
+            Shell::new(1, mol.atoms[1].pos, 0, &[0.4], &[1.0]),
+        ]);
+        let spec = GridSpec::for_molecule(&mol);
+
+        // An antibonding combination, so the amplitude really does change sign.
+        let c = DVector::from_vec(vec![0.8, -0.6]);
+        let psi = evaluate_orbital(&basis, c.as_slice(), &spec);
+        let rho = evaluate(&basis, &(&c * c.transpose()), &spec);
+
+        let point = spec.point(3, 4, 5);
+        let phi = basis.evaluate(point);
+        assert_relative_eq!(
+            psi.at(3, 4, 5),
+            c[0] * phi[0] + c[1] * phi[1],
+            max_relative = 1e-12
+        );
+        for (amplitude, density) in psi.values.iter().zip(&rho.values) {
+            assert_relative_eq!(amplitude * amplitude, density, epsilon = 1e-14);
+        }
+        let lowest = psi.values.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(lowest < -0.01, "the amplitude should go negative, not {lowest}");
+    }
+
+    fn grid_of(dims: [usize; 3], values: Vec<f64>) -> DensityGrid {
+        let spec = GridSpec { origin: [0.0; 3], spacing: 1.0, dims };
+        assert_eq!(values.len(), spec.n_points());
+        DensityGrid { spec, values }
+    }
+
+    #[test]
+    fn lobes_are_counted_per_sign_and_do_not_wrap_round_the_box() {
+        // A row of lobes: two above the level with a trough between them, and
+        // one below it. The two positive ones are at opposite ends, so counting
+        // them as one would mean the box had wrapped.
+        let row = grid_of([5, 1, 1], vec![1.0, 0.0, -1.0, 0.0, 1.0]);
+        assert_eq!(count_lobes(&row, 0.5), (2, 1));
+        // Below every sample, everything is one lobe; above every sample, none.
+        assert_eq!(count_lobes(&row, 1.5), (0, 0));
+    }
+
+    #[test]
+    fn lobes_touching_only_at_a_corner_are_separate() {
+        // Samples are neighbours when they share a face. Two blobs meeting at a
+        // diagonal are two lobes with a node between them, which is what an
+        // orbital's picture shows.
+        let diagonal = grid_of(
+            [3, 3, 1],
+            vec![
+                1.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, //
+                0.0, 0.0, 1.0,
+            ],
+        );
+        assert_eq!(count_lobes(&diagonal, 0.5), (3, 0));
+
+        let joined = grid_of(
+            [3, 3, 1],
+            vec![
+                1.0, 1.0, 0.0, //
+                0.0, 1.0, 0.0, //
+                0.0, 1.0, 1.0,
+            ],
+        );
+        assert_eq!(count_lobes(&joined, 0.5), (1, 0));
     }
 
     #[test]

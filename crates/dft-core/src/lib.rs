@@ -19,6 +19,7 @@ pub mod integrals;
 pub mod marching;
 pub mod molecule;
 pub mod opt;
+pub mod orbital;
 pub mod scf;
 pub mod xc;
 
@@ -30,4 +31,5 @@ pub use grid::GridQuality;
 pub use marching::Mesh;
 pub use molecule::{Atom, GeometryError, Molecule};
 pub use opt::{Relaxation, Status as OptStatus};
+pub use orbital::OrbitalInfo;
 pub use scf::{run_restricted, run_unrestricted, OrbitalSet, ScfOptions, ScfResult, System};

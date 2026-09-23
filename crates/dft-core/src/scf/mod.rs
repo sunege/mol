@@ -248,7 +248,7 @@ impl OrbitalSet {
 
 /// An orbital counts as occupied above this. Fractional occupations only arise
 /// in the spherically averaged atomic calculations behind the SAD guess.
-const OCCUPIED_THRESHOLD: f64 = 1e-8;
+pub const OCCUPIED_THRESHOLD: f64 = 1e-8;
 
 /// Outcome of an SCF, converged or not.
 #[derive(Debug, Clone)]
