@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isFlat,
+  needsNudge,
   perturb,
   randomSeed,
   FLATNESS_TOLERANCE,
@@ -194,5 +195,29 @@ describe('recognising the structures a click builds', () => {
     // Benzene as the preset builds it, which is flat and really is.
     const benzene = new Float64Array([...ring(6, 1.39), ...ring(6, 1.39 + 1.09)]);
     expect(isFlat(benzene)).toBe(true);
+  });
+});
+
+describe('deciding whether to nudge at all', () => {
+  const FLAT_BENZENE = new Float64Array([...ring(6, 1.39), ...ring(6, 1.39 + 1.09)]);
+  const TETRAHEDRAL_METHANE = new Float64Array([
+    0, 0, 0, 0.63, 0.63, 0.63, -0.63, -0.63, 0.63, -0.63, 0.63, -0.63, 0.63, -0.63, -0.63,
+  ]);
+
+  it('nudges a flat structure the user built', () => {
+    expect(needsNudge(FLAT_BENZENE, true)).toBe(true);
+  });
+
+  it('leaves a structure the app supplied alone, flat or not', () => {
+    // A preset, one opened from the log, and above all the shape a relaxation
+    // has just found: nudging that one would walk the optimiser back down a
+    // valley it is already at the bottom of, which is what makes measuring a
+    // found shape twice as long as it needs to be.
+    expect(needsNudge(FLAT_BENZENE, false)).toBe(false);
+    expect(needsNudge(TETRAHEDRAL_METHANE, false)).toBe(false);
+  });
+
+  it('leaves a structure with depth alone even when the user built it', () => {
+    expect(needsNudge(TETRAHEDRAL_METHANE, true)).toBe(false);
   });
 });

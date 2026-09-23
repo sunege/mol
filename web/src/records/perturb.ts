@@ -25,11 +25,11 @@
  * - **only flat structures** ({@link isFlat}). A molecule built with Shift, or
  *   with the camera turned between clicks, has no plane, and nothing else about
  *   clicking makes an exact symmetry.
- * - **only structures the user built or edited**, which is the App's part: a
- *   preset, or a structure opened from the log, is a shape we supplied rather
- *   than one that came out of the camera plane, and its symmetry is the
- *   molecule's own. Benzene really is flat, and nudging it only costs the
- *   lecture a minute.
+ * - **only structures the user built or edited** ({@link needsNudge}): a preset,
+ *   a structure opened from the log, and the structure a relaxation has just
+ *   produced are all shapes we supplied rather than ones that came out of the
+ *   camera plane, and their symmetry is the molecule's own. Benzene really is
+ *   flat, and nudging it only costs the lecture a minute.
  */
 
 /**
@@ -66,6 +66,27 @@ export const FLATNESS_TOLERANCE = 0.03;
 export const MIN_ATOMS_FOR_A_PLANE = 4;
 
 type Vec3 = [number, number, number];
+
+/**
+ * Whether `xyz` (Angstrom, three per atom) should be nudged before it is
+ * relaxed: it is flat, and it is a structure the user built or edited.
+ *
+ * `handBuilt` is the second half of the rule above, and the caller has to keep
+ * it: what a structure is, geometrically, does not say where it came from. It
+ * is false for a preset, for a structure opened from the log or from a
+ * candidate, and for the structure a relaxation has just produced.
+ *
+ * That last one is not only about symmetry, it is about time. Relaxing a flat
+ * molecule leaves it flat, so pressing 安定な形にする again - which is what
+ * measuring a shape that has just been found amounts to - would nudge a
+ * structure that is already at the bottom of its valley and make the optimiser
+ * walk back down from a hundredth of an Angstrom away. Benzene measured from
+ * the shape it settled into takes five steps and three minutes; nudged first it
+ * takes eighteen and six (`docs/dev-notes.md`, "v3 の実測").
+ */
+export function needsNudge(xyz: Float64Array, handBuilt: boolean): boolean {
+  return handBuilt && isFlat(xyz);
+}
 
 /**
  * Whether every atom of `xyz` (Angstrom, three per atom) lies in one plane.

@@ -13,7 +13,7 @@ import { ObservePanel } from './components/ObservePanel';
 import { headline, type JobKind, type JobState } from './components/progress';
 import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
-import { isFlat, perturb, randomSeed, PERTURB_AMPLITUDE } from './records/perturb';
+import { needsNudge, perturb, randomSeed, PERTURB_AMPLITUDE } from './records/perturb';
 import {
   createRecord,
   hillFormula,
@@ -31,6 +31,7 @@ import {
   DEFAULT_LEVEL,
   LEVEL_GROUP_LABEL,
   LEVEL_ORDER,
+  levelAdvice,
   levelHint,
   levelLabel,
 } from './components/level';
@@ -119,6 +120,12 @@ export default function App() {
 
   const [atoms, setAtoms] = useState<SceneAtom[]>(PRESETS[0].atoms);
   const [presetId, setPresetId] = useState<string | null>(PRESETS[0].id);
+  // Whether the structure on screen is one the user built or edited, which is
+  // what decides the nudge before a relaxation (`records/perturb.ts`) and the
+  // advice under the choice of level (`components/level.ts`). It is not the
+  // same as having no preset: a record, a candidate and the shape a relaxation
+  // has just produced are all shapes this app supplied, and clear it too.
+  const [handBuilt, setHandBuilt] = useState(false);
   const [elements, setElements] = useState<ElementInfo[]>([]);
   const [activeZ, setActiveZ] = useState(6);
   const [selected, setSelected] = useState<number | null>(null);
@@ -394,6 +401,7 @@ export default function App() {
     (pos: [number, number, number]) => {
       setAtoms((prev) => [...prev, { z: activeZ, pos }]);
       setPresetId(null);
+      setHandBuilt(true);
       setSelected(null);
       setMeasured([]);
       invalidateResult();
@@ -405,6 +413,7 @@ export default function App() {
     (index: number, pos: [number, number, number]) => {
       setAtoms((prev) => prev.map((atom, i) => (i === index ? { ...atom, pos } : atom)));
       setPresetId(null);
+      setHandBuilt(true);
       invalidateResult();
     },
     [invalidateResult],
@@ -415,6 +424,7 @@ export default function App() {
       if (index === null) return null;
       setAtoms((prev) => prev.filter((_, i) => i !== index));
       setPresetId(null);
+      setHandBuilt(true);
       setMeasured([]);
       return null;
     });
@@ -424,6 +434,7 @@ export default function App() {
   const clearAll = useCallback(() => {
     setAtoms([]);
     setPresetId(null);
+    setHandBuilt(true);
     setSelected(null);
     setMeasured([]);
     invalidateResult();
@@ -891,11 +902,14 @@ export default function App() {
     const { z, xyz } = toWorkerArrays(original);
     // A structure the user built by clicking, with every atom in one plane, is
     // one the optimiser cannot leave: it would report the flat shape settled.
-    // Nudge it off the plane first. A preset is not built that way, and its
-    // symmetry is the molecule's own, so it goes in as it is
+    // Nudge it off the plane first. A shape this app supplied - a preset, a
+    // record, or the one a relaxation has just found - goes in as it is: its
+    // symmetry is the molecule's own, and nudging a shape that has already
+    // settled only makes the optimiser walk back down to it
     // (`records/perturb.ts`).
-    const start =
-      presetId === null && isFlat(xyz) ? perturb(xyz, PERTURB_AMPLITUDE, randomSeed()) : xyz;
+    const start = needsNudge(xyz, handBuilt)
+      ? perturb(xyz, PERTURB_AMPLITUDE, randomSeed())
+      : xyz;
     const token = ++requestRef.current;
     inFlightRef.current = true;
     relaxingRef.current = true;
@@ -980,6 +994,7 @@ export default function App() {
         // depend on frames the browser may not be drawing.
         setAtoms(withPositions(original, relaxed.xyz));
         setPresetId(null);
+        setHandBuilt(false);
         producerDoneRef.current = true;
         // The player may already have caught up with the engine, in which case
         // its idle callback has been and gone and nothing will call it again.
@@ -1006,6 +1021,7 @@ export default function App() {
           keepObserving();
           setAtoms(withPositions(original, Array.from(e.last.xyz)));
           setPresetId(null);
+          setHandBuilt(false);
           setOpenRecordId(null);
           setStopped({ steps: e.last.step, level });
           producerDoneRef.current = true;
@@ -1020,7 +1036,7 @@ export default function App() {
       });
   }, [
     atoms,
-    presetId,
+    handBuilt,
     level,
     showDensity,
     channel,
@@ -1116,6 +1132,7 @@ export default function App() {
       const opened = atomsOfRecord(record, record.final);
       setAtoms(opened);
       setPresetId(null);
+      setHandBuilt(false);
       setSelected(null);
       setMeasured([]);
       setError(null);
@@ -1196,6 +1213,7 @@ export default function App() {
       stopAnimation();
       setAtoms(structure);
       setPresetId(null);
+      setHandBuilt(false);
       setSelected(null);
       setMeasured([]);
       setError(null);
@@ -1221,6 +1239,9 @@ export default function App() {
       showDivergence,
     ],
   );
+
+  // The extra line under the choice of level, when there is one to say.
+  const advice = atoms.length === 0 ? null : levelAdvice(level, handBuilt);
 
   const openedRecord = records.find((record) => record.id === openRecordId) ?? null;
   // A string rather than the record, so the effect below does not run again
@@ -1488,6 +1509,7 @@ export default function App() {
               onClick={() => {
                 setPresetId(preset.id);
                 setAtoms(preset.atoms);
+                setHandBuilt(false);
                 setSelected(null);
                 setMeasured([]);
                 invalidateResult();
@@ -1516,6 +1538,9 @@ export default function App() {
           ))}
         </div>
         <p className="hint level-hint">{levelHint(level)}</p>
+        {/* Advice, not a warning: what is about to be pressed still works, and
+            is not held back (`components/level.ts`). */}
+        {advice !== null && <p className="hint level-hint">{advice}</p>}
         <div className="row">
           <button
             type="button"

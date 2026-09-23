@@ -1,10 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_LEVEL, LEVEL_GROUP_LABEL, LEVEL_ORDER, levelHint, levelLabel } from './level';
+import {
+  DEFAULT_LEVEL,
+  LEVEL_GROUP_LABEL,
+  LEVEL_ORDER,
+  levelAdvice,
+  levelHint,
+  levelLabel,
+} from './level';
 
 /** Everything this module puts on screen, as one string. */
 const said = [
   LEVEL_GROUP_LABEL,
-  ...LEVEL_ORDER.flatMap((level) => [levelLabel(level), levelHint(level)]),
+  ...LEVEL_ORDER.flatMap((level) => [
+    levelLabel(level),
+    levelHint(level),
+    levelAdvice(level, true) ?? '',
+  ]),
 ].join(' ');
 
 describe('the choice of what a calculation is for', () => {
@@ -20,11 +31,27 @@ describe('the choice of what a calculation is for', () => {
 
   it('says what each one is for and how long it takes', () => {
     expect(levelHint('shape')).toBe(
-      'どんな形に落ち着くかを見るための計算です。かかる時間の目安は数秒です。',
+      'どんな形に落ち着くかを見るための計算です。かかる時間の目安は数秒〜数十秒です。',
     );
     expect(levelHint('measure')).toBe(
       '結合の角度を数値として読むための計算です。かかる時間の目安は数十秒〜数分です。',
     );
+  });
+
+  it('tells someone measuring a structure they built to find its shape first', () => {
+    // Measured: the moves are what a measurement costs, and a hand-built
+    // structure makes many more of them than one that has already settled.
+    expect(levelAdvice('measure', true)).toBe(
+      '手で作った形は、先に「形を探す」で落ち着かせてから測ると早く終わります。',
+    );
+  });
+
+  it('says nothing about a shape the app supplied, or while finding one', () => {
+    // A preset, a record, or a shape a relaxation just found: already near a
+    // minimum, so there is nothing to go round again.
+    expect(levelAdvice('measure', false)).toBeNull();
+    expect(levelAdvice('shape', true)).toBeNull();
+    expect(levelAdvice('shape', false)).toBeNull();
   });
 
   it('does not call them better and worse', () => {
