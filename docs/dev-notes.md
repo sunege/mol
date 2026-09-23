@@ -2081,6 +2081,63 @@ Rust だけ。wasm と UI は触っていない（V4-3 で通す）。置き場�
 - `cargo test --workspace` は 155 件（+13。orbital 10・density 3）で、lib のテストは 7.6 秒。
   既存の値は 1 つも動いていない。
 
+### V4-3 の実装メモ（軌道が wasm 境界と Worker の契約を越える、2026-09-23）
+
+`protocol.ts` / `dft-wasm` / `dft.worker.ts` / `workerClient.ts` と、生成物 `web/src/wasm/`。
+UI は「コンパイルが落ちる分」だけ。**`dft-core` は 1 行も触っていない**（V4-2 で足した
+`orbital.rs` を並べ替えてシリアライズするだけで足りた）。
+
+- **`OrbitalLevel` は 1 段 ＝ 1 行**で、開殻は α の段を全部・続けて β の段を全部。
+  O₂（STO-3G、driver に選ばせた三重項）は **16 行**（α 8・β 8）:
+
+  | # | spin | first | count | occ | E (Ha) | partner |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 4 | up | 4 | 2 | 1 | −0.3507 | 13 |
+  | 5 | up | 6 | 1 | 1 | −0.3390 | 12 |
+  | 6 | up | 7 | 2 | 1 | −0.0811 | 14 |
+  | 12 | down | 4 | 1 | 1 | −0.2971 | 5 |
+  | 13 | down | 5 | 2 | 1 | −0.2808 | 4 |
+  | 14 | down | 7 | 2 | 0 | −0.0011 | 6 |
+
+  **V4-2 の 4→5・5→6・6→4 の入れ替わりが、段の対応としてそのまま出ている**（4↔13 と
+  5↔12。どちらの向きから読んでも同じ相手を指す）。π\* は α が埋まって β が空、交換分裂は
+  **0.080 Ha** で、どちらも `count: 2`。**畳んだら消えるものはこれ。**
+  電子数は占有の段の `count × occupation` の和で α 9・β 7。水は 7 段・占有 2 が 5 段。
+- **`partner` は段どうし**で、`spin_pairing`（軌道どうし）から**組の代表 ＝ `range.start`
+  だけを引いて**作る。逆向き（β → α）は同じ行を逆に読むだけで、`spin_pairing` が
+  「置換か `None`」なので一意。**添字が同じ段どうしにはならない**ことをテストで見ている。
+- **`parity` のしきい値は境界（`dft-wasm` の `PARITY_THRESHOLD` 0.8）で、段単位。**
+  縮退の組は**全員が一致しないと `null`**にした（組の中の 1 本ずつは任意の回転なので、
+  代表 1 本の値は段の事実ではない）。ベンゼンは実測で HOMO の組が `-1`、σ 側に `+1` があり、
+  **水も O₂ も全段 `null`**（`MIN_ATOMS_FOR_A_PLANE = 4`）。
+- **`Option::None` は既定で `undefined` になる。** `serde_wasm_bindgen::to_value` は
+  `serialize_missing_as_null` が偽なので、契約の `parity: 1 | -1 | null` /
+  `partner: number | null` を満たすには `Serializer::new().serialize_missing_as_null(true)` で
+  直列化する必要がある（`orbitals()` だけこれを使う。既存の `summary()` は据え置き）。
+- **軌道の格子の鍵は `(index, SpinChannel)`。** `spin` を省略すると `"both"` で、開殻の結果は
+  **エラー**にした（どちらの向きか推測しない。`basis_for` と同じ作法）。知らないスピン名、
+  添字の範囲外、`channel: "orbital"` で添字が無い、も全部エラー。
+- **`lobes` は全チャネルに載せた**（`count_lobes` を marching cubes と同じしきい値で呼ぶ）。
+  値段はベンゼン（228,000 点）の 1 回の切り出しで **総電子密度 5.5 → 7.0 ms、
+  差密度 8.6 → 9.4 ms**（HEAD の .wasm と新しい .wasm を Node で比べた最小値）。
+  符号なしのチャネルでも負側の flood fill は走るが、何も拾わないので 1 点走査で済む。
+- **速さ（ベンゼン、Node、release + wasm-opt）**: `orbitals()` **0.2 ms**（格子を作らない）、
+  軌道 1 本の格子を作る切り出し **424 ms**、同じ軌道でしきい値だけ動かすと **10 ms**。
+  総電子密度の初回は 761 ms なので、**軌道は密度より安い**（V4-2 のネイティブ 0.265 / 0.317 秒と
+  同じ比）。格子 1 枚は 228,000 × 8 ＝ **1.8 MB**。
+- **UI で埋めたのは 2 か所ではなく 4 か所。** チケットは `ISO_RANGES` と App の `levels` を
+  挙げているが、`components/density.ts` の `LABELS: Record<DensityRequest, string>` と
+  `WORDS: Record<DensityChannel, string>` も網羅性で落ちる。`REQUEST_ORDER` には入れていないので
+  **ボタンは 3 つのまま**で、F4 のテスト（`density.test.ts` が '軌道' を禁じている）は
+  3 つの要求しか回さないため通る。**文言は V4-4 / V4-5 のもの**で、いまは仮。
+  `ISO_RANGES.orbital` は 0.005〜0.15 / 初期 0.03（下限だけ他より高い。低いと裾が繋がって
+  ローブが 1 個になる）。
+- `web/src/wasm/dft_wasm_bg.wasm` は **320,286 → 333,258 バイト**（+13.0 KB）。
+  V4-2 の `orbital.rs` と `density.rs` の分もここで初めて生成物に入った。
+- `npm test` は 356 件（+3。engine.test.ts に軌道の段・軌道の面とローブ・O₂ の 2 スピン、
+  protocol.test.ts に `isTerminal` と軌道の要求を 1 行ずつ）。`cargo test --workspace` は 155 件で
+  変化なし。
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
