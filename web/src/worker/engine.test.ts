@@ -32,6 +32,8 @@ import {
   type CalculationProgress,
   type ModelLevel,
   type OptimizationOutcome,
+  type OrbitalLevel,
+  type SpinChannel,
 } from './protocol';
 import { isFlat, perturb, PERTURB_AMPLITUDE } from '../records/perturb';
 
@@ -354,6 +356,173 @@ describe('the electrons a surface is asked for', { timeout: 120_000 }, () => {
   it('refuses a channel it does not know', () => {
     const { calculation } = solve(preset('h2o'));
     expect(() => calculation.isosurface('pi', 0.02)).toThrow('unknown density channel');
+    calculation.free();
+  });
+});
+
+
+/**
+ * The orbital ladder, which is the one thing about a calculation that crosses
+ * as a list rather than a number.
+ *
+ * Everything in `OrbitalLevel` is decided at the boundary rather than in
+ * `dft-core`: which orbitals share a rung, which side of the plane a rung is on
+ * as a label rather than a measurement, and which rung of one spin is which rung
+ * of the other. Only the real module can say that those decisions come out as
+ * the contract describes, so this is where they are checked.
+ */
+describe('the ladder of orbital levels', { timeout: 180_000 }, () => {
+  const ladder = (calculation: Calculation) => calculation.orbitals() as OrbitalLevel[];
+
+  it('gives water one rung per orbital, five of them full and two empty', () => {
+    // Ten electrons in seven STO-3G functions, none of the levels degenerate.
+    const calculation = scf(WATER.z, WATER.xyz);
+    const levels = ladder(calculation);
+
+    expect(levels).toHaveLength(WATER_FUNCTIONS.shape);
+    expect(levels.filter((level) => level.occupation === 2)).toHaveLength(5);
+    expect(levels.filter((level) => level.occupation === 0)).toHaveLength(2);
+    // A closed shell has one set of orbitals holding both spins, so there is no
+    // second ladder and nothing to pair with.
+    expect(levels.every((level) => level.spin === 'both')).toBe(true);
+    expect(levels.every((level) => level.partner === null)).toBe(true);
+    // Every rung is one orbital, and they arrive lowest first.
+    expect(levels.map((level) => level.count)).toEqual(Array(levels.length).fill(1));
+    expect(levels.map((level) => level.first)).toEqual([...levels.keys()]);
+    expect(levels.map((level) => level.energy)).toEqual(
+      [...levels.map((level) => level.energy)].sort((a, b) => a - b),
+    );
+    // Three atoms lie in some plane whatever they do, so sorting water's
+    // orbitals by a reflection would claim a symmetry it does not have.
+    expect(levels.every((level) => level.parity === null)).toBe(true);
+    calculation.free();
+  });
+
+  it('draws one orbital with a surface of each sign, and counts its lobes', () => {
+    // Water's highest occupied orbital is the oxygen lone pair: one 2p, so one
+    // lobe of each sign, and the clearest thing a phase drawing can show.
+    const calculation = scf(WATER.z, WATER.xyz);
+    const levels = ladder(calculation);
+    const homo = levels.filter((level) => level.occupation > 0).pop()!;
+
+    const iso = calculation.isosurface('orbital', 0.05, homo.first);
+    const drawn = {
+      channel: iso.channel,
+      positive: iso.positiveIndices.length / 3,
+      negative: iso.negativeIndices.length / 3,
+      lobes: { positive: iso.lobesPositive, negative: iso.lobesNegative },
+    };
+    iso.free();
+
+    expect(drawn.channel).toBe('orbital');
+    expect(drawn.positive).toBeGreaterThan(0);
+    // The sign is what an orbital drawing is for, and a density channel would
+    // have thrown it away by squaring.
+    expect(drawn.negative).toBeGreaterThan(0);
+    expect(drawn.lobes).toEqual({ positive: 1, negative: 1 });
+
+    // A spin this calculation has no orbitals for, and an orbital past the end
+    // of the ladder, are errors rather than a picture of something else.
+    expect(() => calculation.isosurface('orbital', 0.05, homo.first, 'up')).toThrow(
+      'no up orbitals',
+    );
+    expect(() => calculation.isosurface('orbital', 0.05, levels.length)).toThrow('is past the');
+    expect(() => calculation.isosurface('orbital', 0.05)).toThrow('needs the index');
+    calculation.free();
+  });
+
+  it('counts the lobes of a density channel too, at the level it was cut at', () => {
+    // `lobes` is on every mesh, not only an orbital's: the same flood fill over
+    // the same lattice at the same threshold.
+    const calculation = scf(WATER.z, WATER.xyz);
+    const lobes = (channel: string, level: number) => {
+      const iso = calculation.isosurface(channel, level);
+      const counted = { positive: iso.lobesPositive, negative: iso.lobesNegative };
+      iso.free();
+      return counted;
+    };
+
+    // A molecule is one connected region of electrons, and a density has nothing
+    // below zero for a second surface to be made of.
+    expect(lobes('total', 0.05)).toEqual({ positive: 1, negative: 0 });
+    // The deformation density does: electrons gathered into the bonds as one
+    // region, and thinned around each of the three nuclei.
+    expect(lobes('deformation', 0.02)).toEqual({ positive: 1, negative: 3 });
+    // Above the whole density there is nothing left to count.
+    expect(lobes('total', 100)).toEqual({ positive: 0, negative: 0 });
+    calculation.free();
+  });
+
+  it('keeps a degenerate pair on one rung, which is benzene’s highest occupied', () => {
+    // Two orbitals at the same energy are not two things the molecule has: what
+    // the diagonalisation returns inside the pair is an arbitrary rotation of
+    // it, so the pair is the smallest thing worth showing.
+    const { z, xyz } = toWorkerArrays(preset('c6h6'));
+    const calculation = scf(z, xyz);
+    const levels = ladder(calculation);
+    const occupied = levels.filter((level) => level.occupation > 0);
+    const homo = occupied[occupied.length - 1];
+
+    expect(homo.count).toBe(2);
+    // And the empty rung above it, which is the pair that would break the ring.
+    expect(levels[levels.indexOf(homo) + 1].count).toBe(2);
+    // Twelve atoms in a plane, so here the reflection really does sort them: the
+    // pi orbitals are the ones it turns inside out.
+    expect(homo.parity).toBe(-1);
+    expect(levels.some((level) => level.parity === 1)).toBe(true);
+    // Every rung accounts for its orbitals exactly once.
+    expect(levels.reduce((sum, level) => sum + level.count, 0)).toBe(
+      (calculation.summary() as { basisFunctions: number }).basisFunctions,
+    );
+    calculation.free();
+  });
+
+  it('keeps oxygen’s two spins apart, and says which rung of one is which of the other', () => {
+    // What makes O2 a triplet: nine electrons with their spins one way and seven
+    // the other, so two orbitals are occupied in one ladder and empty in the
+    // matching rung of the other. Folding the two together would lose it - and
+    // so would pairing them up by index, because they do not come in the same
+    // order.
+    const { z, xyz } = toWorkerArrays(preset('o2'));
+    const calculation = scf(z, xyz);
+    const levels = ladder(calculation);
+
+    const spins = [...new Set(levels.map((level) => level.spin))];
+    expect(spins).toEqual(['up', 'down']);
+    const electrons = (spin: SpinChannel) =>
+      levels
+        .filter((level) => level.spin === spin && level.occupation > 0)
+        .reduce((sum, level) => sum + level.count * level.occupation, 0);
+    expect(electrons('up')).toBe(9);
+    expect(electrons('down')).toBe(7);
+    // One spin at a time, each orbital holding at most one electron.
+    expect(levels.every((level) => level.occupation === 1 || level.occupation === 0)).toBe(true);
+    // A diatomic has no plane it is not in, so no rung is labelled by one: the
+    // sigma and pi of O2 are told apart by their degeneracy instead.
+    expect(levels.every((level) => level.parity === null)).toBe(true);
+
+    // Every rung names one of the other spin, and the naming agrees both ways.
+    for (const [index, level] of levels.entries()) {
+      expect(level.partner).not.toBeNull();
+      const partner = levels[level.partner!];
+      expect(partner.spin).not.toBe(level.spin);
+      expect(partner.partner).toBe(index);
+    }
+    // Not the identity: the orbitals of the two spins come out in a different
+    // order, which is the whole reason `partner` exists.
+    expect(levels.map((level) => level.partner)).not.toEqual([...levels.keys()]);
+
+    // And the two spins' orbitals really are different orbitals, so asking for
+    // one index in each ladder must not answer with the same surface.
+    const up = calculation.isosurface('orbital', 0.05, 4, 'up');
+    const down = calculation.isosurface('orbital', 0.05, 4, 'down');
+    const differ = up.positiveIndices.length !== down.positiveIndices.length;
+    up.free();
+    down.free();
+    expect(differ).toBe(true);
+    // Omitting the spin on a calculation that solved the two separately is an
+    // error rather than a guess at which was meant.
+    expect(() => calculation.isosurface('orbital', 0.05, 4)).toThrow('no both orbitals');
     calculation.free();
   });
 });

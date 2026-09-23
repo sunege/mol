@@ -3,12 +3,15 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_calculation_free: (a: number, b: number) => void;
 export const __wbg_isomesh_free: (a: number, b: number) => void;
-export const calculation_isosurface: (a: number, b: number, c: number, d: number) => [number, number, number];
+export const calculation_isosurface: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+export const calculation_orbitals: (a: number) => [number, number, number];
 export const calculation_summary: (a: number) => [number, number, number];
 export const isomesh_channel: (a: number) => [number, number];
 export const isomesh_densityMax: (a: number) => number;
 export const isomesh_densityMin: (a: number) => number;
 export const isomesh_isoLevel: (a: number) => number;
+export const isomesh_lobesNegative: (a: number) => number;
+export const isomesh_lobesPositive: (a: number) => number;
 export const isomesh_negativeIndices: (a: number) => [number, number];
 export const isomesh_negativeNormals: (a: number) => [number, number];
 export const isomesh_negativePositions: (a: number) => [number, number];

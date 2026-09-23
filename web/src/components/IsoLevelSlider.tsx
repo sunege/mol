@@ -31,6 +31,12 @@ export const ISO_RANGES: Record<DensityRequest, IsoRange> = {
   // The same range: a bonding request is answered with one or the other of
   // these two densities, so the levels that show something are the same ones.
   deformation: { min: 0.002, max: 0.15, initial: 0.02 },
+  // An orbital is an amplitude rather than a density, and one orbital's is
+  // larger than the share of the density it carries: a lobe of ethylene's pi
+  // peaks near 0.3. The floor is higher than the others' because the useful
+  // picture is the lobes, and a level low enough to enclose the tails of all of
+  // them shows one blob with no nodes in it.
+  orbital: { min: 0.005, max: 0.15, initial: 0.03 },
 };
 
 /** Slider stops. Its positions are integers so the control steps evenly. */

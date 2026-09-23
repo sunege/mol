@@ -19,10 +19,18 @@
  * for, because the bonding request is answered two different ways and they look
  * nothing alike - one is a density, the other is signed and drawn in two
  * colours.
+ *
+ * A fourth request exists in the contract - one orbital - and is deliberately
+ * not one of these buttons: it belongs to the orbital section, which is closed
+ * by default and has words of its own. It appears below only because the maps
+ * here cover every request there is.
  */
 import type { DensityChannel, DensityRequest, IsoMesh } from '../worker/protocol';
 
-/** The surfaces in the order the panel shows them. */
+/**
+ * The surfaces in the order the panel shows them, which is every request except
+ * the orbital one - that is the orbital section's, not a button here.
+ */
 const REQUEST_ORDER: readonly DensityRequest[] = ['total', 'bonding', 'deformation'];
 
 /** What is shown until the user asks for something else. */
@@ -32,6 +40,7 @@ const LABELS: Record<DensityRequest, string> = {
   total: 'すべての電子',
   bonding: '結合に寄与する電子',
   deformation: '原子から動いた電子',
+  orbital: '分子軌道',
 };
 
 export function channelLabel(request: DensityRequest): string {
@@ -55,6 +64,8 @@ const WORDS: Record<DensityChannel, string> = {
   pi: '平らな分子なので、面から上下にはみ出している電子だけを表示しています。二重結合や環がある分子で、結合がどこに広がっているかが見えます。',
   deformation:
     '原子がばらばらだったときと比べて、電子が濃くなった場所（青）と薄くなった場所（赤）です。青が結合のできたところにあたります。',
+  orbital:
+    '電子の入る部屋を 1 つだけ取り出した形です。色の違いは符号の違いで、電子の濃さではありません。',
 };
 
 /**
@@ -69,6 +80,7 @@ const WORDS: Record<DensityChannel, string> = {
 export function explainChannel(request: DensityRequest, mesh: IsoMesh | null): string {
   if (request === 'total') return WORDS.total;
   if (request === 'deformation') return WORDS.deformation;
+  if (request === 'orbital') return WORDS.orbital;
   const shown: DensityChannel | null = mesh?.channel ?? null;
   if (shown === 'pi' || shown === 'deformation') return WORDS[shown];
   return '原子が結びついたことで動いた電子だけを表示します。';

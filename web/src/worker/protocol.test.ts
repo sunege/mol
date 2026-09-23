@@ -91,6 +91,7 @@ describe('worker protocol', () => {
       negative: emptySurface(),
       densityMax: 27.54,
       densityMin: 0,
+      lobes: { positive: 1, negative: 0 },
       elapsedMs: 3.5,
     };
     const cloned = structuredClone({ id: 9, type: 'mesh', mesh } as WorkerResponse);
@@ -123,6 +124,7 @@ describe('worker protocol', () => {
       },
       densityMax: 0.31,
       densityMin: -0.25,
+      lobes: { positive: 1, negative: 1 },
       elapsedMs: 6,
     };
     const cloned = structuredClone({ id: 11, type: 'mesh', mesh } as WorkerResponse);
@@ -141,6 +143,7 @@ describe('worker protocol', () => {
       negative: emptySurface(),
       densityMax: 0.27,
       densityMin: 0,
+      lobes: { positive: 0, negative: 0 },
       elapsedMs: 1,
     };
     const cloned = structuredClone({ id: 10, type: 'mesh', mesh } as WorkerResponse);
@@ -151,13 +154,24 @@ describe('worker protocol', () => {
 
   it('asks for a channel and a threshold without resending the geometry', () => {
     // The point of keeping the density in the worker: a threshold change is a
-    // number, not a molecule. One of the three channels is a request rather
+    // number, not a molecule. One of the three densities is a request rather
     // than an answer - only the engine knows whether this molecule has a pi
     // system - and the other two name what comes back.
     for (const channel of ['total', 'bonding', 'deformation'] as DensityRequest[]) {
       const request: WorkerRequest = { id: 8, type: 'isosurface', channel, isoLevel: 0.02 };
       expect(structuredClone(request)).toEqual(request);
     }
+    // One orbital travels the same way, with two more numbers: which orbital,
+    // and whose ladder the index counts along.
+    const orbital: WorkerRequest = {
+      id: 9,
+      type: 'isosurface',
+      channel: 'orbital',
+      isoLevel: 0.03,
+      orbital: 4,
+      spin: 'up',
+    };
+    expect(structuredClone(orbital)).toEqual(orbital);
   });
 
   it('reports a failed geometry as an error response, not a thrown value', () => {
@@ -247,6 +261,7 @@ describe('streaming a geometry optimisation', () => {
       { id: 4, type: 'scf', result: convergedOutcome() },
       { id: 4, type: 'error', message: 'nope' },
       { id: 4, type: 'elements', elements: [] },
+      { id: 4, type: 'orbitals', levels: [] },
     ];
     for (const response of finals) expect(isTerminal(response)).toBe(true);
   });

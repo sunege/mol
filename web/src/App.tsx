@@ -173,6 +173,7 @@ export default function App() {
     total: ISO_RANGES.total.initial,
     bonding: ISO_RANGES.bonding.initial,
     deformation: ISO_RANGES.deformation.initial,
+    orbital: ISO_RANGES.orbital.initial,
   });
   /**
    * Whether the molecule on screen has electrons above and below a plane, as

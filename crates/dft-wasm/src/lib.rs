@@ -4,14 +4,17 @@
 //! engine (Bohr), and nothing else: all physics lives in `dft-core` so it stays
 //! testable on the host.
 
+use std::ops::Range;
+
 use dft_core::basis::BasisKind;
-use dft_core::bonding::{self, DensityChannel};
+use dft_core::bonding::{self, DensityChannel, OrbitalRef};
 use dft_core::constants::{ANGSTROM_PER_BOHR, BOHR_PER_ANGSTROM};
 use dft_core::density::{self, DensityGrid, GridSpec};
 use dft_core::driver::{self, DriverOptions, SpinState};
 use dft_core::grid::GridQuality;
 use dft_core::marching::{self, Side};
 use dft_core::opt;
+use dft_core::orbital::{self, OrbitalInfo};
 use dft_core::scf::{ScfResult, System};
 use dft_core::{element, Molecule};
 use serde::Serialize;
@@ -139,6 +142,113 @@ struct ScfOutput {
     optimization: Option<OptimizationOutput>,
 }
 
+/// How near +/-1 an orbital's mirror parity has to be before this boundary calls
+/// it symmetric or antisymmetric about the molecular plane.
+///
+/// `dft-core` hands out the parity it measured as a real number and keeps its
+/// own threshold to itself, because turning that number into a label is a
+/// question about what the interface may say rather than about the physics.
+/// Benzene's and ethylene's orbitals come out at +/-1.000, so anything short of
+/// this is a geometry the reflection is not really a symmetry of, and the honest
+/// answer there is no label at all.
+const PARITY_THRESHOLD: f64 = 0.8;
+
+/// Which of a calculation's sets of orbitals is meant: the one holding both
+/// spins, or one of the two a molecule with unpaired electrons is solved as.
+///
+/// The names are the protocol's (`SpinChannel` in
+/// `web/src/worker/protocol.ts`) and this is the only place they are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpinChannel {
+    Both,
+    Up,
+    Down,
+}
+
+impl SpinChannel {
+    /// Reads the name a request carries. Omitted means `"both"`, which is what
+    /// a closed-shell calculation has; a name this does not know is an error
+    /// rather than a guess, for the same reason as in [`basis_for`].
+    fn parse(name: Option<&str>) -> Result<SpinChannel, JsValue> {
+        match name.unwrap_or("both") {
+            "both" => Ok(SpinChannel::Both),
+            "up" => Ok(SpinChannel::Up),
+            "down" => Ok(SpinChannel::Down),
+            other => Err(JsValue::from_str(&format!(
+                "unknown spin {other:?}: expected \"both\", \"up\" or \"down\""
+            ))),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            SpinChannel::Both => "both",
+            SpinChannel::Up => "up",
+            SpinChannel::Down => "down",
+        }
+    }
+
+    /// Which spin the `channel`-th set of orbitals of `result` holds.
+    fn of(result: &ScfResult, channel: usize) -> SpinChannel {
+        match (result.is_unrestricted(), channel) {
+            (false, _) => SpinChannel::Both,
+            (true, 0) => SpinChannel::Up,
+            (true, _) => SpinChannel::Down,
+        }
+    }
+
+    /// The set of orbitals this spin names, as an index into
+    /// [`ScfResult::channels`].
+    ///
+    /// A calculation answers to exactly one of the three names - one set holding
+    /// both spins, or two holding one each - so the other two mean the caller
+    /// has confused two calculations. A surface drawn from the wrong set would
+    /// look like an answer, so this is an error instead.
+    fn channel_in(self, result: &ScfResult) -> Result<usize, JsValue> {
+        match (self, result.is_unrestricted()) {
+            (SpinChannel::Both, false) => Ok(0),
+            (SpinChannel::Up, true) => Ok(0),
+            (SpinChannel::Down, true) => Ok(1),
+            _ => Err(JsValue::from_str(&format!(
+                "this calculation has no {} orbitals: it solved {}",
+                self.name(),
+                if result.is_unrestricted() {
+                    "the two spins separately"
+                } else {
+                    "both spins together"
+                }
+            ))),
+        }
+    }
+}
+
+/// One rung of the orbital ladder, as `OrbitalLevel` in
+/// `web/src/worker/protocol.ts`.
+#[derive(Serialize)]
+struct OrbitalLevelOutput {
+    /// `"both"`, `"up"` or `"down"`.
+    spin: &'static str,
+    /// The lowest orbital on this rung, counted within its own spin channel.
+    first: usize,
+    /// Orbitals on it: one, or more where they are degenerate.
+    count: usize,
+    /// Electrons in one of them - two or zero for `"both"`, one or zero for a
+    /// single spin.
+    occupation: f64,
+    /// Orbital energy in Hartree, which sets how high the rung is drawn and
+    /// nothing else.
+    ///
+    /// Not a number for the screen, for the same reason as [`ScfOutput`]'s
+    /// `multiplicity`: LDA's orbital energies are out by a factor of several, so
+    /// the value would be wrong while the spacings built from it are right.
+    energy: f64,
+    /// `1`, `-1`, or `null` where the molecular plane does not sort this rung.
+    parity: Option<i32>,
+    /// The rung of the other spin holding the same orbital, as an index into the
+    /// array this arrives in, or `null` when there is none to name.
+    partner: Option<usize>,
+}
+
 /// A converged calculation, kept alive on the worker side.
 ///
 /// The SCF is the expensive part and every surface is drawn from its density, so
@@ -160,6 +270,17 @@ pub struct Calculation {
     /// `"deformation"` asks for. Each is 300,000 samples, so they are looked up
     /// by channel rather than kept per request.
     grids: Vec<(DensityChannel, DensityGrid)>,
+    /// The one orbital lattice kept, with the orbital and the spin it was built
+    /// for, so that moving the threshold of the orbital on screen costs marching
+    /// cubes alone the way a density's does.
+    ///
+    /// One, not one per orbital: WebAssembly's linear memory never shrinks, so
+    /// every lattice held is held for the life of the worker, and an interface
+    /// that walks up a ladder of thirty-six orbitals would keep all thirty-six.
+    /// The spin is part of the key because it has to be - in an open-shell
+    /// molecule the fifth alpha orbital and the fifth beta orbital are different
+    /// orbitals, and an index alone would answer one with the other.
+    orbital: Option<(usize, SpinChannel, DensityGrid)>,
 }
 
 #[wasm_bindgen]
@@ -188,6 +309,58 @@ impl Calculation {
         serde_wasm_bindgen::to_value(&output).map_err(Into::into)
     }
 
+    /// The ladder of orbital levels, lowest first, as a plain array for the UI
+    /// (`OrbitalLevel` in `web/src/worker/protocol.ts`).
+    ///
+    /// Degenerate orbitals arrive as one rung rather than several: inside a
+    /// degenerate set the split into individual orbitals is an arbitrary
+    /// rotation, so the set is the smallest thing that is a fact about the
+    /// molecule. A molecule with unpaired electrons gives two ladders, all of
+    /// alpha's rungs and then all of beta's, told apart by `spin` - never folded
+    /// together, because the two are genuinely different orbitals, and lined up
+    /// by `partner` rather than by index because they do not even come in the
+    /// same order.
+    ///
+    /// Cheap: a few matrix products on a calculation that is already solved, and
+    /// no lattice at all.
+    pub fn orbitals(&self) -> Result<JsValue, JsValue> {
+        let channels = orbital::list(&self.system, &self.result);
+        let groups: Vec<Vec<Range<usize>>> =
+            channels.iter().map(|set| orbital::degenerate_groups(set)).collect();
+        // Where each spin's rungs begin in the flattened array, which is what
+        // `partner` points into.
+        let mut offsets = Vec::with_capacity(groups.len());
+        let mut rungs = 0;
+        for set in &groups {
+            offsets.push(rungs);
+            rungs += set.len();
+        }
+        let pairing = orbital::spin_pairing(&self.system, &self.result);
+
+        let mut levels = Vec::with_capacity(rungs);
+        for (channel, set) in channels.iter().enumerate() {
+            for group in &groups[channel] {
+                let head = set[group.start];
+                levels.push(OrbitalLevelOutput {
+                    spin: SpinChannel::of(&self.result, channel).name(),
+                    first: group.start,
+                    count: group.len(),
+                    occupation: head.occupation,
+                    energy: head.energy,
+                    parity: level_parity(&set[group.clone()]),
+                    partner: pairing.as_ref().and_then(|pairing| {
+                        partner_level(channel, group.start, pairing, &groups, &offsets)
+                    }),
+                });
+            }
+        }
+
+        // The contract says a missing parity or partner is `null`, and the
+        // default serialiser writes `undefined` for a `None`.
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+        levels.serialize(&serializer).map_err(Into::into)
+    }
+
     /// Triangulates a surface of the electron density at `iso_level`, in
     /// electrons per cubic Bohr.
     ///
@@ -200,10 +373,34 @@ impl Calculation {
     /// drew, because they look different enough that the UI has to explain them
     /// differently.
     ///
+    /// `"orbital"` is not one of those: it draws a single orbital, `index`
+    /// counting along the ladder of `spin` (`"both"`, `"up"` or `"down"`; omitted
+    /// means `"both"`). Its two colours are the two signs of a wave function
+    /// rather than electrons gained and lost, and the overall sign is fixed by
+    /// convention so that the same orbital is coloured the same way every time it
+    /// is solved (`orbital::signed_column`). Which model level an orbital may be
+    /// shown for is not decided here: that is a rule about the interface, and the
+    /// interface keeps it.
+    ///
     /// The first call for a channel also samples its density, which is why it is
-    /// slower than the ones that follow.
+    /// slower than the ones that follow. The same holds for an orbital, except
+    /// that only the last one asked for is kept.
     #[wasm_bindgen(js_name = isosurface)]
-    pub fn isosurface(&mut self, channel: &str, iso_level: f64) -> Result<IsoMesh, JsValue> {
+    pub fn isosurface(
+        &mut self,
+        channel: &str,
+        iso_level: f64,
+        index: Option<usize>,
+        spin: Option<String>,
+    ) -> Result<IsoMesh, JsValue> {
+        if channel == "orbital" {
+            let index = index.ok_or_else(|| {
+                JsValue::from_str("an orbital surface needs the index of an orbital")
+            })?;
+            let spin = SpinChannel::parse(spin.as_deref())?;
+            let grid = self.orbital_grid(index, spin)?;
+            return Ok(cut("orbital", grid, iso_level));
+        }
         let wanted = match channel {
             "total" => DensityChannel::Total,
             "deformation" => DensityChannel::Deformation,
@@ -215,41 +412,133 @@ impl Calculation {
         // Choosing the bonding channel is a pair of matrix products and is
         // redone on every request; what is kept is the lattice behind it, which
         // is the expensive part and the reason the threshold slider is cheap.
-        let index = match self.grids.iter().position(|(held, _)| *held == wanted) {
-            Some(index) => index,
+        let position = match self.grids.iter().position(|(held, _)| *held == wanted) {
+            Some(position) => position,
             None => {
                 let grid = sample(&self.system, &self.result, &wanted);
                 self.grids.push((wanted, grid));
                 self.grids.len() - 1
             }
         };
-        let (drawn, grid) = &self.grids[index];
+        let (drawn, grid) = &self.grids[position];
         let name = match drawn {
             DensityChannel::Total => "total",
             DensityChannel::Pi(_) => "pi",
             DensityChannel::Deformation => "deformation",
         };
-
-        let lowest = grid.values.iter().copied().fold(f64::INFINITY, f64::min);
-        // A density has nothing below zero, so only a signed channel gets a
-        // second surface. Asking for one anyway would just cost time.
-        let signed = lowest < -f64::EPSILON;
-        let positive = surface(grid, iso_level, Side::Above);
-        let negative = if signed {
-            surface(grid, -iso_level, Side::Below)
-        } else {
-            marching::Mesh::default()
-        };
-
-        Ok(IsoMesh {
-            channel: name.to_string(),
-            iso_level,
-            positive,
-            negative,
-            density_max: grid.max(),
-            density_min: lowest.min(0.0),
-        })
+        Ok(cut(name, grid, iso_level))
     }
+}
+
+impl Calculation {
+    /// The sampled lattice of one orbital, built unless it is the one already
+    /// held.
+    ///
+    /// Changing the threshold of the orbital on screen finds it here and costs
+    /// nothing; moving to another orbital replaces it, because only one is kept
+    /// (see [`Calculation::orbital`]). An index past the end of the ladder is an
+    /// error: there is no such orbital to draw.
+    fn orbital_grid(&mut self, index: usize, spin: SpinChannel) -> Result<&DensityGrid, JsValue> {
+        let channel = spin.channel_in(&self.result)?;
+        let available = self.result.channels[channel].energies.len();
+        if index >= available {
+            return Err(JsValue::from_str(&format!(
+                "orbital {index} is past the {available} this calculation has"
+            )));
+        }
+        let held = matches!(&self.orbital, Some((at, of, _)) if *at == index && *of == spin);
+        if !held {
+            let column = orbital::signed_column(&self.result, OrbitalRef { channel, index });
+            let spec = GridSpec::for_molecule(&self.system.molecule);
+            let grid = density::evaluate_orbital(&self.system.basis, column.as_slice(), &spec);
+            self.orbital = Some((index, spin, grid));
+        }
+        Ok(&self.orbital.as_ref().expect("just held or just built").2)
+    }
+}
+
+/// The level set of a sampled lattice: the region above `+iso_level`, and where
+/// the field goes below zero at all the region below `-iso_level` as well.
+///
+/// A density has nothing under zero, so only a signed field gets the second
+/// surface; asking for one anyway would just cost time. An orbital always has
+/// one, unless it happens to be of one sign everywhere.
+fn cut(name: &str, grid: &DensityGrid, iso_level: f64) -> IsoMesh {
+    let lowest = grid.values.iter().copied().fold(f64::INFINITY, f64::min);
+    let signed = lowest < -f64::EPSILON;
+    let positive = surface(grid, iso_level, Side::Above);
+    let negative = if signed {
+        surface(grid, -iso_level, Side::Below)
+    } else {
+        marching::Mesh::default()
+    };
+    // At the level the surfaces were cut at, so the counts describe the meshes
+    // beside them rather than the lattice in general.
+    let (lobes_positive, lobes_negative) = density::count_lobes(grid, iso_level);
+
+    IsoMesh {
+        channel: name.to_string(),
+        iso_level,
+        positive,
+        negative,
+        density_max: grid.max(),
+        density_min: lowest.min(0.0),
+        lobes_positive,
+        lobes_negative,
+    }
+}
+
+/// Whether the molecular plane sorts a whole rung of the ladder into symmetric
+/// or antisymmetric: `Some(1)`, `Some(-1)`, or `None` where it does not.
+///
+/// `None` covers three things that are one thing to the interface: a molecule
+/// with no plane to reflect in - which is every molecule of three atoms or
+/// fewer, water and O2 included - a geometry the reflection turns out not to be a
+/// symmetry of, and a degenerate rung whose members disagree. The last is the
+/// same argument as for showing a degenerate rung whole: within it the
+/// individual orbitals are an arbitrary rotation, so a single member's parity is
+/// not a fact about the rung.
+fn level_parity(level: &[OrbitalInfo]) -> Option<i32> {
+    let mut sorted = None;
+    for orbital in level {
+        let parity = orbital.parity?;
+        let sign = if parity >= PARITY_THRESHOLD {
+            1
+        } else if parity <= -PARITY_THRESHOLD {
+            -1
+        } else {
+            return None;
+        };
+        if sorted.is_some_and(|held| held != sign) {
+            return None;
+        }
+        sorted = Some(sign);
+    }
+    sorted
+}
+
+/// The rung of the other spin that holds the same orbital as the rung beginning
+/// at `first`, as an index into the flattened ladder.
+///
+/// `orbital::spin_pairing` matches single orbitals, and matching the rungs by
+/// their first members is enough: inside a degenerate rung the split is an
+/// arbitrary rotation, so nothing finer would mean anything. Alpha's row says
+/// which beta orbital it is, and beta reads the same row backwards - which is
+/// single-valued because the pairing is a permutation or nothing at all.
+fn partner_level(
+    channel: usize,
+    first: usize,
+    pairing: &[Option<usize>],
+    groups: &[Vec<Range<usize>>],
+    offsets: &[usize],
+) -> Option<usize> {
+    let (other, orbital) = match channel {
+        0 => (1, *pairing.get(first)?),
+        _ => (0, pairing.iter().position(|matched| *matched == Some(first))),
+    };
+    let orbital = orbital?;
+    let rung = groups.get(other)?.iter().position(|group| group.contains(&orbital))?;
+    Some(offsets[other] + rung)
 }
 
 fn sample(system: &System, result: &ScfResult, channel: &DensityChannel) -> DensityGrid {
@@ -280,6 +569,8 @@ pub struct IsoMesh {
     negative: marching::Mesh,
     density_max: f64,
     density_min: f64,
+    lobes_positive: usize,
+    lobes_negative: usize,
 }
 
 #[wasm_bindgen]
@@ -341,6 +632,22 @@ impl IsoMesh {
     #[wasm_bindgen(getter, js_name = densityMin)]
     pub fn density_min(&self) -> f64 {
         self.density_min
+    }
+
+    /// Separate blobs the positive surface came out in, at this same level.
+    ///
+    /// Counted on the lattice rather than on the mesh, which is what makes an
+    /// orbital's nodes countable: two lobes of one sign with a node between them
+    /// are two components here.
+    #[wasm_bindgen(getter, js_name = lobesPositive)]
+    pub fn lobes_positive(&self) -> usize {
+        self.lobes_positive
+    }
+
+    /// The same for the negative surface; zero wherever that surface is empty.
+    #[wasm_bindgen(getter, js_name = lobesNegative)]
+    pub fn lobes_negative(&self) -> usize {
+        self.lobes_negative
     }
 }
 
@@ -445,6 +752,7 @@ pub fn scf(
         attempts: outcome.attempts.len(),
         optimization: None,
         grids: Vec::new(),
+        orbital: None,
     })
 }
 
@@ -573,6 +881,7 @@ pub fn optimize(
         attempts,
         optimization: Some(optimization),
         grids: Vec::new(),
+        orbital: None,
     })
 }
 

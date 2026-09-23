@@ -229,6 +229,82 @@ export interface ScfOutcome {
 }
 
 /**
+ * Which spin a set of orbitals belongs to.
+ *
+ * `both` is the only one most molecules have: their electrons are paired, so
+ * one set of orbitals holds two each and there is nothing to keep apart. A
+ * molecule with unpaired electrons is solved as two sets, and those are
+ * genuinely different orbitals rather than two labels for the same ones - in O2
+ * the same pi* sits about 0.08 Hartree lower in one set than in the other - so
+ * they are never folded together. {@link OrbitalLevel.partner} is how the two
+ * are lined up, and it is not the index: O2's orbitals come out in a different
+ * order in each set.
+ */
+export type SpinChannel = 'both' | 'up' | 'down';
+
+/**
+ * One rung of the orbital ladder: an orbital, or the several that share a level.
+ *
+ * Degenerate orbitals arrive as one rung rather than several, because a single
+ * one of them is not something the molecule has: what the diagonalisation
+ * returns inside a degenerate set is an arbitrary rotation of it, so the set is
+ * the smallest thing that can honestly be shown. `count` is how many there are
+ * and `first` is the lowest of them, which together name every orbital of the
+ * rung - `first` to `first + count - 1`, as the `orbital` of an
+ * {@link WorkerRequest} isosurface.
+ *
+ * The rungs arrive lowest first, and for an open-shell molecule all of one
+ * spin's and then all of the other's; `spin` says which, and is `'both'` for
+ * every rung of a closed-shell molecule.
+ */
+export interface OrbitalLevel {
+  spin: SpinChannel;
+  /** Index of the lowest orbital on this rung, within its own spin channel. */
+  first: number;
+  /** Orbitals on it: one, or more where they are degenerate. */
+  count: number;
+  /**
+   * Electrons in one of them - not in the rung. Two or zero where `spin` is
+   * `'both'`, one or zero otherwise.
+   */
+  occupation: number;
+  /**
+   * Orbital energy in Hartree, which sets how high the rung is drawn and
+   * nothing else.
+   *
+   * Not a number to put on the screen, for the same reason as
+   * {@link ScfOutcome.multiplicity} is not: LDA's orbital energies are out by a
+   * factor of several - water's highest occupied orbital comes out at -1.6 eV
+   * against an ionisation energy of 12.6 eV - so the value would be wrong while
+   * the picture built from the differences is right. Only spacings and order
+   * mean anything.
+   */
+  energy: number;
+  /**
+   * `1` for a rung symmetric about the molecular plane, `-1` for a pi rung, and
+   * `null` where the question does not arise.
+   *
+   * `null` covers a molecule with no plane to reflect in - which includes every
+   * molecule of three atoms or fewer, since any three atoms lie in some plane
+   * and picking one of them would sort a diatomic's orbitals by a symmetry it
+   * does not have - as well as a geometry the reflection turns out not to be a
+   * symmetry of.
+   */
+  parity: 1 | -1 | null;
+  /**
+   * The rung of the other spin that is the same orbital, as an index into the
+   * array these came in.
+   *
+   * `null` for a closed-shell molecule, where there is no other spin, and for
+   * an orbital whose counterpart cannot be named - the two spins' orbitals are
+   * matched by how much they overlap rather than by their position in the
+   * ladder, and where that matching is not one-to-one there is no answer to
+   * give.
+   */
+  partner: number | null;
+}
+
+/**
  * Which electrons a surface is asked for.
  *
  * Two of the three name what comes back. `bonding` is the odd one: a request
@@ -243,8 +319,14 @@ export interface ScfOutcome {
  * all - and it is the picture that shows the lone pairs and the depleted
  * regions, which the pi surface does not. Any molecule has one
  * ({@link ScfOutcome.hasPi} says which have the other).
+ *
+ * `orbital` is the odd one out of all three: not a set of electrons at all but
+ * one orbital, named by the `orbital` and `spin` of the request. It is what the
+ * orbital section draws, and it is a request like the others only so that the
+ * threshold slider, the mesh transfer and the surface the viewer holds are the
+ * same machinery for it as for a density.
  */
-export type DensityRequest = 'total' | 'bonding' | 'deformation';
+export type DensityRequest = 'total' | 'bonding' | 'deformation' | 'orbital';
 
 /**
  * What a surface actually shows.
@@ -254,9 +336,13 @@ export type DensityRequest = 'total' | 'bonding' | 'deformation';
  *   its pi system. A density, so also never negative.
  * - `deformation` — the molecule's density minus the free atoms it is built
  *   from, which is where forming the bonds moved the electrons to and from.
- *   Signed, and the only channel with a negative surface.
+ *   Signed, and the negative surface is where electrons left.
+ * - `orbital` — one orbital's own amplitude, not a density: signed for a
+ *   different reason, since its two colours are the two signs of a wave
+ *   function rather than electrons gained and lost. The only channel whose
+ *   surface says nothing about how many electrons are anywhere.
  */
-export type DensityChannel = 'total' | 'pi' | 'deformation';
+export type DensityChannel = 'total' | 'pi' | 'deformation' | 'orbital';
 
 /** One closed surface, in the layout a GPU vertex buffer wants. */
 export interface SurfaceGeometry {
@@ -291,6 +377,16 @@ export interface IsoMesh {
   densityMax: number;
   /** Most negative sample, or zero for a channel that cannot go negative. */
   densityMin: number;
+  /**
+   * Separate blobs each surface came out in, counted on the same lattice at the
+   * same threshold - so these describe exactly the meshes beside them and
+   * change as the slider moves.
+   *
+   * What makes an orbital's nodes countable: two lobes of one sign with a node
+   * between them are two components here. `negative` is zero wherever the
+   * negative surface is empty.
+   */
+  lobes: { positive: number; negative: number };
   /** Wall-clock milliseconds the worker spent producing these meshes. */
   elapsedMs: number;
 }
@@ -336,12 +432,37 @@ export type WorkerRequest =
       stop?: Int32Array | null;
     }
   /**
+   * The orbital ladder of the last `scf` or `optimize` request.
+   *
+   * Cheap - a few matrix products on a calculation that is already solved, and
+   * no lattice - so it is asked for whenever the section that shows it is
+   * opened rather than kept alongside the numbers.
+   */
+  | { id: number; type: 'orbitals' }
+  /**
    * Cuts the density of the last `scf` or `optimize` request at a new level.
    *
    * The worker keeps one sampled lattice per channel it has been asked for, so
    * only the first request for each is slow; the rest are marching cubes alone.
+   *
+   * `orbital` and `spin` are for `channel: 'orbital'` and are ignored by the
+   * others: which orbital to draw, as the `first` of an {@link OrbitalLevel}
+   * plus an offset into its `count`, and which spin's ladder that index counts
+   * along. Only the orbital asked for last is kept - one lattice, not one per
+   * orbital, because WebAssembly's linear memory never shrinks - so changing
+   * the threshold of the orbital on screen is as cheap as for a density while
+   * going back to an earlier one is not. Omitting `spin` means `'both'`, which
+   * an open-shell calculation answers with an `error` rather than a guess at
+   * which spin was meant.
    */
-  | { id: number; type: 'isosurface'; channel: DensityRequest; isoLevel: number };
+  | {
+      id: number;
+      type: 'isosurface';
+      channel: DensityRequest;
+      isoLevel: number;
+      orbital?: number;
+      spin?: SpinChannel;
+    };
 
 /**
  * A stop flag for an `optimize` request: one shared 32-bit word, zero until
@@ -382,6 +503,12 @@ export type WorkerResponse =
   | { id: number; type: 'step'; step: OptimizationStep }
   | { id: number; type: 'progress'; progress: CalculationProgress }
   | { id: number; type: 'scf'; result: ScfOutcome }
+  /**
+   * The rungs of the ladder, lowest first; for an open-shell molecule all of
+   * one spin's and then all of the other's, told apart by
+   * {@link OrbitalLevel.spin} rather than by position.
+   */
+  | { id: number; type: 'orbitals'; levels: OrbitalLevel[] }
   | { id: number; type: 'mesh'; mesh: IsoMesh }
   | { id: number; type: 'error'; message: string };
 

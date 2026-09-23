@@ -32,6 +32,7 @@ import type {
   DensityChannel,
   ElementInfo,
   IsoMesh,
+  OrbitalLevel,
   ScfOutcome,
   WorkerRequest,
   WorkerResponse,
@@ -173,10 +174,29 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         });
         break;
       }
+      case 'orbitals': {
+        if (!current) throw new Error('no calculation to read the orbitals of');
+        // No lattice and no SCF: a few matrix products on a calculation that is
+        // already solved, so this answers in the same tick it arrives in.
+        post({
+          id: request.id,
+          type: 'orbitals',
+          levels: current.orbitals() as OrbitalLevel[],
+        });
+        break;
+      }
       case 'isosurface': {
         if (!current) throw new Error('no calculation to draw a surface from');
         const started = performance.now();
-        const iso = current.isosurface(request.channel, request.isoLevel);
+        // `orbital` and `spin` are read only for the orbital channel; a density
+        // ignores them, and the engine refuses a spin the calculation has no
+        // orbitals for rather than drawing the other one.
+        const iso = current.isosurface(
+          request.channel,
+          request.isoLevel,
+          request.orbital,
+          request.spin,
+        );
         // Each getter copies its buffer out of WASM memory into a plain
         // ArrayBuffer, so the meshes can be transferred rather than cloned.
         const mesh: IsoMesh = {
@@ -194,6 +214,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           },
           densityMax: iso.densityMax,
           densityMin: iso.densityMin,
+          lobes: { positive: iso.lobesPositive, negative: iso.lobesNegative },
           elapsedMs: performance.now() - started,
         };
         iso.free();

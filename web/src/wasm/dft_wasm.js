@@ -38,20 +38,58 @@ export class Calculation {
      * drew, because they look different enough that the UI has to explain them
      * differently.
      *
+     * `"orbital"` is not one of those: it draws a single orbital, `index`
+     * counting along the ladder of `spin` (`"both"`, `"up"` or `"down"`; omitted
+     * means `"both"`). Its two colours are the two signs of a wave function
+     * rather than electrons gained and lost, and the overall sign is fixed by
+     * convention so that the same orbital is coloured the same way every time it
+     * is solved (`orbital::signed_column`). Which model level an orbital may be
+     * shown for is not decided here: that is a rule about the interface, and the
+     * interface keeps it.
+     *
      * The first call for a channel also samples its density, which is why it is
-     * slower than the ones that follow.
+     * slower than the ones that follow. The same holds for an orbital, except
+     * that only the last one asked for is kept.
      * @param {string} channel
      * @param {number} iso_level
+     * @param {number | null} [index]
+     * @param {string | null} [spin]
      * @returns {IsoMesh}
      */
-    isosurface(channel, iso_level) {
+    isosurface(channel, iso_level, index, spin) {
         const ptr0 = passStringToWasm0(channel, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.calculation_isosurface(this.__wbg_ptr, ptr0, len0, iso_level);
+        var ptr1 = isLikeNone(spin) ? 0 : passStringToWasm0(spin, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.calculation_isosurface(this.__wbg_ptr, ptr0, len0, iso_level, isLikeNone(index) ? Number.MAX_SAFE_INTEGER : (index) >>> 0, ptr1, len1);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
         return IsoMesh.__wrap(ret[0]);
+    }
+    /**
+     * The ladder of orbital levels, lowest first, as a plain array for the UI
+     * (`OrbitalLevel` in `web/src/worker/protocol.ts`).
+     *
+     * Degenerate orbitals arrive as one rung rather than several: inside a
+     * degenerate set the split into individual orbitals is an arbitrary
+     * rotation, so the set is the smallest thing that is a fact about the
+     * molecule. A molecule with unpaired electrons gives two ladders, all of
+     * alpha's rungs and then all of beta's, told apart by `spin` - never folded
+     * together, because the two are genuinely different orbitals, and lined up
+     * by `partner` rather than by index because they do not even come in the
+     * same order.
+     *
+     * Cheap: a few matrix products on a calculation that is already solved, and
+     * no lattice at all.
+     * @returns {any}
+     */
+    orbitals() {
+        const ret = wasm.calculation_orbitals(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * The scalar results, as a plain object for the UI.
@@ -132,6 +170,26 @@ export class IsoMesh {
     get isoLevel() {
         const ret = wasm.isomesh_isoLevel(this.__wbg_ptr);
         return ret;
+    }
+    /**
+     * The same for the negative surface; zero wherever that surface is empty.
+     * @returns {number}
+     */
+    get lobesNegative() {
+        const ret = wasm.isomesh_lobesNegative(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Separate blobs the positive surface came out in, at this same level.
+     *
+     * Counted on the lattice rather than on the mesh, which is what makes an
+     * orbital's nodes countable: two lobes of one sign with a node between them
+     * are two components here.
+     * @returns {number}
+     */
+    get lobesPositive() {
+        const ret = wasm.isomesh_lobesPositive(this.__wbg_ptr);
+        return ret >>> 0;
     }
     /**
      * @returns {Uint32Array}

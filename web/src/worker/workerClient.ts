@@ -40,7 +40,9 @@ import type {
   IsoMesh,
   ModelLevel,
   OptimizationStep,
+  OrbitalLevel,
   ScfOutcome,
+  SpinChannel,
   WorkerRequest,
   WorkerResponse,
 } from './protocol';
@@ -323,19 +325,46 @@ export class DftWorkerClient {
   }
 
   /**
+   * The orbital ladder of the last [`scf`] call, lowest rung first.
+   *
+   * Cheap enough to ask for whenever the section that shows it is opened: it
+   * reads a calculation that is already solved and samples nothing. Rejects
+   * when no calculation is loaded, as {@link isosurface} does.
+   */
+  async orbitals(): Promise<OrbitalLevel[]> {
+    const response = await this.#send<Extract<WorkerResponse, { type: 'orbitals' }>>((id) => ({
+      id,
+      type: 'orbitals',
+    }));
+    return response.levels;
+  }
+
+  /**
    * Triangulates one channel of the last [`scf`] call's density at `isoLevel`,
    * in electrons per cubic Bohr.
    *
    * The density stays in the worker, so this is a mesh rebuild rather than a
    * new calculation. It rejects when no calculation is loaded, which happens
    * after `cancelAll` replaces the worker.
+   *
+   * `orbital` and `spin` belong to `channel: 'orbital'` and are ignored by the
+   * others: which orbital of which spin's ladder to draw, named as an
+   * {@link OrbitalLevel} names its own. Only the orbital asked for last stays
+   * sampled, so going back to an earlier one costs what the first one did.
    */
-  async isosurface(channel: DensityRequest, isoLevel: number): Promise<IsoMesh> {
+  async isosurface(
+    channel: DensityRequest,
+    isoLevel: number,
+    orbital?: number,
+    spin?: SpinChannel,
+  ): Promise<IsoMesh> {
     const response = await this.#send<Extract<WorkerResponse, { type: 'mesh' }>>((id) => ({
       id,
       type: 'isosurface',
       channel,
       isoLevel,
+      orbital,
+      spin,
     }));
     return response.mesh;
   }

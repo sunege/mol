@@ -26,10 +26,37 @@ export class Calculation {
      * drew, because they look different enough that the UI has to explain them
      * differently.
      *
+     * `"orbital"` is not one of those: it draws a single orbital, `index`
+     * counting along the ladder of `spin` (`"both"`, `"up"` or `"down"`; omitted
+     * means `"both"`). Its two colours are the two signs of a wave function
+     * rather than electrons gained and lost, and the overall sign is fixed by
+     * convention so that the same orbital is coloured the same way every time it
+     * is solved (`orbital::signed_column`). Which model level an orbital may be
+     * shown for is not decided here: that is a rule about the interface, and the
+     * interface keeps it.
+     *
      * The first call for a channel also samples its density, which is why it is
-     * slower than the ones that follow.
+     * slower than the ones that follow. The same holds for an orbital, except
+     * that only the last one asked for is kept.
      */
-    isosurface(channel: string, iso_level: number): IsoMesh;
+    isosurface(channel: string, iso_level: number, index?: number | null, spin?: string | null): IsoMesh;
+    /**
+     * The ladder of orbital levels, lowest first, as a plain array for the UI
+     * (`OrbitalLevel` in `web/src/worker/protocol.ts`).
+     *
+     * Degenerate orbitals arrive as one rung rather than several: inside a
+     * degenerate set the split into individual orbitals is an arbitrary
+     * rotation, so the set is the smallest thing that is a fact about the
+     * molecule. A molecule with unpaired electrons gives two ladders, all of
+     * alpha's rungs and then all of beta's, told apart by `spin` - never folded
+     * together, because the two are genuinely different orbitals, and lined up
+     * by `partner` rather than by index because they do not even come in the
+     * same order.
+     *
+     * Cheap: a few matrix products on a calculation that is already solved, and
+     * no lattice at all.
+     */
+    orbitals(): any;
     /**
      * The scalar results, as a plain object for the UI.
      */
@@ -65,6 +92,18 @@ export class IsoMesh {
      * The level cut, in electrons per cubic Bohr.
      */
     readonly isoLevel: number;
+    /**
+     * The same for the negative surface; zero wherever that surface is empty.
+     */
+    readonly lobesNegative: number;
+    /**
+     * Separate blobs the positive surface came out in, at this same level.
+     *
+     * Counted on the lattice rather than on the mesh, which is what makes an
+     * orbital's nodes countable: two lobes of one sign with a node between them
+     * are two components here.
+     */
+    readonly lobesPositive: number;
     readonly negativeIndices: Uint32Array;
     readonly negativeNormals: Float32Array;
     readonly negativePositions: Float32Array;
@@ -144,12 +183,15 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_calculation_free: (a: number, b: number) => void;
     readonly __wbg_isomesh_free: (a: number, b: number) => void;
-    readonly calculation_isosurface: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly calculation_isosurface: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly calculation_orbitals: (a: number) => [number, number, number];
     readonly calculation_summary: (a: number) => [number, number, number];
     readonly isomesh_channel: (a: number) => [number, number];
     readonly isomesh_densityMax: (a: number) => number;
     readonly isomesh_densityMin: (a: number) => number;
     readonly isomesh_isoLevel: (a: number) => number;
+    readonly isomesh_lobesNegative: (a: number) => number;
+    readonly isomesh_lobesPositive: (a: number) => number;
     readonly isomesh_negativeIndices: (a: number) => [number, number];
     readonly isomesh_negativeNormals: (a: number) => [number, number];
     readonly isomesh_negativePositions: (a: number) => [number, number];
