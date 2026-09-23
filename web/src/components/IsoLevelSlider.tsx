@@ -11,6 +11,11 @@
  * an order of magnitude thinner than the total density. The range is keyed on
  * what the user asked for rather than on what the engine chose to show, so it
  * never shifts under their finger once they start dragging.
+ *
+ * The words at the two ends say what the level means, so they belong to the
+ * caller: a density thins out from the whole molecule to the core at its
+ * nuclei, and an orbital has no core to walk in towards
+ * (`components/orbital.ts`).
  */
 import type { DensityRequest } from '../worker/protocol';
 
@@ -39,6 +44,17 @@ export const ISO_RANGES: Record<DensityRequest, IsoRange> = {
   orbital: { min: 0.005, max: 0.15, initial: 0.03 },
 };
 
+/** What the two ends of the scale mean, for whatever the slider is cutting. */
+export interface IsoScale {
+  /** The low end, where the surface is at its widest. */
+  low: string;
+  /** The high end, where only the strongest part of it is left. */
+  high: string;
+}
+
+/** The ends of a density's scale, which is what most of the panel slides. */
+export const DENSITY_SCALE: IsoScale = { low: '広がり', high: '密な芯' };
+
 /** Slider stops. Its positions are integers so the control steps evenly. */
 export const ISO_STEPS = 200;
 
@@ -59,11 +75,19 @@ export interface IsoLevelSliderProps {
   /** Current level, in electrons per cubic Bohr. */
   value: number;
   range: IsoRange;
+  /** What the ends of the travel mean. A density's, unless one is given. */
+  scale?: IsoScale;
   onChange: (level: number) => void;
   disabled?: boolean;
 }
 
-export function IsoLevelSlider({ value, range, onChange, disabled }: IsoLevelSliderProps) {
+export function IsoLevelSlider({
+  value,
+  range,
+  scale = DENSITY_SCALE,
+  onChange,
+  disabled,
+}: IsoLevelSliderProps) {
   return (
     <div className="iso-slider">
       <input
@@ -77,9 +101,9 @@ export function IsoLevelSlider({ value, range, onChange, disabled }: IsoLevelSli
         onChange={(event) => onChange(levelAt(Number(event.target.value), range))}
       />
       <div className="iso-slider-scale">
-        <span>広がり</span>
+        <span>{scale.low}</span>
         <span className="iso-slider-value">{value.toFixed(3)}</span>
-        <span>密な芯</span>
+        <span>{scale.high}</span>
       </div>
     </div>
   );

@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_REQUEST, channelLabel, explainChannel, offeredChannels } from './density';
-import type { DensityChannel, DensityRequest, IsoMesh } from '../worker/protocol';
+import {
+  DEFAULT_REQUEST,
+  channelLabel,
+  explainChannel,
+  offeredChannels,
+  type DensitySurface,
+} from './density';
+import type { DensityChannel, IsoMesh } from '../worker/protocol';
 
 /** A mesh that only says which channel the engine drew, which is all this reads. */
 const drew = (channel: DensityChannel) => ({ channel }) as IsoMesh;
 
-const REQUESTS: DensityRequest[] = ['total', 'bonding', 'deformation'];
+const REQUESTS: DensitySurface[] = ['total', 'bonding', 'deformation'];
 
 /** Everything this module puts on screen, as one string. */
 const said = REQUESTS.flatMap((request) => [
@@ -39,7 +45,7 @@ describe('the line under the slider', () => {
   it('explains the two surfaces that are answered only one way straight away', () => {
     // Nothing to wait for: what comes back is what was asked for, so the line
     // is the same before the first surface and after it.
-    for (const request of ['total', 'deformation'] as DensityRequest[]) {
+    for (const request of ['total', 'deformation'] as DensitySurface[]) {
       const before = explainChannel(request, null);
       expect(before).toBe(explainChannel(request, drew(request as DensityChannel)));
       expect(before).not.toBe('');

@@ -13,7 +13,10 @@ import {
   channelLabel,
   explainChannel,
   offeredChannels,
+  type DensitySurface,
 } from './components/density';
+import { OrbitalPanel } from './components/OrbitalPanel';
+import { samePick, type OrbitalPick } from './components/orbital';
 import { Elapsed, ProgressOverlay } from './components/ProgressOverlay';
 import { ObservePanel } from './components/ObservePanel';
 import { headline, type JobKind, type JobState } from './components/progress';
@@ -52,7 +55,9 @@ import type {
   IsoMesh,
   ModelLevel,
   OptimizationOutcome,
+  OrbitalLevel,
   ScfOutcome,
+  SpinChannel,
 } from './worker/protocol';
 import './App.css';
 
@@ -167,7 +172,29 @@ export default function App() {
   const [unavailable, setUnavailable] = useState<EngineProblem | null>(null);
   const [webgl, setWebgl] = useState<WebGlProbe | null>(null);
   const [showDensity, setShowDensity] = useState(true);
-  const [channel, setChannel] = useState<DensityRequest>(DEFAULT_REQUEST);
+  // The density button chosen, which is never the orbital: what is drawn is
+  // `channel` below, and the two selections are kept apart so that coming back
+  // from an orbital comes back to the density that was up before it.
+  const [densityRequest, setDensityRequest] = useState<DensitySurface>(DEFAULT_REQUEST);
+  /**
+   * The orbital the section below is showing, or null while a density is.
+   *
+   * Only one surface is ever drawn, so this is also what says which of the two
+   * sections the viewer belongs to: with an orbital picked no density button is
+   * active, and picking a density button drops the orbital. Making it one
+   * decision rather than two flags is what keeps them from both being on.
+   */
+  const [orbitalPick, setOrbitalPick] = useState<OrbitalPick | null>(null);
+  // The same, for the places that drop it from inside an effect, where the
+  // render's copy is a frame behind.
+  const pickRef = useRef<OrbitalPick | null>(null);
+  // Whether the orbital section is open. It is closed to begin with, and the
+  // ladder is only fetched while it is open (`components/OrbitalPanel.tsx`).
+  const [orbitalsOpen, setOrbitalsOpen] = useState(false);
+  // The rungs of the calculation the worker is holding, once they have been
+  // asked for. Null whenever there is no ladder that belongs to what is on
+  // screen, which every calculation makes true again.
+  const [orbitalLevels, setOrbitalLevels] = useState<OrbitalLevel[] | null>(null);
   // A level per channel, so switching back and forth keeps each where it was.
   const [levels, setLevels] = useState<Record<DensityRequest, number>>({
     total: ISO_RANGES.total.initial,
@@ -221,7 +248,14 @@ export default function App() {
   // What the frame player is showing, if anything. While this is set the player
   // owns the atom positions and the effect that draws `atoms` stands aside.
   const [animation, setAnimation] = useState<AnimationKind | null>(null);
+  // What is drawn: the orbital while one is picked, and the chosen density
+  // otherwise. Derived rather than stored, so there is no state in which both
+  // are on.
+  const channel: DensityRequest = orbitalPick === null ? densityRequest : 'orbital';
   const isoLevel = levels[channel];
+  // The density's own threshold, which its slider keeps showing while an
+  // orbital is on screen.
+  const densityLevel = levels[densityRequest];
 
   // Plays the steps of a geometry optimisation and the frames of a failed
   // calculation - the same queue, fed by two different producers. It drives the
@@ -272,11 +306,34 @@ export default function App() {
   // from. A ref rather than state: the isosurface pump reads it from inside a
   // running loop, where a stale render's copy would be wrong.
   const hasDensityRef = useRef(false);
+  /**
+   * The same, for the part of the screen that has to re-render when it changes:
+   * a ref changes nothing on its own.
+   *
+   * `generation` counts the calculations rather than tracking `held`, because
+   * a second calculation of the same structure never drops the density - it
+   * replaces it - and the orbital ladder taken from the first is stale all the
+   * same. Anything watching a calculation, rather than watching whether there
+   * is one, watches this.
+   */
+  const [density, setDensity] = useState({ held: false, generation: 0 });
+  const setHasDensity = useCallback((held: boolean) => {
+    hasDensityRef.current = held;
+    setDensity((previous) => ({ held, generation: previous.generation + 1 }));
+  }, []);
   // Isosurface requests are coalesced. The worker is single-threaded, so
   // queueing every level a slider drag passes through would leave the surface
   // running seconds behind the pointer; instead one request is in flight and
   // the newest level waits its turn, replacing any older one that was waiting.
-  const wantedRef = useRef<{ channel: DensityRequest; level: number } | null>(null);
+  //
+  // `orbital` and `spin` ride along for `channel: 'orbital'`, which names one
+  // orbital of one spin's ladder rather than a set of electrons.
+  const wantedRef = useRef<{
+    channel: DensityRequest;
+    level: number;
+    orbital?: number;
+    spin?: SpinChannel;
+  } | null>(null);
   const meshInFlightRef = useRef(false);
   const meshRequestRef = useRef(0);
 
@@ -341,12 +398,12 @@ export default function App() {
     inFlightRef.current = false;
     requestRef.current += 1;
     // The worker being replaced takes the converged calculation with it.
-    hasDensityRef.current = false;
+    setHasDensity(false);
     clientRef.current?.cancelAll();
     setComputing(false);
     setJob(null);
     stopAnimation();
-  }, [stopAnimation, restoreMode]);
+  }, [stopAnimation, restoreMode, setHasDensity]);
 
   /**
    * The 中止 button, and only that: a relaxation keeps the structure it had
@@ -406,7 +463,7 @@ export default function App() {
     stopAnimation();
     // The worker's copy of the density belongs to the old geometry, so the
     // surface on screen is stale whether or not the worker survives.
-    hasDensityRef.current = false;
+    setHasDensity(false);
     // And these are different atoms now: whether they have a pi system is a
     // question nobody has asked yet.
     setHasPi(false);
@@ -417,7 +474,7 @@ export default function App() {
     // surface, which will not be wanted now either.
     setJob(null);
     cancelCalculation();
-  }, [cancelCalculation, stopAnimation]);
+  }, [cancelCalculation, stopAnimation, setHasDensity]);
 
   // --- edit operations -----------------------------------------------------
 
@@ -731,7 +788,12 @@ export default function App() {
         wantedRef.current = null;
         const token = ++meshRequestRef.current;
         try {
-          const next = await client.isosurface(wanted.channel, wanted.level);
+          const next = await client.isosurface(
+            wanted.channel,
+            wanted.level,
+            wanted.orbital,
+            wanted.spin,
+          );
           if (meshRequestRef.current === token) setMesh(next);
         } catch {
           // The worker was replaced, or there is no calculation to cut. Neither
@@ -748,44 +810,122 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * Asks for a surface. `pick` is read only for the orbital channel, which
+   * names one orbital of one spin's ladder rather than a set of electrons.
+   */
   const requestIsosurface = useCallback(
-    (wanted: DensityRequest, level: number) => {
-      wantedRef.current = { channel: wanted, level };
+    (wanted: DensityRequest, level: number, pick: OrbitalPick | null) => {
+      wantedRef.current =
+        wanted === 'orbital' && pick !== null
+          ? { channel: wanted, level, orbital: pick.index, spin: pick.spin }
+          : { channel: wanted, level };
       void pumpIsosurface();
     },
     [pumpIsosurface],
   );
 
-  // A new threshold, a different channel, or switching the surface back on all
-  // ask for a fresh mesh. A finished calculation does the same from its own
-  // handler, where the density first becomes available.
+  // A new threshold, a different channel, another orbital, or switching the
+  // surface back on all ask for a fresh mesh. A finished calculation does the
+  // same from its own handler, where the density first becomes available.
   useEffect(() => {
-    if (showDensity && hasDensityRef.current) requestIsosurface(channel, isoLevel);
-  }, [channel, isoLevel, showDensity, requestIsosurface]);
+    if (showDensity && hasDensityRef.current) requestIsosurface(channel, isoLevel, orbitalPick);
+  }, [channel, isoLevel, orbitalPick, showDensity, requestIsosurface]);
 
   /**
-   * Switching channel drops the surface on screen rather than leaving it up
-   * while the new density is sampled: the two are drawn in different colours and
-   * mean different things, so the stale one would be read as the new one.
+   * Drops the surface on screen rather than leaving it up while the next one is
+   * cut: they are drawn in different colours and mean different things, so the
+   * stale one would be read as the new one. An orbital and a density are the
+   * worst pair of all, since both can be signed and only one of the two is
+   * about how many electrons are anywhere.
    */
-  const selectChannel = useCallback((next: DensityRequest) => {
-    setChannel((current) => {
-      if (current !== next) {
-        meshRequestRef.current += 1;
-        setMesh(null);
-      }
-      return next;
-    });
+  const dropMesh = useCallback(() => {
+    meshRequestRef.current += 1;
+    setMesh(null);
   }, []);
+
+  /** A density button: it is also how the user leaves an orbital. */
+  const selectChannel = useCallback(
+    (next: DensitySurface) => {
+      if (pickRef.current !== null || next !== densityRequest) dropMesh();
+      pickRef.current = null;
+      setOrbitalPick(null);
+      setDensityRequest(next);
+    },
+    [densityRequest, dropMesh],
+  );
+
+  /**
+   * A row of the orbital ladder.
+   *
+   * The cloud is switched on if it was off: the surface is the whole of the
+   * answer here, and a click that drew nothing would look like a failure.
+   */
+  const selectOrbital = useCallback(
+    (pick: OrbitalPick) => {
+      if (samePick(pickRef.current, pick)) return;
+      pickRef.current = pick;
+      setOrbitalPick(pick);
+      setShowDensity(true);
+      dropMesh();
+    },
+    [dropMesh],
+  );
+
+  /** Whatever the orbital belonged to has gone: back to the density. */
+  const forgetOrbital = useCallback(() => {
+    if (pickRef.current === null) return;
+    pickRef.current = null;
+    setOrbitalPick(null);
+    dropMesh();
+  }, [dropMesh]);
 
   // The buttons the panel offers, which is not always all three.
   const offered = useMemo(() => offeredChannels(hasPi), [hasPi]);
 
   // A molecule edited until it is no longer flat loses the bonding button, and
-  // must not be left showing a surface nobody can switch away from.
+  // must not be left showing a surface nobody can switch away from. Only the
+  // density buttons are in question: an orbital is not one of them, and is not
+  // sent back to the default by a molecule losing its pi system.
   useEffect(() => {
-    if (!offered.includes(channel)) selectChannel(DEFAULT_REQUEST);
-  }, [offered, channel, selectChannel]);
+    if (!offered.includes(densityRequest)) selectChannel(DEFAULT_REQUEST);
+  }, [offered, densityRequest, selectChannel]);
+
+  /**
+   * The orbital ladder of the calculation the worker is holding, while the
+   * section that shows it is open.
+   *
+   * Every calculation invalidates it - a new one at the same geometry as much
+   * as a new geometry - so it is dropped and, if the section is open, asked for
+   * again. It is cheap enough for that: a few matrix products on a calculation
+   * that is already solved, a fifth of a millisecond for benzene, and no
+   * lattice. Sliding the threshold does not come through here, which is the
+   * point of fetching it from a calculation rather than from a render.
+   *
+   * The orbital picked goes with it, because the rung it named belonged to that
+   * calculation. Closing the section drops it too: an orbital left on screen
+   * with nothing to change it by would be a surface the user cannot leave.
+   */
+  useEffect(() => {
+    forgetOrbital();
+    setOrbitalLevels(null);
+    const client = clientRef.current;
+    if (!orbitalsOpen || !client || !hasDensityRef.current || resultLevel !== 'shape') return;
+    let live = true;
+    client
+      .orbitals()
+      .then((ladder) => {
+        if (live) setOrbitalLevels(ladder);
+      })
+      .catch((e: Error) => {
+        // The worker was replaced, or it is holding nothing. The section says
+        // there is nothing to show, which is what the user can see anyway.
+        if (live && import.meta.env.DEV) console.debug('no orbitals', e);
+      });
+    return () => {
+      live = false;
+    };
+  }, [orbitalsOpen, density, resultLevel, forgetOrbital]);
 
   /**
    * Shows a calculation that would not converge as the molecule coming apart.
@@ -884,10 +1024,12 @@ export default function App() {
         keepObserving();
         // The worker is now holding a density; show it without making the user
         // ask, so placing atoms and seeing the cloud is one action.
-        hasDensityRef.current = true;
+        setHasDensity(true);
         setHasPi(outcome.hasPi);
         endJob(showDensity);
-        if (showDensity) requestIsosurface(channel, isoLevel);
+        // The density, never an orbital: the ladder this calculation replaced
+        // has been dropped along with whatever was picked from it.
+        if (showDensity) requestIsosurface(densityRequest, densityLevel, null);
       })
       .catch((e: Error) => {
         if (requestRef.current !== token) return;
@@ -901,8 +1043,8 @@ export default function App() {
     atoms,
     level,
     showDensity,
-    channel,
-    isoLevel,
+    densityRequest,
+    densityLevel,
     requestIsosurface,
     showDivergence,
     stopAnimation,
@@ -912,6 +1054,7 @@ export default function App() {
     beginJob,
     endJob,
     reportFailure,
+    setHasDensity,
   ]);
 
   /**
@@ -958,7 +1101,7 @@ export default function App() {
     setError(null);
     // The geometry is about to change under it, so the surface on screen belongs
     // to a molecule that will not exist in a moment.
-    hasDensityRef.current = false;
+    setHasDensity(false);
     wantedRef.current = null;
     meshRequestRef.current += 1;
     setMesh(null);
@@ -1034,10 +1177,12 @@ export default function App() {
         // its idle callback has been and gone and nothing will call it again.
         if (!player.playing) finishAnimation();
 
-        hasDensityRef.current = true;
+        setHasDensity(true);
         setHasPi(outcome.hasPi);
         endJob(showDensity);
-        if (showDensity) requestIsosurface(channel, isoLevel);
+        // The density, never an orbital: the ladder this calculation replaced
+        // has been dropped along with whatever was picked from it.
+        if (showDensity) requestIsosurface(densityRequest, densityLevel, null);
       })
       .catch((e: Error) => {
         if (requestRef.current !== token) return;
@@ -1074,8 +1219,8 @@ export default function App() {
     handBuilt,
     level,
     showDensity,
-    channel,
-    isoLevel,
+    densityRequest,
+    densityLevel,
     requestIsosurface,
     showDivergence,
     stopAnimation,
@@ -1087,6 +1232,7 @@ export default function App() {
     beginJob,
     endJob,
     reportFailure,
+    setHasDensity,
   ]);
 
   /**
@@ -1124,10 +1270,10 @@ export default function App() {
             endJob(false);
             return;
           }
-          hasDensityRef.current = true;
+          setHasDensity(true);
           setHasPi(outcome.hasPi);
           endJob(true);
-          requestIsosurface(channel, isoLevel);
+          requestIsosurface(densityRequest, densityLevel, null);
         })
         .catch((e: Error) => {
           if (requestRef.current !== token) return;
@@ -1140,7 +1286,15 @@ export default function App() {
           else if (import.meta.env.DEV) console.debug('no surface for the record', e);
         });
     },
-    [channel, isoLevel, requestIsosurface, beginJob, endJob, reportFailure],
+    [
+      densityRequest,
+      densityLevel,
+      requestIsosurface,
+      beginJob,
+      endJob,
+      reportFailure,
+      setHasDensity,
+    ],
   );
 
   /**
@@ -1183,7 +1337,7 @@ export default function App() {
       setOpenRecordId(record.id);
       setRecordNotice(null);
       switchMode('observe');
-      hasDensityRef.current = false;
+      setHasDensity(false);
       // A record does not carry it - the oldest ones predate the question - so
       // it comes back from the single point the surface is solved from.
       setHasPi(false);
@@ -1192,7 +1346,15 @@ export default function App() {
       setMesh(null);
       if (showDensity && recorded !== null) solveForSurface(opened, recorded);
     },
-    [atomsOfRecord, cancelCalculation, stopAnimation, switchMode, showDensity, solveForSurface],
+    [
+      atomsOfRecord,
+      cancelCalculation,
+      stopAnimation,
+      switchMode,
+      showDensity,
+      solveForSurface,
+      setHasDensity,
+    ],
   );
 
   // --- the search ----------------------------------------------------------
@@ -1262,7 +1424,7 @@ export default function App() {
       setOpenRecordId(null);
       setRecordNotice(null);
       switchMode('observe');
-      hasDensityRef.current = false;
+      setHasDensity(false);
       setHasPi(false);
       wantedRef.current = null;
       meshRequestRef.current += 1;
@@ -1277,6 +1439,7 @@ export default function App() {
       stopAnimation,
       switchMode,
       showDivergence,
+      setHasDensity,
     ],
   );
 
@@ -1651,6 +1814,9 @@ export default function App() {
           />
           電子の雲を表示する
         </label>
+        {/* None of them is active while an orbital is on screen: only one
+            surface is ever drawn, and pressing one of these is how the user
+            comes back to a density. */}
         <div className="row">
           {offered.map((request) => (
             <button
@@ -1664,13 +1830,29 @@ export default function App() {
             </button>
           ))}
         </div>
+        {/* The density's own threshold, which keeps its place while an orbital
+            is up - and is not slid then, because it would move nothing. */}
         <IsoLevelSlider
-          value={isoLevel}
-          range={ISO_RANGES[channel]}
-          onChange={(level) => setLevels((prev) => ({ ...prev, [channel]: level }))}
-          disabled={!showDensity || !solved}
+          value={densityLevel}
+          range={ISO_RANGES[densityRequest]}
+          onChange={(level) => setLevels((prev) => ({ ...prev, [densityRequest]: level }))}
+          disabled={!showDensity || !solved || orbitalPick !== null}
         />
-        <p className="hint">{explainChannel(channel, mesh)}</p>
+        <p className="hint">{explainChannel(densityRequest, orbitalPick === null ? mesh : null)}</p>
+
+        <OrbitalPanel
+          open={orbitalsOpen}
+          onOpenChange={setOrbitalsOpen}
+          levels={orbitalLevels}
+          // A ladder is on its way whenever the worker is holding a calculation
+          // this section can read one from.
+          loading={orbitalLevels === null && density.held && resultLevel === 'shape'}
+          otherLevel={solved && resultLevel !== 'shape'}
+          picked={orbitalPick}
+          onPick={selectOrbital}
+          isoLevel={levels.orbital}
+          onIsoLevel={(level) => setLevels((prev) => ({ ...prev, orbital: level }))}
+        />
 
         <dl>
           <dt>原子数</dt>

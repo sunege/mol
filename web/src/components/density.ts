@@ -21,29 +21,29 @@
  * colours.
  *
  * A fourth request exists in the contract - one orbital - and is deliberately
- * not one of these buttons: it belongs to the orbital section, which is closed
- * by default and has words of its own. It appears below only because the maps
- * here cover every request there is.
+ * not one of these: it is not a set of electrons at all, and it belongs to the
+ * orbital section, which is closed by default and has words of its own
+ * (`components/orbital.ts`). Nothing in this file mentions it, which is also
+ * what lets the test below forbid the word.
  */
 import type { DensityChannel, DensityRequest, IsoMesh } from '../worker/protocol';
 
-/**
- * The surfaces in the order the panel shows them, which is every request except
- * the orbital one - that is the orbital section's, not a button here.
- */
-const REQUEST_ORDER: readonly DensityRequest[] = ['total', 'bonding', 'deformation'];
+/** A request for a density: every one there is except the single orbital. */
+export type DensitySurface = Exclude<DensityRequest, 'orbital'>;
+
+/** The surfaces in the order the panel shows them. */
+const REQUEST_ORDER: readonly DensitySurface[] = ['total', 'bonding', 'deformation'];
 
 /** What is shown until the user asks for something else. */
-export const DEFAULT_REQUEST: DensityRequest = 'total';
+export const DEFAULT_REQUEST: DensitySurface = 'total';
 
-const LABELS: Record<DensityRequest, string> = {
+const LABELS: Record<DensitySurface, string> = {
   total: 'すべての電子',
   bonding: '結合に寄与する電子',
   deformation: '原子から動いた電子',
-  orbital: '分子軌道',
 };
 
-export function channelLabel(request: DensityRequest): string {
+export function channelLabel(request: DensitySurface): string {
   return LABELS[request];
 }
 
@@ -55,17 +55,15 @@ export function channelLabel(request: DensityRequest): string {
  * appears only once the engine has said there is something behind it. The
  * deformation density is always there: any molecule has one.
  */
-export function offeredChannels(hasPi: boolean): readonly DensityRequest[] {
+export function offeredChannels(hasPi: boolean): readonly DensitySurface[] {
   return REQUEST_ORDER.filter((request) => request !== 'bonding' || hasPi);
 }
 
-const WORDS: Record<DensityChannel, string> = {
+const WORDS: Record<Exclude<DensityChannel, 'orbital'>, string> = {
   total: 'しきい値を下げると分子全体を包む形に、上げると原子核や結合のまわりに残ります。',
   pi: '平らな分子なので、面から上下にはみ出している電子だけを表示しています。二重結合や環がある分子で、結合がどこに広がっているかが見えます。',
   deformation:
     '原子がばらばらだったときと比べて、電子が濃くなった場所（青）と薄くなった場所（赤）です。青が結合のできたところにあたります。',
-  orbital:
-    '電子の入る部屋を 1 つだけ取り出した形です。色の違いは符号の違いで、電子の濃さではありません。',
 };
 
 /**
@@ -77,10 +75,9 @@ const WORDS: Record<DensityChannel, string> = {
  * that one is not, and until it comes back all that can honestly be said is
  * what was asked for.
  */
-export function explainChannel(request: DensityRequest, mesh: IsoMesh | null): string {
+export function explainChannel(request: DensitySurface, mesh: IsoMesh | null): string {
   if (request === 'total') return WORDS.total;
   if (request === 'deformation') return WORDS.deformation;
-  if (request === 'orbital') return WORDS.orbital;
   const shown: DensityChannel | null = mesh?.channel ?? null;
   if (shown === 'pi' || shown === 'deformation') return WORDS[shown];
   return '原子が結びついたことで動いた電子だけを表示します。';

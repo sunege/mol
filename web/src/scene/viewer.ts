@@ -40,9 +40,11 @@ const BOND_RADIUS = 0.09;
  */
 const ISOSURFACE_OPACITY = 0.42;
 /**
- * Colours of the two halves of a signed density. Only the deformation density
- * has both: blue is where forming the molecule gathered electrons, red where it
- * took them away. An ordinary density only ever uses the first.
+ * Colours of the two halves of a signed surface, of which there are two kinds.
+ * For the deformation density, blue is where forming the molecule gathered
+ * electrons and red where it took them away. For one orbital they are the two
+ * signs of its amplitude, and say nothing about how many electrons are
+ * anywhere. An ordinary density only ever uses the first.
  */
 const POSITIVE_COLOR = 0x5fa8ff;
 const NEGATIVE_COLOR = 0xff6b6b;
