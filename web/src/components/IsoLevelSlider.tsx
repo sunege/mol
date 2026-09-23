@@ -38,10 +38,16 @@ export const ISO_RANGES: Record<DensityRequest, IsoRange> = {
   deformation: { min: 0.002, max: 0.15, initial: 0.02 },
   // An orbital is an amplitude rather than a density, and one orbital's is
   // larger than the share of the density it carries: a lobe of ethylene's pi
-  // peaks near 0.3. The floor is higher than the others' because the useful
-  // picture is the lobes, and a level low enough to enclose the tails of all of
-  // them shows one blob with no nodes in it.
-  orbital: { min: 0.005, max: 0.15, initial: 0.03 },
+  // peaks near 0.3. Both ends were measured on every orbital of water, O2,
+  // ethylene, benzene, NH3, CH4 and formaldehyde (`docs/dev-notes.md`, "V4-9
+  // の実測"). The floor is where no surface reaches the edge of the sampled box
+  // any more: ethylene's pi and pi* still touch it at 0.01 and are clear at
+  // 0.012, formaldehyde's pi* touches at 0.008 - below that the lobes come out
+  // cut open by a flat face. The ceiling is under the weakest valence orbital:
+  // benzene's eleventh peaks at 0.143 on the lattice, so at the old ceiling of
+  // 0.15 it drew nothing at all, and at 0.1 every orbital still shows both of
+  // its signs. The initial level shows every HOMO measured with its lobes apart.
+  orbital: { min: 0.015, max: 0.1, initial: 0.03 },
 };
 
 /** What the two ends of the scale mean, for whatever the slider is cutting. */

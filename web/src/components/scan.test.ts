@@ -1,0 +1,480 @@
+import { describe, expect, it } from 'vitest';
+import {
+  MIN_WELL,
+  SCAN_PRESETS,
+  atomFraction,
+  buildCorrelation,
+  buildScan,
+  correlationTexts,
+  defaultMarker,
+  lowestPoint,
+  presetFor,
+  rangeAround,
+  scanAxisLabels,
+  scanTexts,
+  type ScanRange,
+} from './scan';
+import { MAX_SCAN_POINTS, type OrbitalLevel, type ScanLevel, type ScanPoint } from '../worker/protocol';
+
+/** One separation, with its rungs given outright, lowest first. */
+function withLevels(
+  distance: number,
+  energy: number,
+  levels: ScanLevel[],
+  converged = true,
+): ScanPoint {
+  return { distance, energy, converged, levels };
+}
+
+/**
+ * Hydrogen: a bonding level and an antibonding one, fanning apart as the nuclei
+ * approach, over a curve with a well in it.
+ *
+ * The shape of the measured one (`docs/dev-notes.md`, "V4-7 の実装メモ": -1.120
+ * at 0.70 Angstrom against -0.796 at 3.0), with the numbers in between written
+ * here - what the figure does with them turns on the shape, not on the values.
+ */
+const HYDROGEN: ScanPoint[] = [
+  withLevels(0.4, -0.95, [level(-0.75, 2), level(0.6)]),
+  withLevels(0.7, -1.12, [level(-0.6, 2), level(0.3)]),
+  withLevels(1.2, -1.05, [level(-0.5, 2), level(0.05)]),
+  withLevels(2.0, -0.85, [level(-0.35, 2), level(-0.15)]),
+  withLevels(3.0, -0.8, [level(-0.26, 2), level(-0.24)]),
+];
+
+/** Helium: both levels full, and a curve that flattens out instead of a well. */
+const HELIUM: ScanPoint[] = [
+  withLevels(1.5, -5.5287, [level(-0.9, 2), level(-0.3, 2)]),
+  withLevels(2.0, -5.5425, [level(-0.87, 2), level(-0.4, 2)]),
+  withLevels(2.46, -5.543866, [level(-0.85, 2), level(-0.45, 2)]),
+  withLevels(3.0, -5.54382, [level(-0.84, 2), level(-0.47, 2)]),
+  withLevels(4.0, -5.543777, [level(-0.83, 2), level(-0.48, 2)]),
+];
+
+function level(energy: number, occupation = 0, count = 1, spin = 0): ScanLevel {
+  return { energy, occupation, count, spin };
+}
+
+const RANGE = (from: number, to: number, points: number): ScanRange => ({ from, to, points });
+
+describe('following a level from one separation to the next', () => {
+  const figure = buildScan(HYDROGEN, RANGE(0.4, 3.0, 5));
+
+  it('draws one line per level, in the order the engine returned them', () => {
+    expect(figure.levels.curves).toHaveLength(2);
+    expect(figure.levels.curves.map((curve) => curve.key)).toEqual(['0:1:0', '0:1:1']);
+  });
+
+  it('gives each line one point per separation, left to right', () => {
+    for (const curve of figure.levels.curves) {
+      expect(curve.segments).toHaveLength(1);
+      expect(curve.segments[0]).toHaveLength(HYDROGEN.length);
+      const xs = curve.segments[0].map((sample) => sample.x);
+      expect([...xs].sort((a, b) => a - b)).toEqual(xs);
+    }
+  });
+
+  it('draws the lower level lower, all the way along', () => {
+    const [bonding, antibonding] = figure.levels.curves;
+    // Larger y is further down the picture.
+    for (let i = 0; i < HYDROGEN.length; i++) {
+      expect(bonding.segments[0][i].y).toBeGreaterThan(antibonding.segments[0][i].y);
+    }
+  });
+
+  it('joins the n-th level of a species to the n-th, never across species', () => {
+    // Two sigma levels and a pi level between them: the two sigmas are one line
+    // each and the pi is its own, whatever order they arrive in.
+    const rungs = [level(-1, 2), level(-0.5, 2, 2), level(0.2)];
+    const scan = buildScan(
+      [withLevels(1, -10, rungs), withLevels(2, -9, rungs)],
+      RANGE(1, 2, 2),
+    );
+    expect(scan.levels.curves.map((curve) => curve.key)).toEqual(['0:1:0', '0:2:0', '0:1:1']);
+    expect(scan.levels.curves.map((curve) => curve.count)).toEqual([1, 2, 1]);
+  });
+
+  it('names a level by how many orbitals are degenerate with it', () => {
+    const rungs = [level(-1, 2), level(-0.5, 2, 2)];
+    const scan = buildScan([withLevels(1, -10, rungs)], RANGE(1, 2, 2));
+    expect(scan.levels.curves.map((curve) => curve.species?.text)).toEqual(['σ', 'π']);
+  });
+
+  it('keeps the lines of the two spins apart, and breaks the second’s', () => {
+    const rungs = [level(-1, 1, 1, 0), level(-0.9, 1, 1, 1), level(0.1, 0, 2, 0)];
+    const scan = buildScan([withLevels(1.2, -150, rungs)], RANGE(0.9, 2.1, 27));
+    expect(scan.levels.curves.map((curve) => curve.key)).toEqual(['0:1:0', '1:1:0', '0:2:0']);
+    expect(scan.levels.curves.map((curve) => curve.dashed)).toEqual([false, true, false]);
+    // Only the first spin's lines are named: the second's are the same species
+    // in the same order, and a second column of names says nothing new.
+    expect(scan.levels.curves.map((curve) => curve.species?.text ?? null)).toEqual([
+      'σ',
+      null,
+      'π',
+    ]);
+    // And the two spins' electrons go to opposite sides of the marker, since a
+    // pair of lines a hair apart would otherwise share one mark's worth of room.
+    expect(scan.levels.curves.map((curve) => curve.mark?.anchor)).toEqual([
+      'end',
+      'start',
+      'end',
+    ]);
+    // Neither the line style nor the side can be read off the picture.
+    expect(scan.notes.some((note) => note.includes('破線'))).toBe(true);
+  });
+});
+
+describe('a separation that would not solve', () => {
+  // Hydrogen fluoride: the last two points come back with the energy most of a
+  // Hartree away, which is what the fixed spin state losing the solution looks
+  // like (`docs/dev-notes.md`, "V4-7 の実装メモ").
+  const points: ScanPoint[] = [
+    withLevels(0.9, -97.9, [level(-1, 2), level(-0.3)]),
+    withLevels(1.2, -97.8, [level(-0.9, 2), level(-0.35)]),
+    withLevels(1.5, -97.7, [level(-0.8, 2), level(-0.4)]),
+    withLevels(1.9, -97.3, [level(5, 2), level(9)], false),
+    withLevels(2.2, -97.5, [level(-4, 2), level(8)], false),
+  ];
+  const figure = buildScan(points, RANGE(0.9, 2.2, 5));
+
+  it('breaks the curve rather than drawing through it', () => {
+    expect(figure.energy.segments).toHaveLength(1);
+    expect(figure.energy.segments[0]).toHaveLength(3);
+    for (const curve of figure.levels.curves) {
+      expect(curve.segments.flat()).toHaveLength(3);
+    }
+  });
+
+  it('leaves it out of what sets the vertical scale', () => {
+    // Every point that did solve is inside the plot; a scale that had taken the
+    // others in would have squeezed them into a band a few units tall.
+    const ys = figure.energy.segments.flat().map((sample) => sample.y);
+    expect(Math.min(...ys)).toBe(figure.energy.top);
+    expect(Math.max(...ys)).toBe(figure.energy.top + figure.energy.height);
+  });
+
+  it('says so under the figure, since a hole is not a curve', () => {
+    expect(figure.notes.some((note) => note.includes('線が切れています'))).toBe(true);
+  });
+});
+
+describe('a level the engine stops calling degenerate', () => {
+  // Far apart, a pi pair drifts past the threshold the engine groups by and
+  // comes back as two rungs of one orbital each. The pair's line ends there and
+  // two new lines begin, because a line is followed along its own symmetry
+  // species and those two are not it.
+  const together = [level(-1, 2), level(-0.4, 2, 2)];
+  const apart = [level(-1, 2), level(-0.4, 2), level(-0.399, 2)];
+  const figure = buildScan(
+    [withLevels(1.0, -10, together), withLevels(2.0, -9.5, together), withLevels(3.0, -9.4, apart)],
+    RANGE(1, 3, 3),
+    0,
+  );
+
+  it('ends the line rather than joining it to something else', () => {
+    const pi = figure.levels.curves.find((curve) => curve.key === '0:2:0');
+    expect(pi?.segments.flat()).toHaveLength(2);
+    expect(figure.levels.curves.map((curve) => curve.key)).toEqual([
+      '0:1:0',
+      '0:2:0',
+      '0:1:1',
+      '0:1:2',
+    ]);
+  });
+
+  it('says why the lines multiplied, which the picture cannot', () => {
+    expect(figure.notes.some((note) => note.includes('別々の線'))).toBe(true);
+    // And not the other way round: a figure whose lines all run end to end
+    // says nothing about it.
+    const whole = buildScan(HYDROGEN, RANGE(0.4, 3.0, 5));
+    expect(whole.notes.some((note) => note.includes('別々の線'))).toBe(false);
+  });
+});
+
+describe('the deepest separation', () => {
+  it('is named when the curve has a well', () => {
+    const lowest = lowestPoint(HYDROGEN);
+    expect(lowest?.distance).toBe(0.7);
+    const figure = buildScan(HYDROGEN, RANGE(0.4, 3.0, 5));
+    expect(figure.energy.lowest).not.toBeNull();
+    expect(figure.notes[0]).toContain('0.70 Å');
+  });
+
+  it('is not named for a dip shallower than one valley of the log', () => {
+    // Helium's measured minimum is 8.9e-5 Hartree below where the curve
+    // flattens out, which is a quarter of the threshold.
+    const dip = HELIUM[HELIUM.length - 1].energy - Math.min(...HELIUM.map((p) => p.energy));
+    expect(dip).toBeLessThan(MIN_WELL);
+    expect(lowestPoint(HELIUM)).toBeNull();
+    const figure = buildScan(HELIUM, RANGE(1.5, 4.0, 5));
+    expect(figure.energy.lowest).toBeNull();
+    expect(figure.notes.some((note) => note.includes('谷と呼べるものがありません'))).toBe(true);
+  });
+
+  it('is not named when the curve is still falling where the figure ends', () => {
+    // The window opened above the bottom, which is what a range worked out from
+    // a stretched pair on screen does: the lowest point drawn is the left edge
+    // of the figure rather than anything about the molecule.
+    const cropped = HYDROGEN.slice(2);
+    expect(lowestPoint(cropped)).toBeNull();
+    const figure = buildScan(cropped, RANGE(1.2, 3.0, 3));
+    expect(figure.energy.lowest).toBeNull();
+    expect(figure.notes[0]).toContain('もっと近いところ');
+  });
+
+  it('is where the marker starts, and otherwise the shortest separation', () => {
+    expect(defaultMarker(HYDROGEN)).toBe(1);
+    expect(defaultMarker(HELIUM)).toBe(0);
+  });
+});
+
+describe('the marker', () => {
+  it('stands at one separation, across both plots', () => {
+    const figure = buildScan(HYDROGEN, RANGE(0.4, 3.0, 5), 3);
+    expect(figure.marker?.distance).toBe(2.0);
+    expect(figure.marker?.top).toBe(figure.levels.top);
+    expect(figure.marker?.bottom).toBe(figure.energy.top + figure.energy.height);
+  });
+
+  it('is clamped to the points that have arrived', () => {
+    const figure = buildScan(HYDROGEN.slice(0, 2), RANGE(0.4, 3.0, 27), 20);
+    expect(figure.marker?.index).toBe(1);
+  });
+
+  it('carries the electrons of every level at the separation it stands at', () => {
+    // Oxygen near equilibrium: one spin's pi* holds an electron each and the
+    // other spin's is empty, which is what the two sets of lines are for.
+    const rungs = [
+      level(-1, 1, 1, 0),
+      level(-0.081, 1, 2, 0),
+      level(-1, 1, 1, 1),
+      level(-0.001, 0, 2, 1),
+    ];
+    const figure = buildScan([withLevels(1.21, -147, rungs)], RANGE(0.9, 2.1, 27), 0);
+    const marks = new Map(
+      figure.levels.curves.map((curve) => [curve.key, curve.mark?.text ?? '']),
+    );
+    expect(marks.get('0:2:0')).toBe('●');
+    expect(marks.get('1:2:0')).toBe('○');
+  });
+});
+
+describe('what the picture is allowed to say', () => {
+  const figures = [
+    buildScan(HYDROGEN, RANGE(0.4, 3.0, 5), 1),
+    buildScan(HELIUM, RANGE(1.5, 4.0, 5), 0),
+    buildScan(
+      [
+        withLevels(1.0, -108, [level(-14, 2), level(-1, 2), level(-0.5, 2, 2), level(0.2)]),
+        withLevels(1.5, -107, [level(-14, 2), level(-0.9, 2), level(-0.4, 2, 2), level(0.3)]),
+      ],
+      RANGE(0.8, 2.0, 2),
+      0,
+    ),
+  ];
+
+  it('writes no energy, in any unit or any form', () => {
+    for (const figure of figures) {
+      for (const text of scanTexts(figure)) {
+        expect(text).not.toMatch(/\d+\.\d+/);
+        expect(text).not.toMatch(/[-−]/);
+        for (const unit of ['Ha', 'eV', 'ハートリー', 'kJ']) expect(text).not.toContain(unit);
+      }
+    }
+  });
+
+  it('writes a measured number only under the distance axis', () => {
+    // Which is the one quantity that may be written down here: a separation is
+    // the length already on screen in the viewer, not a parameter of the method.
+    for (const figure of figures) {
+      for (const label of scanAxisLabels(figure)) expect(label).toMatch(/^\d+\.\d+$/);
+    }
+    const figure = buildScan(HYDROGEN, RANGE(0.4, 3.0, 5));
+    const labels = scanAxisLabels(figure).map(Number);
+    expect(Math.min(...labels)).toBeGreaterThanOrEqual(0.4);
+    expect(Math.max(...labels)).toBeLessThanOrEqual(3.0);
+    expect(labels.length).toBeGreaterThanOrEqual(3);
+    expect(labels.length).toBeLessThanOrEqual(7);
+  });
+
+  it('names no DFT parameter either (requirement F4)', () => {
+    const said = figures.flatMap(scanTexts).join(' ');
+    for (const word of ['基底', 'STO-3G', '6-31G', '汎関数', 'LDA', '電荷', '多重度', 'DFT']) {
+      expect(said).not.toContain(word);
+    }
+  });
+
+  it('folds the innermost levels off the bottom, once for the whole figure', () => {
+    // The nitrogen-shaped one above: a level 13 Hartree below the next.
+    const figure = figures[2];
+    expect(figure.core?.orbitals).toBe(1);
+    expect(figure.levels.curves).toHaveLength(3);
+  });
+});
+
+describe('the pairs the section offers', () => {
+  it('asks for no more separations than the worker will take', () => {
+    for (const preset of SCAN_PRESETS) {
+      expect(preset.points).toBeLessThanOrEqual(MAX_SCAN_POINTS);
+      expect(preset.from).toBeGreaterThan(0);
+      expect(preset.to).toBeGreaterThan(preset.from);
+    }
+  });
+
+  it('stops hydrogen fluoride short of where it stops solving', () => {
+    // Measured at 1.89 Angstrom (`docs/dev-notes.md`, "V4-7 の実装メモ").
+    expect(SCAN_PRESETS.find((preset) => preset.id === 'hf')?.to).toBeLessThan(1.8);
+  });
+
+  it('is the one the molecule on screen is, when it is one of them', () => {
+    expect(presetFor([8, 8])?.id).toBe('o2');
+    // Either way round: the atoms were placed in whatever order they were.
+    expect(presetFor([9, 1])?.id).toBe('hf');
+    expect(presetFor([1, 9])?.id).toBe('hf');
+    expect(presetFor([6, 8])).toBeNull();
+    expect(presetFor([8])).toBeNull();
+  });
+
+  it('puts the pair on screen in the middle of its own range', () => {
+    const range = rangeAround(1.2);
+    expect(range.from).toBeLessThan(1.2);
+    expect(range.to).toBeGreaterThan(1.2);
+    expect(rangeAround(0.1).from).toBeGreaterThanOrEqual(0.3);
+  });
+
+  it('stops short of where a stretched pair stops being the same molecule', () => {
+    // Measured through the engine (docs/dev-notes.md, "V4-9 の実測"): O2 at its
+    // preset length of 1.208 Angstrom splits its pi pairs from 2.37 on, HF
+    // (0.92) stops converging at 1.875, CO (1.13) at 2.13.
+    expect(rangeAround(1.208).to).toBeLessThan(2.37);
+    expect(rangeAround(0.92).to).toBeLessThan(1.875);
+    expect(rangeAround(1.13).to).toBeLessThan(2.13);
+    // And the wall does not start so far in that it flattens the well: every
+    // preset heavier than H2 starts at 0.65 to 0.75 times its bond.
+    expect(rangeAround(1.208).from).toBeGreaterThanOrEqual(0.65 * 1.208);
+  });
+});
+
+// --- the correlation diagram ----------------------------------------------
+
+/** One spin's rungs, from `[energy, orbitals on it, electrons in one of them]`. */
+function rungs(rows: Array<[number, number, number]>): OrbitalLevel[] {
+  let first = 0;
+  return rows.map(([energy, count, occupation]) => {
+    const rung = {
+      spin: 'both' as const,
+      first,
+      count,
+      occupation,
+      energy,
+      parity: null,
+      partner: null,
+    };
+    first += count;
+    return rung;
+  });
+}
+
+/** Hydrogen: one orbital on each atom, and a bonding and antibonding rung. */
+const H2_LEVELS = rungs([
+  [-0.58, 1, 2],
+  [0.67, 1, 0],
+]);
+const H2_ATOMS = [[-0.24], [-0.24]];
+const HALF_AND_HALF = H2_LEVELS.map(() => [0.5, 0.5]);
+
+describe('the correlation diagram', () => {
+  const figure = buildCorrelation(H2_ATOMS, ['H', 'H'], H2_LEVELS, HALF_AND_HALF);
+
+  it('is a free atom either side of the molecule', () => {
+    expect(figure.columns.map((column) => column.key)).toEqual(['left', 'mo0', 'right']);
+    expect(figure.columns[0].rungs).toHaveLength(1);
+    expect(figure.columns[1].rungs).toHaveLength(2);
+    expect(figure.columns[2].rungs).toHaveLength(1);
+  });
+
+  it('puts every column on one scale, so the heights can be read across', () => {
+    const molecule = figure.columns[1].rungs.map((rung) => rung.y);
+    const atom = figure.columns[0].rungs[0].y;
+    // The bonding rung is below the atomic level and the antibonding one above.
+    expect(Math.max(...molecule)).toBeGreaterThan(atom);
+    expect(Math.min(...molecule)).toBeLessThan(atom);
+  });
+
+  it('joins both of hydrogen’s rungs to the one orbital each atom brought', () => {
+    expect(figure.links).toHaveLength(4);
+  });
+
+  it('follows the electrons to the atom that holds them', () => {
+    // Hydrogen fluoride, in the shape the engine returns it: fluorine's
+    // innermost orbital, then its 2s, then the bond, then two lone pairs, then
+    // the antibonding rung. Only the last two rungs have much hydrogen in them.
+    const levels = rungs([
+      [-24.0, 1, 2],
+      [-1.2, 1, 2],
+      [-0.5, 1, 2],
+      [-0.4, 2, 2],
+      [0.6, 1, 0],
+    ]);
+    const weights = [
+      [0.0, 1.0],
+      [0.1, 0.9],
+      [0.35, 0.65],
+      [0.0, 1.0],
+      [0.55, 0.45],
+    ];
+    const hf = buildCorrelation(
+      [[-0.24], [-24.0, -1.1, -0.4, -0.4, -0.4]],
+      ['H', 'F'],
+      levels,
+      weights,
+    );
+    // The innermost rung, and the atomic level it was made of, are folded away
+    // together: one orbital cut, and fluorine's own innermost level gone with it.
+    expect(hf.core?.orbitals).toBe(1);
+    expect(hf.columns[2].rungs).toHaveLength(4);
+    // Hydrogen has one orbital to give, so exactly the rungs it is really in
+    // reach it: the bond and the antibonding rung, not the lone pairs.
+    const toHydrogen = hf.links.filter((link) => link.x1 < hf.width / 3);
+    expect(toHydrogen).toHaveLength(2);
+  });
+
+  it('writes no energy either', () => {
+    for (const text of correlationTexts(figure)) {
+      expect(text).not.toMatch(/\d+\.\d+/);
+      expect(text).not.toMatch(/[-−]/);
+      for (const unit of ['Ha', 'eV', 'ハートリー', 'kJ']) expect(text).not.toContain(unit);
+    }
+  });
+
+  it('labels the two rungs the electrons stop between', () => {
+    const tags = figure.columns[1].rungs.map((rung) => rung.tag);
+    expect(tags).toContain('HOMO');
+    expect(tags).toContain('LUMO');
+    expect(figure.columns[0].rungs.map((rung) => rung.tag)).toEqual(['']);
+  });
+
+  it('draws no lines at all until the compositions have arrived', () => {
+    expect(buildCorrelation(H2_ATOMS, ['H', 'H'], H2_LEVELS, []).links).toEqual([]);
+  });
+});
+
+describe('how much of an orbital sits on an atom', () => {
+  it('splits the overlap populations between the two nuclei, and adds to one', () => {
+    // A bond shared evenly: the same on the diagonal, the same off it.
+    const shared = [0.7, 0.3, 0.3, 0.7];
+    expect(atomFraction(shared, 2, 0)).toBeCloseTo(0.5, 12);
+    expect(atomFraction(shared, 2, 1)).toBeCloseTo(0.5, 12);
+  });
+
+  it('follows a lopsided orbital to the atom it is on', () => {
+    // Almost everything on the second nucleus, which is what a lone pair is.
+    const lonePair = [0.02, 0.0, 0.0, 1.98];
+    expect(atomFraction(lonePair, 2, 0)).toBeLessThan(0.05);
+    expect(atomFraction(lonePair, 2, 1)).toBeGreaterThan(0.95);
+  });
+
+  it('answers zero for an orbital with no population anywhere', () => {
+    expect(atomFraction([0, 0, 0, 0], 2, 0)).toBe(0);
+  });
+});

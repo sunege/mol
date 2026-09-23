@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { PRESETS, toWorkerArrays } from '../molecules/presets';
-import { hasUsableStructure, isTerminal, progressFromEngine } from './protocol';
+import {
+  hasUsableStructure,
+  isTerminal,
+  MAX_SCAN_POINTS,
+  progressFromEngine,
+} from './protocol';
 import type {
   CalculationProgress,
   DensityRequest,
   IsoMesh,
   OptimizationOutcome,
   OptimizationReason,
+  ScanPoint,
   ScfOutcome,
   WorkerRequest,
   WorkerResponse,
@@ -174,6 +180,27 @@ describe('worker protocol', () => {
     expect(structuredClone(orbital)).toEqual(orbital);
   });
 
+  it('asks what an orbital is like with the same two numbers and no geometry', () => {
+    // The words under an orbital come from the calculation the worker is
+    // already holding, so the request names the orbital and nothing else.
+    const request: WorkerRequest = { id: 10, type: 'orbitalCharacter', index: 4, spin: 'up' };
+    expect(structuredClone(request)).toEqual(request);
+
+    // Both arrays cross as typed arrays, and the amplitudes are null rather
+    // than absent for a molecule with no plane to probe above.
+    const answered: WorkerResponse = {
+      id: 10,
+      type: 'orbitalCharacter',
+      populations: new Float64Array([0, -0.93, -0.93, 0]),
+      amplitudes: null,
+    };
+    const cloned = structuredClone(answered);
+    if (cloned.type !== 'orbitalCharacter') throw new Error('unreachable');
+    expect(cloned.populations[1]).toBeCloseTo(-0.93);
+    expect(cloned.amplitudes).toBeNull();
+    expect(isTerminal(cloned)).toBe(true);
+  });
+
   it('reports a failed geometry as an error response, not a thrown value', () => {
     const response: WorkerResponse = { id: 4, type: 'error', message: 'CoincidentAtoms' };
     expect(structuredClone(response)).toEqual(response);
@@ -262,6 +289,8 @@ describe('streaming a geometry optimisation', () => {
       { id: 4, type: 'error', message: 'nope' },
       { id: 4, type: 'elements', elements: [] },
       { id: 4, type: 'orbitals', levels: [] },
+      { id: 4, type: 'scanDone' },
+      { id: 4, type: 'atomLevels', levels: [] },
     ];
     for (const response of finals) expect(isTerminal(response)).toBe(true);
   });
@@ -421,3 +450,68 @@ function convergedOutcome(): ScfOutcome {
     elapsedMs: 312.5,
   };
 }
+
+/**
+ * A distance scan streams the way an optimisation does, but its points are
+ * answers rather than frames of one answer: each is its own calculation, and
+ * the request ends with a message that carries nothing because everything has
+ * already been sent.
+ */
+describe('streaming a distance scan', () => {
+  const point = (distance: number): ScanPoint => ({
+    distance,
+    energy: -1.1199,
+    converged: true,
+    levels: [
+      { energy: -0.3606, occupation: 2, count: 1, spin: 0 },
+      { energy: 0.4397, occupation: 0, count: 1, spin: 0 },
+    ],
+  });
+
+  it('keeps a point intermediate, so the request stays open until the scan ends', () => {
+    const arriving: WorkerResponse = { id: 3, type: 'scanPoint', point: point(0.7) };
+    expect(isTerminal(arriving)).toBe(false);
+    expect(isTerminal({ id: 3, type: 'scanDone' })).toBe(true);
+  });
+
+  it('carries the rungs of both spins through a structured clone', () => {
+    // An open-shell scan sends twice as many rungs per point, told apart by
+    // `spin` - which is the index of a set of orbitals, not a name, because the
+    // figure draws one line style per set and never folds the two together.
+    const open: ScanPoint = {
+      distance: 1.2,
+      energy: -147.19,
+      converged: true,
+      levels: [
+        { energy: -0.0811, occupation: 1, count: 2, spin: 0 },
+        { energy: -0.0011, occupation: 0, count: 2, spin: 1 },
+      ],
+    };
+    const response: WorkerResponse = { id: 8, type: 'scanPoint', point: open };
+    const cloned = structuredClone(response);
+    if (cloned.type !== 'scanPoint') throw new Error('unreachable');
+    expect(cloned.point).toEqual(open);
+    // The degenerate pi* pair is one rung of two orbitals in each spin, filled
+    // in one and empty in the other.
+    expect(cloned.point.levels.map((level) => level.count)).toEqual([2, 2]);
+    expect(new Set(cloned.point.levels.map((level) => level.spin)).size).toBe(2);
+  });
+
+  it('asks for a bounded number of points, in Angstrom', () => {
+    const request: WorkerRequest = {
+      id: 2,
+      type: 'scan',
+      z: new Uint8Array([1, 1]),
+      from: 0.4,
+      to: 3.0,
+      points: 27,
+      budgetMs: null,
+    };
+    const cloned = structuredClone(request);
+    if (cloned.type !== 'scan') throw new Error('unreachable');
+    expect(cloned.z).toBeInstanceOf(Uint8Array);
+    expect(cloned.points).toBeLessThanOrEqual(MAX_SCAN_POINTS);
+    // The measured curve, which the cap has to leave room for.
+    expect(MAX_SCAN_POINTS).toBeGreaterThanOrEqual(27);
+  });
+});

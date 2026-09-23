@@ -15,7 +15,8 @@ use dft_core::grid::GridQuality;
 use dft_core::marching::{self, Side};
 use dft_core::opt;
 use dft_core::orbital::{self, OrbitalInfo};
-use dft_core::scf::{ScfResult, System};
+use dft_core::scan::{self, ScanPoint};
+use dft_core::scf::{guess, ScfResult, System};
 use dft_core::{element, Molecule};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -361,6 +362,49 @@ impl Calculation {
         levels.serialize(&serializer).map_err(Into::into)
     }
 
+    /// What orbital `index` of the ladder of `spin` does to each pair of nuclei,
+    /// and where its sign changes along them (`OrbitalCharacter` in
+    /// `web/src/worker/protocol.ts`).
+    ///
+    /// Cheap in the same way [`Calculation::orbitals`] is: sums over the basis
+    /// functions of pairs of atoms, and one evaluation of the orbital per
+    /// nucleus, with no lattice anywhere. It answers a change of orbital, not a
+    /// change of threshold.
+    ///
+    /// The population is weighted by the orbital's own occupation, except that
+    /// anything below one electron is read as one: an empty orbital has no
+    /// population at all, and what is wanted of it is the one it would have if
+    /// an electron were put in it. A single spin's orbitals hold one electron
+    /// each, so an open-shell molecule's two spins are measured on the same
+    /// scale either way.
+    #[wasm_bindgen(js_name = orbitalCharacter)]
+    pub fn orbital_character(
+        &self,
+        index: usize,
+        spin: Option<String>,
+    ) -> Result<OrbitalCharacter, JsValue> {
+        let orbital = self.locate(index, SpinChannel::parse(spin.as_deref())?)?;
+        let occupation = self.result.channels[orbital.channel].occupations[orbital.index].max(1.0);
+        let atoms = self.system.molecule.atoms.len();
+        let mut populations = Vec::with_capacity(atoms * atoms);
+        for a in 0..atoms {
+            for b in 0..atoms {
+                populations.push(orbital::overlap_population(
+                    &self.system,
+                    &self.result,
+                    orbital,
+                    occupation,
+                    a,
+                    b,
+                ));
+            }
+        }
+        Ok(OrbitalCharacter {
+            populations,
+            amplitudes: orbital::probe_amplitudes(&self.system, &self.result, orbital),
+        })
+    }
+
     /// Triangulates a surface of the electron density at `iso_level`, in
     /// electrons per cubic Bohr.
     ///
@@ -431,6 +475,22 @@ impl Calculation {
 }
 
 impl Calculation {
+    /// The orbital an index and a spin name, or why there is none.
+    ///
+    /// A spin this calculation was not solved as, and an index past the end of
+    /// the ladder, are both errors rather than another orbital: either would
+    /// look like an answer.
+    fn locate(&self, index: usize, spin: SpinChannel) -> Result<OrbitalRef, JsValue> {
+        let channel = spin.channel_in(&self.result)?;
+        let available = self.result.channels[channel].energies.len();
+        if index >= available {
+            return Err(JsValue::from_str(&format!(
+                "orbital {index} is past the {available} this calculation has"
+            )));
+        }
+        Ok(OrbitalRef { channel, index })
+    }
+
     /// The sampled lattice of one orbital, built unless it is the one already
     /// held.
     ///
@@ -439,16 +499,10 @@ impl Calculation {
     /// (see [`Calculation::orbital`]). An index past the end of the ladder is an
     /// error: there is no such orbital to draw.
     fn orbital_grid(&mut self, index: usize, spin: SpinChannel) -> Result<&DensityGrid, JsValue> {
-        let channel = spin.channel_in(&self.result)?;
-        let available = self.result.channels[channel].energies.len();
-        if index >= available {
-            return Err(JsValue::from_str(&format!(
-                "orbital {index} is past the {available} this calculation has"
-            )));
-        }
+        let orbital = self.locate(index, spin)?;
         let held = matches!(&self.orbital, Some((at, of, _)) if *at == index && *of == spin);
         if !held {
-            let column = orbital::signed_column(&self.result, OrbitalRef { channel, index });
+            let column = orbital::signed_column(&self.result, orbital);
             let spec = GridSpec::for_molecule(&self.system.molecule);
             let grid = density::evaluate_orbital(&self.system.basis, column.as_slice(), &spec);
             self.orbital = Some((index, spin, grid));
@@ -554,6 +608,39 @@ fn surface(grid: &DensityGrid, iso_level: f64, side: Side) -> marching::Mesh {
         *coordinate *= ANGSTROM_PER_BOHR as f32;
     }
     mesh
+}
+
+/// What one orbital does to the bonds, and where its sign changes.
+///
+/// Numbers rather than a verdict, because the verdict needs something the
+/// engine does not have: which pairs of atoms count as bonded is the interface's
+/// own guess from the geometry (`web/src/scene/bonds.ts`), so the whole matrix
+/// crosses and the UI reads the pairs it draws out of it. None of it reaches the
+/// screen as a number - only the sign and the size, in words (requirement F4).
+#[wasm_bindgen]
+pub struct OrbitalCharacter {
+    populations: Vec<f64>,
+    amplitudes: Option<Vec<f64>>,
+}
+
+#[wasm_bindgen]
+impl OrbitalCharacter {
+    /// Mulliken overlap population for every pair of nuclei, row-major over
+    /// `atoms * atoms`: positive where the orbital piles electrons up between
+    /// the two, negative where it pulls them out from between them, and around
+    /// zero where it has nothing to do with that pair.
+    #[wasm_bindgen(getter)]
+    pub fn populations(&self) -> Vec<f64> {
+        self.populations.clone()
+    }
+
+    /// The orbital's amplitude one Bohr off the molecular plane above each
+    /// nucleus, in the order the atoms were submitted in - or nothing at all for
+    /// a molecule with no plane to be above. The signs are the drawing's own.
+    #[wasm_bindgen(getter)]
+    pub fn amplitudes(&self) -> Option<Vec<f64>> {
+        self.amplitudes.clone()
+    }
 }
 
 /// The triangulated level set, laid out for GPU vertex buffers.
@@ -883,6 +970,140 @@ pub fn optimize(
         grids: Vec::new(),
         orbital: None,
     })
+}
+
+/// One rung of one point of a distance scan, as `ScanLevel` in
+/// `web/src/worker/protocol.ts`.
+#[derive(Serialize)]
+struct ScanLevelOutput {
+    /// Orbital energy in Hartree, which sets how high the rung is drawn and
+    /// nothing else - the same rule as [`OrbitalLevelOutput`]'s `energy`.
+    energy: f64,
+    /// Electrons in one of the orbitals on the rung.
+    occupation: f64,
+    /// Orbitals on the rung. For a diatomic this is what names the symmetry
+    /// species - two for pi, one for sigma - which is what the lines of the
+    /// figure are followed along.
+    count: usize,
+    /// Which set of orbitals it belongs to: always zero for a closed shell, and
+    /// zero then one for a molecule with unpaired electrons, in the order
+    /// [`SpinChannel::of`] reads them.
+    spin: usize,
+}
+
+/// One separation of a distance scan, as `ScanPoint` in
+/// `web/src/worker/protocol.ts`.
+#[derive(Serialize)]
+struct ScanPointOutput {
+    /// Distance between the two nuclei, in Angstrom - the one number of this
+    /// figure that reaches the screen, because it is the same length the user
+    /// is looking at in the viewer rather than a parameter of the method.
+    distance: f64,
+    /// Total energy in Hartree.
+    energy: f64,
+    converged: bool,
+    levels: Vec<ScanLevelOutput>,
+}
+
+/// Solves two atoms at `points` separations evenly spaced from `from_angstrom`
+/// to `to_angstrom`, handing each to `on_point` as it is produced.
+///
+/// The one figure that cannot be made out of a calculation already done: every
+/// distance is its own SCF. It is affordable because a diatomic in the smallest
+/// basis is small - hydrogen at 27 points is under half a second natively - and
+/// because the scan is always solved at the level a shape is found at, which is
+/// also the level whose two-orbital picture is the textbook one.
+///
+/// The spin state is chosen once, at the shortest distance, and held for the
+/// whole scan, exactly as [`optimize`] holds it for a whole relaxation; the
+/// reason is in `dft_core::scan`.
+///
+/// `on_point` receives `{ distance, energy, converged, levels }` with the
+/// distance in Angstrom. Its return value is not read: a caller that wants to
+/// stop early *throws* from it, as it does from [`optimize`]'s `on_step`, and
+/// the scan ends with the points it has already handed over standing.
+///
+/// Nothing here holds on to a calculation, so a scan neither replaces nor
+/// disturbs the one the surfaces are being drawn from.
+#[wasm_bindgen(js_name = scan)]
+pub fn scan(
+    z: &[u8],
+    from_angstrom: f64,
+    to_angstrom: f64,
+    points: usize,
+    on_point: &js_sys::Function,
+) -> Result<(), JsValue> {
+    let &[first, second] = z else {
+        return Err(JsValue::from_str(&format!(
+            "a distance scan is of two atoms, not {}",
+            z.len()
+        )));
+    };
+    for element in [first, second] {
+        if element::get(element).is_none() {
+            return Err(JsValue::from_str(&format!("unsupported element {element}")));
+        }
+    }
+    // The scan is always at the level a shape is found at, which is what the
+    // interface offers it for (`docs/plan-v4.md`); as everywhere else, which
+    // basis that means is decided in one place.
+    let kind = basis_for(None)?;
+
+    scan::distance_scan(
+        [first, second],
+        from_angstrom * BOHR_PER_ANGSTROM,
+        to_angstrom * BOHR_PER_ANGSTROM,
+        points,
+        kind,
+        &mut |point: ScanPoint| {
+            let payload = ScanPointOutput {
+                distance: point.distance * ANGSTROM_PER_BOHR,
+                energy: point.energy,
+                converged: point.converged,
+                levels: point
+                    .levels
+                    .iter()
+                    .map(|level| ScanLevelOutput {
+                        energy: level.energy,
+                        occupation: level.occupation,
+                        count: level.count,
+                        spin: level.spin,
+                    })
+                    .collect(),
+            };
+            // A callback that cannot be built or that throws stops the scan the
+            // way it stops a relaxation: there is nobody left to send points to.
+            let Ok(value) = serde_wasm_bindgen::to_value(&payload) else {
+                return false;
+            };
+            on_point.call1(&JsValue::NULL, &value).is_ok()
+        },
+    );
+    Ok(())
+}
+
+/// The orbital levels of each element of `z` as a free atom, in Hartree, as an
+/// array of arrays.
+///
+/// The two ends of a correlation diagram. One column per element and not two,
+/// however the molecule in the middle is solved: a free atom is solved with its
+/// partly filled shell spread evenly over the degenerate orbitals, so its levels
+/// are the same for both spins.
+///
+/// A few milliseconds per element - it is the same atomic calculation every
+/// molecular SCF already starts from - and at the level the scan beside it runs
+/// at.
+#[wasm_bindgen(js_name = atomLevels)]
+pub fn atom_levels(z: &[u8]) -> Result<JsValue, JsValue> {
+    let kind = basis_for(None)?;
+    let mut levels = Vec::with_capacity(z.len());
+    for &element in z {
+        if element::get(element).is_none() {
+            return Err(JsValue::from_str(&format!("unsupported element {element}")));
+        }
+        levels.push(guess::atomic_levels(element, kind));
+    }
+    serde_wasm_bindgen::to_value(&levels).map_err(Into::into)
 }
 
 /// Bohr to Angstrom, for a flattened coordinate list crossing the boundary.

@@ -68,6 +68,35 @@ export class Calculation {
         return IsoMesh.__wrap(ret[0]);
     }
     /**
+     * What orbital `index` of the ladder of `spin` does to each pair of nuclei,
+     * and where its sign changes along them (`OrbitalCharacter` in
+     * `web/src/worker/protocol.ts`).
+     *
+     * Cheap in the same way [`Calculation::orbitals`] is: sums over the basis
+     * functions of pairs of atoms, and one evaluation of the orbital per
+     * nucleus, with no lattice anywhere. It answers a change of orbital, not a
+     * change of threshold.
+     *
+     * The population is weighted by the orbital's own occupation, except that
+     * anything below one electron is read as one: an empty orbital has no
+     * population at all, and what is wanted of it is the one it would have if
+     * an electron were put in it. A single spin's orbitals hold one electron
+     * each, so an open-shell molecule's two spins are measured on the same
+     * scale either way.
+     * @param {number} index
+     * @param {string | null} [spin]
+     * @returns {OrbitalCharacter}
+     */
+    orbitalCharacter(index, spin) {
+        var ptr0 = isLikeNone(spin) ? 0 : passStringToWasm0(spin, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.calculation_orbitalCharacter(this.__wbg_ptr, index, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return OrbitalCharacter.__wrap(ret[0]);
+    }
+    /**
      * The ladder of orbital levels, lowest first, as a plain array for the UI
      * (`OrbitalLevel` in `web/src/worker/protocol.ts`).
      *
@@ -252,6 +281,88 @@ export class IsoMesh {
 if (Symbol.dispose) IsoMesh.prototype[Symbol.dispose] = IsoMesh.prototype.free;
 
 /**
+ * What one orbital does to the bonds, and where its sign changes.
+ *
+ * Numbers rather than a verdict, because the verdict needs something the
+ * engine does not have: which pairs of atoms count as bonded is the interface's
+ * own guess from the geometry (`web/src/scene/bonds.ts`), so the whole matrix
+ * crosses and the UI reads the pairs it draws out of it. None of it reaches the
+ * screen as a number - only the sign and the size, in words (requirement F4).
+ */
+export class OrbitalCharacter {
+    static __wrap(ptr) {
+        const obj = Object.create(OrbitalCharacter.prototype);
+        obj.__wbg_ptr = ptr;
+        OrbitalCharacterFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        OrbitalCharacterFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_orbitalcharacter_free(ptr, 0);
+    }
+    /**
+     * The orbital's amplitude one Bohr off the molecular plane above each
+     * nucleus, in the order the atoms were submitted in - or nothing at all for
+     * a molecule with no plane to be above. The signs are the drawing's own.
+     * @returns {Float64Array | undefined}
+     */
+    get amplitudes() {
+        const ret = wasm.orbitalcharacter_amplitudes(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        }
+        return v1;
+    }
+    /**
+     * Mulliken overlap population for every pair of nuclei, row-major over
+     * `atoms * atoms`: positive where the orbital piles electrons up between
+     * the two, negative where it pulls them out from between them, and around
+     * zero where it has nothing to do with that pair.
+     * @returns {Float64Array}
+     */
+    get populations() {
+        const ret = wasm.orbitalcharacter_populations(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+}
+if (Symbol.dispose) OrbitalCharacter.prototype[Symbol.dispose] = OrbitalCharacter.prototype.free;
+
+/**
+ * The orbital levels of each element of `z` as a free atom, in Hartree, as an
+ * array of arrays.
+ *
+ * The two ends of a correlation diagram. One column per element and not two,
+ * however the molecule in the middle is solved: a free atom is solved with its
+ * partly filled shell spread evenly over the degenerate orbitals, so its levels
+ * are the same for both spins.
+ *
+ * A few milliseconds per element - it is the same atomic calculation every
+ * molecular SCF already starts from - and at the level the scan beside it runs
+ * at.
+ * @param {Uint8Array} z
+ * @returns {any}
+ */
+export function atomLevels(z) {
+    const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.atomLevels(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
  * structure as it is produced (requirement F2).
  *
@@ -296,6 +407,42 @@ export function optimize(z, xyz_angstrom, on_step, on_progress, level) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return Calculation.__wrap(ret[0]);
+}
+
+/**
+ * Solves two atoms at `points` separations evenly spaced from `from_angstrom`
+ * to `to_angstrom`, handing each to `on_point` as it is produced.
+ *
+ * The one figure that cannot be made out of a calculation already done: every
+ * distance is its own SCF. It is affordable because a diatomic in the smallest
+ * basis is small - hydrogen at 27 points is under half a second natively - and
+ * because the scan is always solved at the level a shape is found at, which is
+ * also the level whose two-orbital picture is the textbook one.
+ *
+ * The spin state is chosen once, at the shortest distance, and held for the
+ * whole scan, exactly as [`optimize`] holds it for a whole relaxation; the
+ * reason is in `dft_core::scan`.
+ *
+ * `on_point` receives `{ distance, energy, converged, levels }` with the
+ * distance in Angstrom. Its return value is not read: a caller that wants to
+ * stop early *throws* from it, as it does from [`optimize`]'s `on_step`, and
+ * the scan ends with the points it has already handed over standing.
+ *
+ * Nothing here holds on to a calculation, so a scan neither replaces nor
+ * disturbs the one the surfaces are being drawn from.
+ * @param {Uint8Array} z
+ * @param {number} from_angstrom
+ * @param {number} to_angstrom
+ * @param {number} points
+ * @param {Function} on_point
+ */
+export function scan(z, from_angstrom, to_angstrom, points, on_point) {
+    const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.scan(ptr0, len0, from_angstrom, to_angstrom, points, on_point);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
 }
 
 /**
@@ -445,6 +592,9 @@ const CalculationFinalization = (typeof FinalizationRegistry === 'undefined')
 const IsoMeshFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_isomesh_free(ptr, 1));
+const OrbitalCharacterFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_orbitalcharacter_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
@@ -455,6 +605,11 @@ function addToExternrefTable0(obj) {
 function getArrayF32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayF64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
 }
 
 function getArrayU32FromWasm0(ptr, len) {

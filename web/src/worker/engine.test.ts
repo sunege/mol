@@ -20,8 +20,18 @@
  */
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { initSync, optimize, scf, type Calculation } from '../wasm/dft_wasm.js';
+import {
+  atomLevels,
+  initSync,
+  optimize,
+  scan,
+  scf,
+  supportedElements,
+  type Calculation,
+} from '../wasm/dft_wasm.js';
 import { PRESETS, toWorkerArrays } from '../molecules/presets';
+import { findBonds } from '../scene/bonds';
+import { countNodes } from '../components/orbital';
 import type { SceneAtom } from '../scene/viewer';
 import {
   hasUsableStructure,
@@ -30,9 +40,11 @@ import {
   stopFlag,
   stopRequested,
   type CalculationProgress,
+  type ElementInfo,
   type ModelLevel,
   type OptimizationOutcome,
   type OrbitalLevel,
+  type ScanPoint,
   type SpinChannel,
 } from './protocol';
 import { isFlat, perturb, PERTURB_AMPLITUDE } from '../records/perturb';
@@ -453,6 +465,75 @@ describe('the ladder of orbital levels', { timeout: 180_000 }, () => {
     calculation.free();
   });
 
+  it('says what an orbital does to each pair of nuclei, and what it is above them', () => {
+    // Water's highest occupied orbital is the lone pair standing out of the
+    // plane of the molecule: none of it lies between the nuclei, so it holds
+    // neither O-H together and neither apart. The lowest empty one is the
+    // opposite, and it has a population at all only because an empty orbital is
+    // weighted as if an electron had been put in it.
+    const calculation = scf(WATER.z, WATER.xyz);
+    const levels = ladder(calculation);
+    const occupied = levels.filter((level) => level.occupation > 0);
+    const homo = occupied[occupied.length - 1];
+    const lumo = levels[levels.indexOf(homo) + 1];
+
+    const lone = calculation.orbitalCharacter(homo.first);
+    // Three atoms, so `populations` is three by three; the two O-H entries are
+    // the ones the interface has bonds for.
+    expect(lone.populations).toHaveLength(9);
+    expect(lone.populations[1]).toBeCloseTo(0, 3);
+    expect(lone.populations[2]).toBeCloseTo(0, 3);
+    // Symmetric, as an overlap population is: the pair is not an arrow.
+    expect(lone.populations[3]).toBeCloseTo(lone.populations[1], 12);
+    // Any three atoms lie in some plane, so there is none to probe above here
+    // and no row of signs to count nodes along.
+    expect(lone.amplitudes).toBeUndefined();
+    lone.free();
+
+    const empty = calculation.orbitalCharacter(lumo.first);
+    expect(empty.populations[1]).toBeLessThan(-0.5);
+    expect(empty.populations[2]).toBeCloseTo(empty.populations[1], 12);
+    empty.free();
+
+    // The same refusals as an orbital surface: an index past the end of the
+    // ladder, and a spin this calculation has no orbitals for.
+    expect(() => calculation.orbitalCharacter(levels.length)).toThrow('is past the');
+    expect(() => calculation.orbitalCharacter(0, 'up')).toThrow('no up orbitals');
+    calculation.free();
+  });
+
+  it('gives both halves of benzene’s highest occupied pair one node', () => {
+    // The decisive case for the count (`components/orbital.ts`). The two
+    // orbitals of a degenerate pair are an arbitrary rotation of it, and these
+    // two do not even look alike - one has a lobe on every carbon, the other
+    // has nothing on two of them - but they are one rung of the ladder and the
+    // molecule has one answer, so the count has to agree across them.
+    const { z, xyz } = toWorkerArrays(preset('c6h6'));
+    const calculation = scf(z, xyz);
+    const levels = ladder(calculation);
+    const occupied = levels.filter((level) => level.occupation > 0);
+    const homo = occupied[occupied.length - 1];
+    expect(homo.count).toBe(2);
+
+    // The bonds are the interface's own guess from the geometry, which is what
+    // the words are read along; the engine has never seen them.
+    const table = supportedElements() as ElementInfo[];
+    const bonds = findBonds(preset('c6h6'), (element) => {
+      const found = table.find((each) => each.z === element);
+      if (!found) throw new Error(`no element ${element}`);
+      return found.covalentRadius;
+    });
+
+    for (let member = 0; member < homo.count; member++) {
+      const character = calculation.orbitalCharacter(homo.first + member);
+      // One probe per atom, hydrogens included.
+      expect(character.amplitudes).toHaveLength(12);
+      expect(countNodes(character.amplitudes ?? null, bonds)).toBe(1);
+      character.free();
+    }
+    calculation.free();
+  });
+
   it('keeps a degenerate pair on one rung, which is benzene’s highest occupied', () => {
     // Two orbitals at the same energy are not two things the molecule has: what
     // the diagonalisation returns inside the pair is an arbitrary rotation of
@@ -524,6 +605,84 @@ describe('the ladder of orbital levels', { timeout: 180_000 }, () => {
     // error rather than a guess at which was meant.
     expect(() => calculation.isosurface('orbital', 0.05, 4)).toThrow('no both orbitals');
     calculation.free();
+  });
+});
+
+/**
+ * The distance scan, which is the only request that is a calculation per
+ * answer rather than one calculation read several ways.
+ *
+ * What the real module has to show here is the thing the figure is for: two
+ * atoms far apart have two levels at the same height, and bringing them
+ * together splits those into a bonding and an antibonding one. The numbers it
+ * is checked against are in `docs/v4/V4-7.md`, measured before any of this was
+ * written.
+ */
+describe('a distance scan', { timeout: 180_000 }, () => {
+  /** Collects the points, optionally throwing out of the callback part way. */
+  const walk = (z: Uint8Array, from: number, to: number, points: number, stopAfter = Infinity) => {
+    const collected: ScanPoint[] = [];
+    scan(z, from, to, points, (point: ScanPoint) => {
+      collected.push(point);
+      if (collected.length >= stopAfter) throw new Error('enough');
+    });
+    return collected;
+  };
+
+  it('walks hydrogen out to three Angstrom and closes the gap as it goes', () => {
+    const points = walk(new Uint8Array([1, 1]), 0.4, 3.0, 27);
+    expect(points).toHaveLength(27);
+    expect(points.every((point) => point.converged)).toBe(true);
+    // Angstrom on this side of the boundary, as every length is. Only to about
+    // a ten-billionth of one: the two conversion constants are separately
+    // rounded CODATA values, so a round trip through Bohr does not land on the
+    // same double it left from.
+    expect(points[0].distance).toBeCloseTo(0.4, 8);
+    expect(points[26].distance).toBeCloseTo(3.0, 8);
+
+    // Two orbitals in the smallest basis, neither degenerate, and both in the
+    // single set of orbitals a closed shell is solved as: no sign anywhere of
+    // the triplet a stretched hydrogen would otherwise fall into.
+    for (const point of points) {
+      expect(point.levels).toHaveLength(2);
+      expect(point.levels.map((level) => level.count)).toEqual([1, 1]);
+      expect(point.levels.map((level) => level.spin)).toEqual([0, 0]);
+      expect(point.levels.map((level) => level.occupation)).toEqual([2, 0]);
+    }
+
+    // The measured gaps are 1.34 Hartree at 0.4 Angstrom and 0.019 at 3.0.
+    const gap = (point: ScanPoint) => point.levels[1].energy - point.levels[0].energy;
+    expect(gap(points[0])).toBeGreaterThan(1.3);
+    expect(gap(points[26])).toBeLessThan(0.03);
+  });
+
+  it('stops where the callback throws, keeping the points already sent', () => {
+    // How the worker gives a scan a budget, the same way it gives a relaxation
+    // one: the engine takes a callback that threw as "there is nobody left to
+    // send points to" and ends the scan, and what already crossed stands.
+    expect(walk(new Uint8Array([1, 1]), 0.4, 3.0, 27, 3)).toHaveLength(3);
+  });
+
+  it('refuses anything but two atoms, and an element it does not have', () => {
+    expect(() => scan(new Uint8Array([1]), 0.4, 3.0, 5, () => undefined)).toThrow('two atoms');
+    expect(() => scan(new Uint8Array([1, 30]), 0.4, 3.0, 5, () => undefined)).toThrow(
+      'unsupported element',
+    );
+  });
+
+  it('gives each element the levels of the free atom, one per orbital', () => {
+    const levels = atomLevels(new Uint8Array([1, 8])) as number[][];
+    expect(levels).toHaveLength(2);
+    // STO-3G, so one function on hydrogen and five on oxygen: 1s, 2s and three
+    // 2p. Counted from the shells, as `WATER_FUNCTIONS` is.
+    expect(levels[0]).toHaveLength(1);
+    expect(levels[1]).toHaveLength(1 + 1 + 3);
+    // Lowest first, and oxygen's three 2p levels are one level: a free atom is
+    // solved with its shells spread evenly, so it has no direction to prefer.
+    expect([...levels[1]]).toEqual([...levels[1]].sort((a, b) => a - b));
+    expect(levels[1][3]).toBeCloseTo(levels[1][2], 10);
+    expect(levels[1][4]).toBeCloseTo(levels[1][2], 10);
+    expect(() => atomLevels(new Uint8Array([30]))).toThrow('unsupported element');
   });
 });
 

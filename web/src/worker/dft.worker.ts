@@ -24,15 +24,18 @@ import init, {
   supportedElements,
   scf,
   optimize,
+  scan,
+  atomLevels,
   type Calculation,
 } from '../wasm/dft_wasm.js';
 import wasmUrl from '../wasm/dft_wasm_bg.wasm?url';
-import { progressFromEngine, stopRequested } from './protocol';
+import { MAX_SCAN_POINTS, progressFromEngine, stopRequested } from './protocol';
 import type {
   DensityChannel,
   ElementInfo,
   IsoMesh,
   OrbitalLevel,
+  ScanPoint,
   ScfOutcome,
   WorkerRequest,
   WorkerResponse,
@@ -182,6 +185,65 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           id: request.id,
           type: 'orbitals',
           levels: current.orbitals() as OrbitalLevel[],
+        });
+        break;
+      }
+      case 'orbitalCharacter': {
+        if (!current) throw new Error('no calculation to read an orbital of');
+        // No lattice here either: sums over the basis functions of pairs of
+        // atoms, and one evaluation of the orbital per nucleus.
+        const character = current.orbitalCharacter(request.index, request.spin);
+        const populations = character.populations;
+        // The engine returns nothing at all for a molecule with no plane to
+        // probe above; the contract says null.
+        const amplitudes = character.amplitudes ?? null;
+        character.free();
+        post(
+          { id: request.id, type: 'orbitalCharacter', populations, amplitudes },
+          amplitudes === null
+            ? [populations.buffer]
+            : [populations.buffer, amplitudes.buffer],
+        );
+        break;
+      }
+      case 'scan': {
+        // The one request that runs a calculation per answer. Nothing it does
+        // touches `current`: the scan solves its own geometries and keeps none
+        // of them, so a surface already on screen survives it. The user's way
+        // of stopping it is the other one - the worker is terminated, and the
+        // held calculation goes with it.
+        if (
+          !Number.isInteger(request.points) ||
+          request.points < 1 ||
+          request.points > MAX_SCAN_POINTS
+        ) {
+          throw new Error(
+            `a distance scan takes 1 to ${MAX_SCAN_POINTS} points, not ${request.points}`,
+          );
+        }
+        const started = performance.now();
+        // The same budget as a relaxation's, enforced the same way: throwing
+        // out of the callback ends the scan where it is, and the points already
+        // posted stand. Only tested between points, so one point always runs to
+        // the end.
+        const deadline =
+          request.budgetMs === undefined || request.budgetMs === null
+            ? Infinity
+            : started + request.budgetMs;
+        scan(request.z, request.from, request.to, request.points, (point: ScanPoint) => {
+          post({ id: request.id, type: 'scanPoint', point });
+          if (performance.now() >= deadline) throw new Error('scan budget');
+        });
+        post({ id: request.id, type: 'scanDone' });
+        break;
+      }
+      case 'atomLevels': {
+        // About the elements rather than about anything on screen, so it needs
+        // no calculation loaded: a handful of tiny atomic SCFs.
+        post({
+          id: request.id,
+          type: 'atomLevels',
+          levels: atomLevels(request.z) as number[][],
         });
         break;
       }

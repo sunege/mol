@@ -59,4 +59,15 @@ describe('isosurface threshold scale', () => {
     // with one of these two densities.
     expect(ISO_RANGES.deformation).toEqual(ISO_RANGES.bonding);
   });
+
+  it('keeps every measured orbital visible and uncut at both ends of its range', () => {
+    // Measured through the engine (docs/dev-notes.md, "V4-9 の実測"): ethylene's
+    // pi and pi* reach the edge of the sampled box up to 0.01 and are clear at
+    // 0.012, and benzene's weakest valence orbital peaks at 0.143.
+    const { min, max, initial } = ISO_RANGES.orbital;
+    expect(min).toBeGreaterThanOrEqual(0.012);
+    expect(max).toBeLessThan(0.143);
+    expect(initial).toBeGreaterThan(min);
+    expect(initial).toBeLessThan(max);
+  });
 });

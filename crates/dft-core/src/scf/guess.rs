@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use nalgebra::DMatrix;
 
-use super::{run_restricted, InitialGuess, Occupation, ScfOptions, System};
+use super::{run_restricted, InitialGuess, Occupation, OrbitalSet, ScfOptions, System};
 use crate::basis::BasisKind;
 use crate::grid::GridQuality;
 use crate::molecule::{Atom, Molecule};
@@ -48,8 +48,30 @@ pub fn superposition_of_atomic_densities(system: &System) -> DMatrix<f64> {
     density
 }
 
+/// The orbital energies of one isolated atom, in Hartree and lowest first.
+///
+/// The two ends of a diatomic's correlation diagram: the levels the molecular
+/// ones are drawn as having come from. They are the same atomic calculation the
+/// guess is built out of - a few milliseconds - and the interesting part of
+/// sharing it is the spherical averaging, which is what makes them levels of an
+/// atom rather than of an arbitrarily oriented p orbital. Being spherical, they
+/// are also the same for both spins, so a correlation diagram's ends are one
+/// column however the molecule in the middle is solved.
+///
+/// Computed rather than tabulated, for the same reason the guess is: changing
+/// the basis set needs no new data.
+pub fn atomic_levels(z: u8, kind: BasisKind) -> Vec<f64> {
+    atomic_scf(z, kind).energies.iter().copied().collect()
+}
+
 /// Converges one isolated atom with its shells filled spherically.
 fn atomic_density(z: u8, kind: BasisKind) -> DMatrix<f64> {
+    atomic_scf(z, kind).density
+}
+
+/// The atomic calculation both of those read: one element, on its own, with its
+/// partly filled shell spread evenly over the degenerate orbitals.
+fn atomic_scf(z: u8, kind: BasisKind) -> OrbitalSet {
     let molecule = Molecule::new(vec![Atom { z, pos: [0.0; 3] }])
         .expect("a single supported atom is always a valid molecule");
     // A coarse grid is plenty: this density is only a starting point, and a
@@ -67,7 +89,8 @@ fn atomic_density(z: u8, kind: BasisKind) -> DMatrix<f64> {
     };
     // A non-converged atom still gives a perfectly serviceable guess, so the
     // flag is deliberately ignored here.
-    run_restricted(&system, &options).density
+    let mut result = run_restricted(&system, &options);
+    result.channels.pop().expect("a restricted calculation has exactly one set of orbitals")
 }
 
 #[cfg(test)]
@@ -160,6 +183,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The ends of a correlation diagram, which come out of the same atomic
+    /// calculation as the guess.
+    #[test]
+    fn atomic_levels_are_one_per_orbital_and_spherically_degenerate() {
+        for kind in KINDS {
+            for z in 1..=crate::element::MAX_Z {
+                let levels = atomic_levels(z, kind);
+                // One level per basis function, whatever the element and the
+                // basis: these are the whole ladder, empty orbitals included.
+                assert_eq!(levels.len(), system(&[(z, [0.0; 3])], kind).n_functions());
+                // Lowest first, as everything that reads them assumes.
+                let mut sorted = levels.clone();
+                sorted.sort_by(f64::total_cmp);
+                assert_eq!(levels, sorted, "{kind:?}, z = {z}");
+            }
+        }
+
+        // Carbon in the minimal basis is 1s, 2s and three 2p, and the spherical
+        // averaging is what makes the last three one level rather than three
+        // that happen to be close.
+        let carbon = atomic_levels(6, BasisKind::Sto3g);
+        assert_eq!(carbon.len(), 5);
+        for level in &carbon[3..] {
+            assert_relative_eq!(*level, carbon[2], epsilon = 1e-10);
+        }
+        assert!(carbon[1] - carbon[0] > 1.0, "the core sits far below the valence");
     }
 
     #[test]

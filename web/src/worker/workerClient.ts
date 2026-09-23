@@ -40,7 +40,9 @@ import type {
   IsoMesh,
   ModelLevel,
   OptimizationStep,
+  OrbitalCharacter,
   OrbitalLevel,
+  ScanPoint,
   ScfOutcome,
   SpinChannel,
   WorkerRequest,
@@ -335,6 +337,74 @@ export class DftWorkerClient {
     const response = await this.#send<Extract<WorkerResponse, { type: 'orbitals' }>>((id) => ({
       id,
       type: 'orbitals',
+    }));
+    return response.levels;
+  }
+
+  /**
+   * What one orbital of the last [`scf`] call is like: the overlap population
+   * of every pair of nuclei, and the orbital's sign above each of them.
+   *
+   * As cheap as {@link orbitals} and wanted at the same moments - when the
+   * orbital on screen changes, and not when its threshold moves. `index` counts
+   * along the ladder of `spin`, which is always passed: omitting it means
+   * `'both'`, and an open-shell calculation rejects that rather than guessing.
+   */
+  async orbitalCharacter(index: number, spin: SpinChannel): Promise<OrbitalCharacter> {
+    const response = await this.#send<Extract<WorkerResponse, { type: 'orbitalCharacter' }>>(
+      (id) => ({ id, type: 'orbitalCharacter', index, spin }),
+    );
+    return { populations: response.populations, amplitudes: response.amplitudes };
+  }
+
+  /**
+   * Solves the same two atoms at `points` separations from `from` to `to`, both
+   * in Angstrom, calling `onPoint` with each as it is solved.
+   *
+   * The stream is the figure, exactly as an optimisation's steps are the
+   * animation: each point is its own calculation, and they arrive while the
+   * next one is being solved. The promise resolves when the scan ends - with
+   * every point sent, or with fewer if `budgetMs` cut it short, which a caller
+   * sees by counting what it received.
+   *
+   * `points` is capped at {@link MAX_SCAN_POINTS}, above which the worker
+   * answers with an error rather than starting.
+   *
+   * Nothing about this replaces the calculation the worker is holding, so a
+   * surface on screen survives a scan. {@link cancelAll} does not: stopping a
+   * scan that way takes the held calculation with it, and the surface has to be
+   * solved again from the SCF.
+   */
+  async scan(
+    z: Uint8Array,
+    from: number,
+    to: number,
+    points: number,
+    onPoint: (point: ScanPoint) => void,
+    budgetMs?: number | null,
+  ): Promise<void> {
+    await this.#send<Extract<WorkerResponse, { type: 'scanDone' }>>(
+      (id) => ({ id, type: 'scan', z, from, to, points, budgetMs }),
+      (partial) => {
+        if (partial.type === 'scanPoint') onPoint(partial.point);
+      },
+    );
+  }
+
+  /**
+   * The orbital levels of each element of `z` as a free atom, in Hartree: the
+   * two ends of a correlation diagram.
+   *
+   * One list per element, in the order asked for, and one list however the
+   * molecule between them is solved - a free atom is solved spherically, so its
+   * levels do not split by spin. It reads no calculation, so unlike
+   * {@link orbitals} it answers whether or not one is loaded.
+   */
+  async atomLevels(z: Uint8Array): Promise<number[][]> {
+    const response = await this.#send<Extract<WorkerResponse, { type: 'atomLevels' }>>((id) => ({
+      id,
+      type: 'atomLevels',
+      z,
     }));
     return response.levels;
   }

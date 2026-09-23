@@ -43,6 +43,16 @@ use crate::scf::{ScfResult, System, OCCUPIED_THRESHOLD};
 /// genuinely different levels is 0.026 Ha apart. This sits an order of
 /// magnitude above the one and two orders below the other, so nothing rests on
 /// the exact figure.
+///
+/// A diatomic stretched far past its bond breaks this from both sides at once
+/// (dev-notes, "V4-9 の実測"), and moving the figure mends neither. O2 beyond
+/// 2.37 Angstrom converges to a solution whose pi pairs are split by up to
+/// 8e-3 Ha, which no tolerance can join without also joining O2's two 1s
+/// orbitals (2.4e-3 Ha apart at the bond length); and past 2.65 Angstrom those
+/// two 1s orbitals come within 1e-4 of each other and are counted as a pair. A
+/// third-row atom's two 1s orbitals sit near 1e-4 at every separation (Cl2's
+/// are 1.0e-4 apart at one distance and closer at the next). What keeps the
+/// distance scan out of this is the range it is asked for, not this number.
 pub const DEGENERACY_TOLERANCE: f64 = 1e-4;
 
 /// How far off the molecular plane [`probe_amplitudes`] samples, in Bohr.

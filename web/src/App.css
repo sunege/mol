@@ -619,10 +619,12 @@ ul.candidates {
 }
 
 /* The molecular-orbital section, which is closed until someone opens it: the
-   default screen is the one v3 left behind. The rungs are shaped like the
-   candidate rows above them, and a molecule with unpaired electrons gets two
-   columns of them side by side - which is the whole point of the section for
-   O2, so they are never folded into one. */
+   default screen is the one v3 left behind. Inside it the ladder is one SVG
+   (`components/OrbitalLadder.tsx`), drawn in viewBox units and scaled to
+   whatever width the panel has, so everything below sizes text in those units
+   rather than in rem. A molecule with unpaired electrons puts two columns in
+   the same SVG - which is what lets a faint line join the pairs across the gap
+   between them. */
 .orbitals summary {
   cursor: pointer;
   color: #7c8798;
@@ -633,92 +635,275 @@ ul.candidates {
   margin-bottom: 0;
 }
 
-.orbital-columns {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
+.orbital-ladder {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 8px 0 4px;
 }
 
-.orbital-column {
-  flex: 1;
-  min-width: 0;
+/* Sized in viewBox units, which the panel's width scales: a little under the
+   0.72rem of the hints around it once the SVG is drawn 300px wide. */
+.orbital-ladder text {
+  font-family: inherit;
+  font-size: 9.5px;
+  fill: #9aa6b8;
 }
 
-.orbital-column h3 {
-  margin: 0 0 4px;
-  font-size: 0.7rem;
-  font-weight: 500;
-  color: #7c8798;
+.orbital-ladder-heading {
+  fill: #7c8798;
 }
 
-ul.orbital-rungs {
+.orbital-ladder-tag {
+  fill: #8fc0ff;
+  letter-spacing: 0.04em;
+}
+
+.orbital-ladder-core {
+  fill: #6b7686;
+}
+
+/* The electrons, just above the line they are in. Tight, so that a full
+   orbital's two circles stay inside the width of its own line. */
+.orbital-ladder-mark {
+  font-size: 8px;
+  letter-spacing: -0.12em;
+}
+
+.orbital-ladder-line {
+  stroke: #7c8798;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* The same orbital in the two spins: faint, because the pairing is background
+   to the two ladders rather than a rung of either. */
+.orbital-ladder-link {
+  stroke: #333c4a;
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+/* Where the innermost electrons were cut away. */
+.orbital-ladder-cut {
+  stroke: #2d3644;
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.orbital-ladder-orbital {
+  cursor: pointer;
+}
+
+/* Transparent rather than unfilled: an unfilled rectangle catches no clicks,
+   and this is the whole of the target for the line inside it. */
+.orbital-ladder-hit {
+  fill: transparent;
+  stroke: none;
+}
+
+.orbital-ladder-orbital:hover .orbital-ladder-line {
+  stroke: #8fc0ff;
+}
+
+.orbital-ladder-orbital.active .orbital-ladder-line {
+  stroke: #3f8cff;
+  stroke-width: 3;
+}
+
+.orbital-ladder-orbital.active .orbital-ladder-mark {
+  fill: #d6dde8;
+}
+
+/* The focus ring is drawn on the target itself, since the default outline of
+   a focused SVG group is a box around all of it in some browsers. */
+.orbital-ladder-orbital:focus {
+  outline: none;
+}
+
+.orbital-ladder-orbital:focus-visible .orbital-ladder-hit {
+  stroke: #3f8cff;
+  stroke-width: 1;
+}
+
+/* What the orbital picked is, under the picture of it: which bonds it holds
+   together or pulls apart, how many nodes its pi system has, and how many
+   blobs the surface came out in. Marked rather than bulleted - three short
+   statements about one thing, not a list to count. */
+ul.orbital-character {
   list-style: none;
-  margin: 0;
+  margin: 8px 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 3px;
-  max-height: 34vh;
-  overflow-y: auto;
-}
-
-.orbital-rung {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  border: 1px solid #262d38;
-  border-radius: 6px;
-  background: #171d26;
-}
-
-.orbital-mark {
-  font-size: 0.7rem;
-  letter-spacing: -0.1em;
+  font-size: 0.72rem;
+  line-height: 1.5;
   color: #9aa6b8;
-  white-space: nowrap;
 }
 
-/* Takes the slack, so the buttons sit at the right edge of every row. */
-.orbital-frontier {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.68rem;
+/* "近づけてみる": the distance scan and the correlation diagram, inside the
+   molecular-orbital section (V4-8). Both figures are plain SVG - the page is
+   cross-origin isolated, so no chart library can be fetched from anywhere - and
+   both are drawn in the same 260-unit viewBox as the ladder above them, so a
+   rung of one is the same size as a rung of the other. */
+.scan {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #222b38;
+}
+
+.scan h3 {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #9aa6b8;
+}
+
+.scan h3 + .hint {
+  margin-top: 0;
+}
+
+.scan-pairs {
+  margin-top: 8px;
+}
+
+.scan-figure,
+.correlation {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 10px 0 4px;
+}
+
+/* The same 9.5 viewBox units the ladder sets its text in, which comes out a
+   little under the 0.72rem of the hints once the SVG is drawn 300px wide. */
+.scan-figure text,
+.correlation text {
+  font-family: inherit;
+  font-size: 9.5px;
+  fill: #9aa6b8;
+}
+
+.scan-heading,
+.correlation-heading {
+  fill: #7c8798;
+}
+
+.scan-tick-label,
+.scan-unit,
+.scan-core {
+  fill: #6b7686;
+}
+
+/* The species of a line, at the end of it where the levels are furthest apart. */
+.scan-species {
+  fill: #7c8798;
+}
+
+/* The electrons on a line where the marker stands. Tight, as on the ladder, so
+   a full orbital's two circles stay narrow enough to sit beside the marker. */
+.scan-mark,
+.correlation-mark {
+  font-size: 8px;
+  letter-spacing: -0.12em;
+}
+
+/* One level as the separation changes. The second spin's lines are broken,
+   which is the whole of how a molecule with unpaired electrons is told from any
+   other here. */
+.scan-level {
+  fill: none;
+  stroke: #8fc0ff;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
+/* A run of one point - the first answer of a scan, or a curve either side of a
+   separation that would not solve - is a dot rather than a line. */
+circle.scan-level {
+  fill: #8fc0ff;
+  stroke: none;
+}
+
+.scan-curve.down .scan-level {
+  stroke-dasharray: 3 2.5;
+}
+
+circle.scan-level,
+.scan-curve.down circle.scan-level {
+  stroke-dasharray: none;
+}
+
+.scan-total {
+  fill: none;
+  stroke: #d68b5c;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
+circle.scan-total {
+  fill: #d68b5c;
+  stroke: none;
+}
+
+/* The deepest separation, and only where there is a well worth pointing at. */
+.scan-lowest {
+  fill: #d68b5c;
+  stroke: none;
+}
+
+.scan-axis,
+.scan-tick {
+  stroke: #2d3644;
+  stroke-width: 1;
+}
+
+/* Where the innermost levels were cut off the bottom of the upper plot. */
+.scan-cut {
+  stroke: #2d3644;
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+/* The separation the viewer is showing, across both plots. */
+.scan-marker-line {
+  stroke: #46526a;
+  stroke-width: 1;
+}
+
+.scan-marker {
+  display: block;
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: #9aa6b8;
+}
+
+.scan-marker input[type='range'] {
+  width: 100%;
+  accent-color: #3f8cff;
+  margin-top: 2px;
+}
+
+.scan-marker input[type='range']:disabled {
+  opacity: 0.35;
+}
+
+/* The correlation diagram: a free atom at each side, the molecule between. */
+.correlation-line {
+  stroke: #7c8798;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* Which atomic level a rung was made out of: faint, because the pairing is
+   background to the three columns rather than a rung of any of them. */
+.correlation-link {
+  stroke: #333c4a;
+  stroke-width: 1;
+}
+
+.correlation-tag {
+  fill: #8fc0ff;
   letter-spacing: 0.04em;
-  color: #8fc0ff;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.orbital-degenerate {
-  flex-basis: 100%;
-  font-size: 0.66rem;
-  color: #6b7686;
-}
-
-.orbital-members {
-  display: flex;
-  gap: 4px;
-}
-
-.orbital-members button {
-  padding: 1px 8px;
-  font: inherit;
-  font-size: 0.7rem;
-  border-radius: 5px;
-  border: 1px solid #2d3644;
-  background: #1c222c;
-  color: #d6dde8;
-  cursor: pointer;
-}
-
-.orbital-members button:hover {
-  border-color: #3f8cff;
-}
-
-.orbital-members button.active {
-  background: #1d3a66;
-  border-color: #3f8cff;
 }

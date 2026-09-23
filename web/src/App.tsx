@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MoleculeViewer, type SceneAtom } from './scene/viewer';
+import { findBonds } from './scene/bonds';
 import { probeWebGl, type WebGlProbe } from './scene/webgl';
 import { keyAction, type ViewerMode } from './scene/gestures';
 import { measureAtoms, toggleMeasured } from './scene/measure';
@@ -16,7 +17,17 @@ import {
   type DensitySurface,
 } from './components/density';
 import { OrbitalPanel } from './components/OrbitalPanel';
-import { samePick, type OrbitalPick } from './components/orbital';
+import { DistanceScan } from './components/DistanceScan';
+import { samePick, type Bond, type OrbitalPick } from './components/orbital';
+import {
+  SCAN_CURRENT_ID,
+  SCAN_CURRENT_LABEL,
+  SCAN_PRESETS,
+  atomFraction,
+  presetFor,
+  rangeAround,
+  type ScanPreset,
+} from './components/scan';
 import { Elapsed, ProgressOverlay } from './components/ProgressOverlay';
 import { ObservePanel } from './components/ObservePanel';
 import { headline, type JobKind, type JobState } from './components/progress';
@@ -55,7 +66,9 @@ import type {
   IsoMesh,
   ModelLevel,
   OptimizationOutcome,
+  OrbitalCharacter,
   OrbitalLevel,
+  ScanPoint,
   ScfOutcome,
   SpinChannel,
 } from './worker/protocol';
@@ -195,6 +208,35 @@ export default function App() {
   // asked for. Null whenever there is no ladder that belongs to what is on
   // screen, which every calculation makes true again.
   const [orbitalLevels, setOrbitalLevels] = useState<OrbitalLevel[] | null>(null);
+  // What the orbital picked above does to the bonds, and its sign above each
+  // nucleus. Null until the round trip that fetches it answers, and fetched
+  // when the orbital changes rather than when its threshold does - the
+  // threshold cuts a new surface through the same orbital.
+  const [orbitalCharacter, setOrbitalCharacter] = useState<OrbitalCharacter | null>(null);
+  // How much of each rung of the ladder sits on each of the two nuclei, for the
+  // correlation diagram. Only ever fetched for a molecule of two atoms, which
+  // is the only shape that diagram can be drawn for, and one round trip per
+  // rung: the same `orbitalCharacter` the words above are read out of.
+  const [orbitalWeights, setOrbitalWeights] = useState<number[][]>([]);
+  // The orbital levels of the two elements on screen as free atoms, which are
+  // the two ends of that diagram. About the elements rather than about any
+  // calculation, so it survives everything except a change of element.
+  const [freeAtomLevels, setFreeAtomLevels] = useState<number[][] | null>(null);
+  // Which pair the distance scan is set to walk, and what has come back from
+  // the one that was run. `scanPair` is the pair as it was asked for, so the
+  // axis of the figure does not move when the molecule on screen does.
+  // Null until someone picks one: the section then starts on whichever pair the
+  // molecule on screen is, which is the one with a measured range behind it.
+  const [scanId, setScanId] = useState<string | null>(null);
+  const [scanPair, setScanPair] = useState<ScanPreset | null>(null);
+  const [scanPoints, setScanPoints] = useState<ScanPoint[]>([]);
+  const [scanMarker, setScanMarker] = useState<number | null>(null);
+  const [scanning, setScanning] = useState(false);
+  // The same, for the handlers that have to know from inside a callback.
+  const scanningRef = useRef(false);
+  // Identifies the scan whose points are still wanted, as `requestRef` does for
+  // a calculation: a point that arrives after the user gave up is dropped.
+  const scanTokenRef = useRef(0);
   // A level per channel, so switching back and forth keeps each where it was.
   const [levels, setLevels] = useState<Record<DensityRequest, number>>({
     total: ISO_RANGES.total.initial,
@@ -447,6 +489,28 @@ export default function App() {
   }, []);
 
   /**
+   * Gives up on the distance scan in flight, which is the brutal kind of stop.
+   *
+   * A scan cannot be asked to stop between points the way a relaxation can -
+   * nothing about it is shared with the page - so the worker is replaced, and
+   * that takes the calculation it was holding with it. The points already
+   * received are kept, because each of them is a finished answer about a
+   * geometry; the surface on screen is not, and has to be solved again from the
+   * SCF. The section says so before the button is pressed (`SCAN_STOP_HINT`).
+   */
+  const stopScan = useCallback(() => {
+    if (!scanningRef.current) return;
+    scanTokenRef.current += 1;
+    scanningRef.current = false;
+    setScanning(false);
+    setHasDensity(false);
+    wantedRef.current = null;
+    meshRequestRef.current += 1;
+    setMesh(null);
+    clientRef.current?.cancelAll();
+  }, [setHasDensity]);
+
+  /**
    * Every edit invalidates the last result and abandons a calculation that is
    * still running for the old geometry. Called from the edit handlers rather
    * than from an effect on `atoms`, so the molecule and the readout change in
@@ -474,7 +538,11 @@ export default function App() {
     // surface, which will not be wanted now either.
     setJob(null);
     cancelCalculation();
-  }, [cancelCalculation, stopAnimation, setHasDensity]);
+    // A scan is not about the molecule on screen - it walks a pair of its own -
+    // but it is holding the one worker, and whatever replaces these atoms wants
+    // it back. The points already received stay on screen.
+    stopScan();
+  }, [cancelCalculation, stopAnimation, stopScan, setHasDensity]);
 
   // --- edit operations -----------------------------------------------------
 
@@ -724,11 +792,18 @@ export default function App() {
     [elements],
   );
 
+  // The same for the radii, which are what the bonds on screen are inferred
+  // from (`scene/bonds.ts`). The fallback is only ever reached before the table
+  // arrives, when there is nothing built to draw bonds between anyway.
+  const covalentRadiusOf = useCallback(
+    (z: number) => elements.find((element) => element.z === z)?.covalentRadius ?? 0.8,
+    [elements],
+  );
+
   useEffect(() => {
     symbolOfRef.current = symbolOf;
-    covalentRadiusRef.current = (z: number) =>
-      elements.find((element) => element.z === z)?.covalentRadius ?? 0.8;
-  }, [symbolOf, elements]);
+    covalentRadiusRef.current = covalentRadiusOf;
+  }, [symbolOf, covalentRadiusOf]);
 
   useEffect(() => {
     viewerRef.current?.setMode(mode);
@@ -928,6 +1003,37 @@ export default function App() {
   }, [orbitalsOpen, density, resultLevel, forgetOrbital]);
 
   /**
+   * What the orbital on screen is like, in the words under it.
+   *
+   * Fetched when the orbital changes and at no other time. Moving the threshold
+   * cuts a new surface through the same orbital, so none of this changes with
+   * it - the one line that does is the count of blobs, and that is read off the
+   * mesh rather than asked for. `orbitalPick` is a stable value for as long as
+   * one orbital is picked, because `selectOrbital` drops a repeat of the same
+   * one, so this runs once per choice; and every calculation drops the pick,
+   * which brings these words down with it.
+   */
+  useEffect(() => {
+    setOrbitalCharacter(null);
+    const client = clientRef.current;
+    if (orbitalPick === null || !client || !hasDensityRef.current) return;
+    let live = true;
+    client
+      .orbitalCharacter(orbitalPick.index, orbitalPick.spin)
+      .then((character) => {
+        if (live) setOrbitalCharacter(character);
+      })
+      .catch((e: Error) => {
+        // The worker was replaced, or it is holding nothing. The lines stay
+        // away rather than describing another calculation's orbital.
+        if (live && import.meta.env.DEV) console.debug('no orbital character', e);
+      });
+    return () => {
+      live = false;
+    };
+  }, [orbitalPick]);
+
+  /**
    * Shows a calculation that would not converge as the molecule coming apart.
    *
    * There is no message and no density: the engine found no bound arrangement of
@@ -964,6 +1070,164 @@ export default function App() {
   }, []);
 
   /**
+   * The two ends of the correlation diagram: the elements on screen as free
+   * atoms.
+   *
+   * About the elements rather than about any calculation - the engine answers
+   * it with nothing loaded at all - so it is asked for by the pair of atomic
+   * numbers and kept until those change. Only while the section that draws it
+   * is open, and only for the two atoms it can be drawn between.
+   */
+  const scanPairKey = atoms.length === 2 ? `${atoms[0].z},${atoms[1].z}` : null;
+  useEffect(() => {
+    setFreeAtomLevels(null);
+    const client = clientRef.current;
+    if (!orbitalsOpen || !client || scanPairKey === null) return;
+    let live = true;
+    client
+      .atomLevels(new Uint8Array(scanPairKey.split(',').map(Number)))
+      .then((levels) => {
+        if (live) setFreeAtomLevels(levels);
+      })
+      .catch((e: Error) => {
+        // The worker was replaced. The diagram stays away rather than being
+        // drawn with one end of it missing.
+        if (live && import.meta.env.DEV) console.debug('no atom levels', e);
+      });
+    return () => {
+      live = false;
+    };
+  }, [orbitalsOpen, scanPairKey]);
+
+  /**
+   * How much of each rung sits on each nucleus, which is what the lines between
+   * the columns of the correlation diagram are drawn from.
+   *
+   * One round trip per rung, over the same `orbitalCharacter` the words under
+   * the ladder are read out of, and a degenerate rung is asked about once: its
+   * orbitals are one set rotated into each other and sit on the two atoms
+   * alike. It goes with the ladder - once per calculation, while the section is
+   * open - and only for a molecule of two atoms.
+   */
+  const atomCount = atoms.length;
+  useEffect(() => {
+    setOrbitalWeights([]);
+    const client = clientRef.current;
+    if (orbitalLevels === null || atomCount !== 2 || !client) return;
+    let live = true;
+    void (async () => {
+      const found: number[][] = [];
+      for (const level of orbitalLevels) {
+        try {
+          const character = await client.orbitalCharacter(level.first, level.spin);
+          found.push([0, 1].map((atom) => atomFraction(character.populations, 2, atom)));
+        } catch (e) {
+          // The worker was replaced, or it is holding nothing: no lines rather
+          // than lines belonging to another calculation.
+          if (import.meta.env.DEV) console.debug('no orbital weights', e);
+          return;
+        }
+        if (!live) return;
+      }
+      setOrbitalWeights(found);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [orbitalLevels, atomCount]);
+
+  /** The pairs the section offers: the written-down ones, then the two on screen. */
+  const scanPairs = useMemo(() => {
+    if (atoms.length !== 2) return SCAN_PRESETS;
+    const [a, b] = atoms;
+    const distance = Math.hypot(
+      b.pos[0] - a.pos[0],
+      b.pos[1] - a.pos[1],
+      b.pos[2] - a.pos[2],
+    );
+    const current: ScanPreset = {
+      id: SCAN_CURRENT_ID,
+      label: SCAN_CURRENT_LABEL,
+      z: [a.z, b.z],
+      ...rangeAround(distance),
+    };
+    return [...SCAN_PRESETS, current];
+  }, [atoms]);
+
+  /** The pair a scan would walk: the user's choice, or the one on screen. */
+  const chosenScan =
+    scanId ?? presetFor(atoms.map((atom) => atom.z))?.id ?? SCAN_CURRENT_ID;
+
+  /**
+   * Walks the chosen pair from one separation to the next, drawing as it goes.
+   *
+   * A calculation per point, streamed exactly as a relaxation's steps are, so
+   * the figure grows while the rest of them are still being solved. It takes
+   * the one front worker, which is why nothing else may be running - and why it
+   * deliberately leaves the calculation that worker is holding alone: the
+   * surface on screen survives a scan (`worker/protocol.ts`).
+   */
+  const startScan = useCallback(() => {
+    const client = clientRef.current;
+    const pair = scanPairs.find((each) => each.id === chosenScan) ?? null;
+    if (!client || pair === null || scanningRef.current || inFlightRef.current) return;
+    const token = ++scanTokenRef.current;
+    scanningRef.current = true;
+    setScanning(true);
+    setScanPair(pair);
+    setScanPoints([]);
+    setScanMarker(null);
+    setError(null);
+    client
+      .scan(new Uint8Array(pair.z), pair.from, pair.to, pair.points, (point) => {
+        if (scanTokenRef.current === token) setScanPoints((previous) => [...previous, point]);
+      })
+      .then(() => {
+        if (scanTokenRef.current !== token) return;
+        scanningRef.current = false;
+        setScanning(false);
+      })
+      .catch((e: Error) => {
+        // Not the user giving up, which bumps the token before it terminates
+        // the worker: this is the engine refusing the pair or the range.
+        if (scanTokenRef.current !== token) return;
+        scanningRef.current = false;
+        setScanning(false);
+        reportFailure(e);
+      });
+  }, [chosenScan, scanPairs, reportFailure]);
+
+  /**
+   * Puts the two atoms at the separation the marker was moved to.
+   *
+   * An edit as far as the rest of the app is concerned, and it goes through the
+   * same invalidation: the numbers, the surface and the ladder all belong to
+   * the geometry that was on screen a moment ago. What it deliberately does not
+   * do is calculate - the button beside it does that - since a drag would
+   * otherwise start one per step.
+   */
+  const placeScanPoint = useCallback(
+    (index: number): SceneAtom[] | null => {
+      setScanMarker(index);
+      const point = scanPoints[index];
+      if (point === undefined || scanPair === null) return null;
+      const placed = alongTheAxis(atoms, scanPair.z, point.distance);
+      const sameAtoms =
+        atoms.length === 2 && atoms[0].z === scanPair.z[0] && atoms[1].z === scanPair.z[1];
+      setAtoms(placed);
+      setPresetId(null);
+      // A shape this app placed, along the axis the pair is already on: not the
+      // flat, hand-built one the nudge before a relaxation is for.
+      setHandBuilt(false);
+      setSelected(null);
+      if (!sameAtoms) setMeasured([]);
+      invalidateResult();
+      return placed;
+    },
+    [atoms, scanPoints, scanPair, invalidateResult],
+  );
+
+  /**
    * Starts the progress card for a calculation, and returns the listener that
    * keeps it current. Reports from a calculation that has since been replaced
    * are dropped, the same way its answer is.
@@ -991,10 +1255,10 @@ export default function App() {
     setJob((current) => (current && surfaceComing ? { ...current, drawing: true } : null));
   }, []);
 
-  const calculate = useCallback(() => {
+  const calculate = useCallback((structure: SceneAtom[] = atoms) => {
     const client = clientRef.current;
-    if (!client || atoms.length === 0) return;
-    const { z, xyz } = toWorkerArrays(atoms);
+    if (!client || structure.length === 0) return;
+    const { z, xyz } = toWorkerArrays(structure);
     const token = ++requestRef.current;
     inFlightRef.current = true;
     relaxingRef.current = false;
@@ -1018,7 +1282,7 @@ export default function App() {
         if (!outcome.converged) {
           endJob(false);
           restoreMode();
-          showDivergence(atoms);
+          showDivergence(structure);
           return;
         }
         keepObserving();
@@ -1056,6 +1320,23 @@ export default function App() {
     reportFailure,
     setHasDensity,
   ]);
+
+  /**
+   * Solves the electrons at the separation the marker stands at.
+   *
+   * It places the pair first, and passes what it placed to the calculation
+   * rather than letting it read the atoms back: the button is there to answer
+   * "what are the orbitals *here*", and before the marker has been dragged the
+   * molecule on screen may not be this pair at all - the figure is free to be
+   * about a pair nobody has put on screen yet.
+   */
+  const calculateAtMarker = useCallback(
+    (index: number) => {
+      const placed = placeScanPoint(index);
+      if (placed !== null) calculate(placed);
+    },
+    [placeScanPoint, calculate],
+  );
 
   /**
    * Relaxes the structure and plays it moving (requirement F2).
@@ -1573,6 +1854,13 @@ export default function App() {
   // list. The formula alone, because the charge that completes a comparison key
   // is only known once the engine has chosen one.
   const currentFormula = atoms.length > 0 ? hillFormula(atoms.map((a) => a.z), symbolOf) : null;
+  // What the orbital section may talk about: the bonds the viewer is drawing -
+  // a guess from the geometry the engine has never seen (`scene/bonds.ts`) -
+  // and one symbol per atom. Computed rather than memoised: a molecule of this
+  // app has a few tens of pairs, and the section is the only reader.
+  const orbitalBonds: Bond[] = orbitalsOpen ? findBonds(atoms, covalentRadiusOf) : [];
+  const orbitalSymbols = orbitalsOpen ? atoms.map((atom) => symbolOf(atom.z)) : [];
+
   const recordGroups = useMemo(() => {
     const all = groupRecords(records);
     // A stable sort, so within each half the newest group stays first.
@@ -1755,7 +2043,7 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={calculate}
+            onClick={() => calculate()}
             disabled={unavailable !== null || computing || atoms.length === 0}
           >
             この形のまま計算
@@ -1852,6 +2140,38 @@ export default function App() {
           onPick={selectOrbital}
           isoLevel={levels.orbital}
           onIsoLevel={(level) => setLevels((prev) => ({ ...prev, orbital: level }))}
+          character={orbitalCharacter}
+          bonds={orbitalBonds}
+          symbols={orbitalSymbols}
+          // The blobs of the surface that is up now, and only while that
+          // surface is the orbital's: a density's are a different picture.
+          lobes={mesh !== null && mesh.channel === 'orbital' ? mesh.lobes : null}
+          // Two atoms approaching, which only two atoms can do. It sits inside
+          // the same section and outside everything the ladder is gated on: a
+          // scan solves its own geometries, so it needs no calculation to have
+          // been run first.
+          scan={
+            atoms.length === 2 ? (
+              <DistanceScan
+                presets={scanPairs}
+                chosenId={chosenScan}
+                onChoose={setScanId}
+                running={scanning}
+                disabled={unavailable !== null || computing}
+                points={scanPoints}
+                range={scanPair}
+                markerIndex={scanMarker}
+                onMarker={placeScanPoint}
+                onStart={startScan}
+                onStop={stopScan}
+                onCalculate={calculateAtMarker}
+                atomLevels={freeAtomLevels}
+                levels={orbitalLevels}
+                weights={orbitalWeights}
+                symbols={atoms.map((atom) => symbolOf(atom.z))}
+              />
+            ) : null
+          }
         />
 
         <dl>
@@ -1933,6 +2253,37 @@ export default function App() {
  */
 function levelOfRecord(record: StructureRecord): ModelLevel | null {
   return levelOfModel(record.model);
+}
+
+/**
+ * The two atoms of a scan, placed at one of its separations.
+ *
+ * Along the axis the pair on screen is already on, about the middle of it, so
+ * that dragging the marker stretches the molecule the user is looking at rather
+ * than swinging it into some other orientation. A pair of different elements -
+ * one preset chosen while another is on screen - is laid on that same axis,
+ * which is as good a direction as any and is the one the camera is framing.
+ */
+function alongTheAxis(
+  atoms: readonly SceneAtom[],
+  z: readonly [number, number],
+  distance: number,
+): SceneAtom[] {
+  const a = atoms[0]?.pos ?? [0, 0, 0];
+  const b = atoms[1]?.pos ?? [1, 0, 0];
+  const away: [number, number, number] = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const length = Math.hypot(away[0], away[1], away[2]);
+  const along = length > 1e-6 ? away.map((value) => value / length) : [1, 0, 0];
+  const middle = atoms.length === 2 ? [0, 1, 2].map((i) => (a[i] + b[i]) / 2) : [0, 0, 0];
+  const place = (sign: number): [number, number, number] => [
+    middle[0] + sign * along[0] * distance * 0.5,
+    middle[1] + sign * along[1] * distance * 0.5,
+    middle[2] + sign * along[2] * distance * 0.5,
+  ];
+  return [
+    { z: z[0], pos: place(-1) },
+    { z: z[1], pos: place(1) },
+  ];
 }
 
 /**

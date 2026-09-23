@@ -41,6 +41,24 @@ export class Calculation {
      */
     isosurface(channel: string, iso_level: number, index?: number | null, spin?: string | null): IsoMesh;
     /**
+     * What orbital `index` of the ladder of `spin` does to each pair of nuclei,
+     * and where its sign changes along them (`OrbitalCharacter` in
+     * `web/src/worker/protocol.ts`).
+     *
+     * Cheap in the same way [`Calculation::orbitals`] is: sums over the basis
+     * functions of pairs of atoms, and one evaluation of the orbital per
+     * nucleus, with no lattice anywhere. It answers a change of orbital, not a
+     * change of threshold.
+     *
+     * The population is weighted by the orbital's own occupation, except that
+     * anything below one electron is read as one: an empty orbital has no
+     * population at all, and what is wanted of it is the one it would have if
+     * an electron were put in it. A single spin's orbitals hold one electron
+     * each, so an open-shell molecule's two spins are measured on the same
+     * scale either way.
+     */
+    orbitalCharacter(index: number, spin?: string | null): OrbitalCharacter;
+    /**
      * The ladder of orbital levels, lowest first, as a plain array for the UI
      * (`OrbitalLevel` in `web/src/worker/protocol.ts`).
      *
@@ -122,6 +140,49 @@ export class IsoMesh {
 }
 
 /**
+ * What one orbital does to the bonds, and where its sign changes.
+ *
+ * Numbers rather than a verdict, because the verdict needs something the
+ * engine does not have: which pairs of atoms count as bonded is the interface's
+ * own guess from the geometry (`web/src/scene/bonds.ts`), so the whole matrix
+ * crosses and the UI reads the pairs it draws out of it. None of it reaches the
+ * screen as a number - only the sign and the size, in words (requirement F4).
+ */
+export class OrbitalCharacter {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * The orbital's amplitude one Bohr off the molecular plane above each
+     * nucleus, in the order the atoms were submitted in - or nothing at all for
+     * a molecule with no plane to be above. The signs are the drawing's own.
+     */
+    readonly amplitudes: Float64Array | undefined;
+    /**
+     * Mulliken overlap population for every pair of nuclei, row-major over
+     * `atoms * atoms`: positive where the orbital piles electrons up between
+     * the two, negative where it pulls them out from between them, and around
+     * zero where it has nothing to do with that pair.
+     */
+    readonly populations: Float64Array;
+}
+
+/**
+ * The orbital levels of each element of `z` as a free atom, in Hartree, as an
+ * array of arrays.
+ *
+ * The two ends of a correlation diagram. One column per element and not two,
+ * however the molecule in the middle is solved: a free atom is solved with its
+ * partly filled shell spread evenly over the degenerate orbitals, so its levels
+ * are the same for both spins.
+ *
+ * A few milliseconds per element - it is the same atomic calculation every
+ * molecular SCF already starts from - and at the level the scan beside it runs
+ * at.
+ */
+export function atomLevels(z: Uint8Array): any;
+
+/**
  * Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
  * structure as it is produced (requirement F2).
  *
@@ -149,6 +210,30 @@ export class IsoMesh {
  * step: the optimiser builds each new geometry in the basis of the one before.
  */
 export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Function, on_progress?: Function | null, level?: string | null): Calculation;
+
+/**
+ * Solves two atoms at `points` separations evenly spaced from `from_angstrom`
+ * to `to_angstrom`, handing each to `on_point` as it is produced.
+ *
+ * The one figure that cannot be made out of a calculation already done: every
+ * distance is its own SCF. It is affordable because a diatomic in the smallest
+ * basis is small - hydrogen at 27 points is under half a second natively - and
+ * because the scan is always solved at the level a shape is found at, which is
+ * also the level whose two-orbital picture is the textbook one.
+ *
+ * The spin state is chosen once, at the shortest distance, and held for the
+ * whole scan, exactly as [`optimize`] holds it for a whole relaxation; the
+ * reason is in `dft_core::scan`.
+ *
+ * `on_point` receives `{ distance, energy, converged, levels }` with the
+ * distance in Angstrom. Its return value is not read: a caller that wants to
+ * stop early *throws* from it, as it does from [`optimize`]'s `on_step`, and
+ * the scan ends with the points it has already handed over standing.
+ *
+ * Nothing here holds on to a calculation, so a scan neither replaces nor
+ * disturbs the one the surfaces are being drawn from.
+ */
+export function scan(z: Uint8Array, from_angstrom: number, to_angstrom: number, points: number, on_point: Function): void;
 
 /**
  * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
@@ -183,7 +268,10 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_calculation_free: (a: number, b: number) => void;
     readonly __wbg_isomesh_free: (a: number, b: number) => void;
+    readonly __wbg_orbitalcharacter_free: (a: number, b: number) => void;
+    readonly atomLevels: (a: number, b: number) => [number, number, number];
     readonly calculation_isosurface: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly calculation_orbitalCharacter: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly calculation_orbitals: (a: number) => [number, number, number];
     readonly calculation_summary: (a: number) => [number, number, number];
     readonly isomesh_channel: (a: number) => [number, number];
@@ -199,6 +287,9 @@ export interface InitOutput {
     readonly isomesh_positiveNormals: (a: number) => [number, number];
     readonly isomesh_positivePositions: (a: number) => [number, number];
     readonly optimize: (a: number, b: number, c: number, d: number, e: any, f: number, g: number, h: number) => [number, number, number];
+    readonly orbitalcharacter_amplitudes: (a: number) => [number, number];
+    readonly orbitalcharacter_populations: (a: number) => [number, number];
+    readonly scan: (a: number, b: number, c: number, d: number, e: number, f: any) => [number, number];
     readonly scf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly start: () => void;
     readonly supportedElements: () => [number, number, number];

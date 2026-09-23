@@ -305,6 +305,106 @@ export interface OrbitalLevel {
 }
 
 /**
+ * What one orbital does to the bonds, and where its sign changes along them.
+ *
+ * Numbers, not a verdict. Which pairs of atoms are bonded is the interface's own
+ * guess from the geometry (`scene/bonds.ts`) and the engine has never seen it,
+ * so the whole matrix crosses and the interface reads the pairs it draws out of
+ * it. What reaches the screen from either array is the sign and the size in
+ * words - "strengthens this bond", "weakens it", "does nothing to it" - and
+ * never a number, for the same reason an orbital energy is never one
+ * ({@link OrbitalLevel.energy}): the Mulliken population is a convention for
+ * dividing electrons between atoms rather than a measurement, and it moves by a
+ * factor of two with the basis (`docs/dev-notes.md`, "v4-0 の実測").
+ */
+export interface OrbitalCharacter {
+  /**
+   * Mulliken overlap population for every pair of nuclei, row-major over
+   * `atoms x atoms`: positive where the orbital piles electrons up between the
+   * two, negative where it pulls them out from between them, around zero where
+   * it has nothing to do with that pair.
+   *
+   * An empty orbital is weighted as if it held one electron - otherwise every
+   * entry would be zero and an empty orbital could say nothing at all - and so
+   * is an orbital of a single spin, which holds one anyway.
+   */
+  populations: Float64Array;
+  /**
+   * The orbital's amplitude one Bohr off the molecular plane above each nucleus,
+   * in the order the atoms were submitted in, or null for a molecule with no
+   * plane to be above.
+   *
+   * What makes a pi system's nodes countable: the plane itself is a node of
+   * every pi orbital, so a probe standing on it would read zero everywhere. The
+   * signs are the ones the drawing of the same orbital is coloured by.
+   */
+  amplitudes: Float64Array | null;
+}
+
+/**
+ * How many separations one distance scan may be asked for.
+ *
+ * A scan is the one figure that costs a calculation per point, so the cap is
+ * about time rather than about the picture - and not about memory, which a scan
+ * does not add to (it holds no lattice and no calculation). Measured in Node
+ * (`docs/dev-notes.md`, "V4-9 の実測"), the time is linear in the points:
+ * sixty take 1.4 seconds for He2 and 4.9 for O2, the slowest pair the picker
+ * offers, against 2.4 for the 27 the section asks for. Sixty is about twice
+ * what a curve needs to look smooth and still a wait rather than a hang.
+ */
+export const MAX_SCAN_POINTS = 60;
+
+/**
+ * One rung of the ladder at one separation of a {@link ScanPoint}.
+ *
+ * The same rung an {@link OrbitalLevel} describes, minus what a curve has no
+ * use for. There is no `parity` because a diatomic has none to give - it lies
+ * in every plane through its axis, and measuring against one of them splits a
+ * genuinely degenerate pair - so `count` is what names the symmetry species
+ * here: two for a pi level, one for a sigma level, and nothing else in a
+ * minimal basis over H-Ar. That is what the lines of the figure are followed
+ * along, since levels of the same species never cross and levels of different
+ * ones do.
+ */
+export interface ScanLevel {
+  /**
+   * Orbital energy in Hartree, which sets how high the rung is drawn and
+   * nothing else - never a number for the screen, for the reason in
+   * {@link OrbitalLevel.energy}.
+   */
+  energy: number;
+  /** Electrons in one of the orbitals on the rung, not in the rung. */
+  occupation: number;
+  /** Orbitals on the rung: two where they are degenerate, otherwise one. */
+  count: number;
+  /**
+   * Which set of orbitals the rung belongs to: `0` for a closed-shell molecule,
+   * which has only one, and `0` then `1` - up then down - for a molecule with
+   * unpaired electrons, whose figure therefore has twice as many lines.
+   */
+  spin: number;
+}
+
+/** One separation of a distance scan, streamed as it is solved. */
+export interface ScanPoint {
+  /**
+   * Distance between the two nuclei, in Angstrom. The one number of this figure
+   * that may reach the screen: it is the length the user is already looking at
+   * in the viewer, not a parameter of the method.
+   */
+  distance: number;
+  /** Total energy in Hartree. */
+  energy: number;
+  /**
+   * Whether the electrons were solved at this separation. A point that was not
+   * is still sent: it is a gap in a curve rather than a failure of the scan.
+   */
+  converged: boolean;
+  /** The rungs, lowest first, and for an open-shell molecule both spins' in turn. */
+  levels: ScanLevel[];
+}
+
+/**
  * Which electrons a surface is asked for.
  *
  * Two of the three name what comes back. `bonding` is the odd one: a request
@@ -440,6 +540,17 @@ export type WorkerRequest =
    */
   | { id: number; type: 'orbitals' }
   /**
+   * What one orbital of the last `scf` or `optimize` request is like: which
+   * bonds it strengthens and weakens, and its sign above each nucleus.
+   *
+   * As cheap as `orbitals` and asked for the same way - when the orbital on
+   * screen changes, and never when its threshold moves, which is a picture of
+   * the same orbital. `index` counts along the ladder of `spin`, as an
+   * isosurface's `orbital` does, and omitting `spin` means `'both'`, which an
+   * open-shell calculation answers with an `error`.
+   */
+  | { id: number; type: 'orbitalCharacter'; index: number; spin?: SpinChannel }
+  /**
    * Cuts the density of the last `scf` or `optimize` request at a new level.
    *
    * The worker keeps one sampled lattice per channel it has been asked for, so
@@ -455,6 +566,51 @@ export type WorkerRequest =
    * an open-shell calculation answers with an `error` rather than a guess at
    * which spin was meant.
    */
+  /**
+   * Solves the same two atoms at `points` separations evenly spaced from `from`
+   * to `to`, both in Angstrom, answering with a `scanPoint` for each as it is
+   * solved and then one `scanDone`.
+   *
+   * The one request that is a calculation per answer rather than one
+   * calculation: what happens to the levels as two atoms approach cannot be read
+   * off a result that already exists. `points` is capped at
+   * {@link MAX_SCAN_POINTS}.
+   *
+   * The spin state is chosen once, at the shortest separation, and held for the
+   * whole scan, as it is for every step of an `optimize`. Letting it be chosen
+   * afresh at each point would make the curve jump where a stretched molecule
+   * stops being the closed shell it dissociates from.
+   *
+   * `budgetMs` stops it early exactly as it does an `optimize`: the worker ends
+   * the scan between points and answers `scanDone` with a curve that is shorter
+   * than `points`. The user's way of stopping is the other one - the worker is
+   * terminated and replaced - and that throws away the calculation it was
+   * holding along with it, so any surface on screen has to be solved again from
+   * the SCF afterwards (`hasDensityRef`).
+   *
+   * Nothing here replaces the calculation the surfaces are drawn from: a scan
+   * solves its own geometries and keeps none of them.
+   */
+  | {
+      id: number;
+      type: 'scan';
+      z: Uint8Array;
+      from: number;
+      to: number;
+      points: number;
+      budgetMs?: number | null;
+    }
+  /**
+   * The orbital levels of each element of `z` as a free atom, which are the two
+   * ends of a diatomic's correlation diagram.
+   *
+   * One list per element in the order they were asked for, and one list per
+   * element however the molecule beside them is solved: a free atom is solved
+   * with its partly filled shell spread evenly over the degenerate orbitals, so
+   * its levels do not split by spin. It needs no calculation to be loaded - it
+   * is about the elements, not about anything on screen.
+   */
+  | { id: number; type: 'atomLevels'; z: Uint8Array }
   | {
       id: number;
       type: 'isosurface';
@@ -509,6 +665,27 @@ export type WorkerResponse =
    * {@link OrbitalLevel.spin} rather than by position.
    */
   | { id: number; type: 'orbitals'; levels: OrbitalLevel[] }
+  /** The two arrays of {@link OrbitalCharacter}, for the orbital asked about. */
+  | {
+      id: number;
+      type: 'orbitalCharacter';
+      populations: Float64Array;
+      amplitudes: Float64Array | null;
+    }
+  /**
+   * One separation of a `scan`, sent as it is solved. Intermediate: more
+   * follow, and `scanDone` ends the request.
+   */
+  | { id: number; type: 'scanPoint'; point: ScanPoint }
+  /**
+   * The end of a `scan`, whether every point arrived or a budget cut it short.
+   * There is nothing to carry: everything a scan produces has already been
+   * sent, and a caller that wants to know whether the curve is complete counts
+   * the points it received against the ones it asked for.
+   */
+  | { id: number; type: 'scanDone' }
+  /** One array of orbital energies per element of an `atomLevels` request. */
+  | { id: number; type: 'atomLevels'; levels: number[][] }
   | { id: number; type: 'mesh'; mesh: IsoMesh }
   | { id: number; type: 'error'; message: string };
 
@@ -516,9 +693,13 @@ export type WorkerResponse =
  * Whether a response ends the request it answers.
  *
  * The worker client keeps a request pending until one of these arrives, which is
- * what lets an optimisation stream its steps through the same correlation table
- * as every other request.
+ * what lets an optimisation stream its steps, and a distance scan its points,
+ * through the same correlation table as every other request.
  */
 export function isTerminal(response: WorkerResponse): boolean {
-  return response.type !== 'step' && response.type !== 'progress';
+  return (
+    response.type !== 'step' &&
+    response.type !== 'progress' &&
+    response.type !== 'scanPoint'
+  );
 }

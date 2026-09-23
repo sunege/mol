@@ -5,6 +5,7 @@ import { stopRequested } from './protocol';
 import type {
   CalculationProgress,
   OptimizationStep,
+  ScanPoint,
   ScfOutcome,
   WorkerRequest,
   WorkerResponse,
@@ -265,6 +266,61 @@ describe('the worker client', () => {
 
     workers[0].reply(...sent.map(({ id }) => ({ id, type: 'scf' as const, result: outcome() })));
     await Promise.all(pending);
+  });
+
+  it('streams a distance scan and resolves when the scan ends, not on its last point', async () => {
+    // The same correlation table as an optimisation's steps, for a request
+    // whose answers are calculations rather than frames. The end carries
+    // nothing: a caller that wants to know whether a budget cut the curve
+    // short counts the points it received.
+    const { client, workers } = setUp();
+    const seen: number[] = [];
+    let ended = false;
+    const point = (distance: number): ScanPoint => ({
+      distance,
+      energy: -1.1,
+      converged: true,
+      levels: [{ energy: -0.36, occupation: 2, count: 1, spin: 0 }],
+    });
+
+    const pending = client
+      .scan(new Uint8Array([1, 1]), 0.4, 3.0, 3, (received) => seen.push(received.distance))
+      .then(() => {
+        ended = true;
+      });
+
+    const request = await workers[0].request(0);
+    expect(request.type).toBe('scan');
+    if (request.type !== 'scan') throw new Error('unreachable');
+    expect(request.z).toBeInstanceOf(Uint8Array);
+    expect([request.from, request.to, request.points]).toEqual([0.4, 3.0, 3]);
+
+    const { id } = request;
+    workers[0].reply(
+      { id, type: 'scanPoint', point: point(0.4) },
+      { id, type: 'scanPoint', point: point(1.7) },
+    );
+    await vi.waitFor(() => expect(seen).toEqual([0.4, 1.7]));
+    // Two points in, and the request is still open.
+    expect(ended).toBe(false);
+
+    workers[0].reply({ id, type: 'scanDone' });
+    await pending;
+    expect(ended).toBe(true);
+    // A curve shorter than the points asked for is what a budget leaves, and
+    // the client hands it over rather than treating it as a failure.
+    expect(seen).toHaveLength(2);
+  });
+
+  it('asks for the atomic levels without a calculation being loaded', async () => {
+    const { client, workers } = setUp();
+    const pending = client.atomLevels(new Uint8Array([1, 8]));
+    const request = await workers[0].request(0);
+    expect(request.type).toBe('atomLevels');
+    if (request.type !== 'atomLevels') throw new Error('unreachable');
+    expect([...request.z]).toEqual([1, 8]);
+    workers[0].reply({ id: request.id, type: 'atomLevels', levels: [[-0.24], [-18.4, -0.87]] });
+    await expect(pending).resolves.toEqual([[-0.24], [-18.4, -0.87]]);
   });
 
   it('ends a request on an error, whatever it reported before', async () => {
