@@ -28,6 +28,9 @@ export const ISO_RANGES: Record<DensityRequest, IsoRange> = {
   // A pi system peaks near 0.19, and a deformation density is smaller still
   // away from the nuclei, so the useful levels stop much sooner.
   bonding: { min: 0.002, max: 0.15, initial: 0.02 },
+  // The same range: a bonding request is answered with one or the other of
+  // these two densities, so the levels that show something are the same ones.
+  deformation: { min: 0.002, max: 0.15, initial: 0.02 },
 };
 
 /** Slider stops. Its positions are integers so the control steps evenly. */

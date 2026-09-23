@@ -220,15 +220,13 @@ impl DensityChannel {
     }
 }
 
-/// The channel that shows where the bonding is for this particular molecule.
+/// The occupied orbitals antisymmetric about the molecular plane, or `None`
+/// when this molecule has no pi system worth drawing.
 ///
-/// Pi when the molecule is planar and its orbitals split cleanly by the
-/// reflection, the deformation density otherwise. Nothing about the choice is
-/// exposed to the user, who only asks to see the bonding electrons.
-pub fn bonding_channel(system: &System, result: &ScfResult) -> DensityChannel {
-    let Some(plane) = molecular_plane(&system.molecule) else {
-        return DensityChannel::Deformation;
-    };
+/// Only parities: nothing here samples a density, so asking merely whether the
+/// molecule has a pi system costs a pair of matrix products and no grid.
+fn pi_orbitals(system: &System, result: &ScfResult) -> Option<Vec<OrbitalRef>> {
+    let plane = molecular_plane(&system.molecule)?;
 
     let mut pi = Vec::new();
     for (channel, set) in result.channels.iter().enumerate() {
@@ -249,16 +247,36 @@ pub fn bonding_channel(system: &System, result: &ScfResult) -> DensityChannel {
                 // The reflection is not a symmetry of this geometry after all,
                 // so the split would be meaningless. Better to show something
                 // true.
-                return DensityChannel::Deformation;
+                return None;
             }
         }
     }
 
-    if pi.is_empty() {
-        DensityChannel::Deformation
-    } else {
-        DensityChannel::Pi(pi)
+    (!pi.is_empty()).then_some(pi)
+}
+
+/// The channel that shows where the bonding is for this particular molecule.
+///
+/// Pi when the molecule is planar and its orbitals split cleanly by the
+/// reflection, the deformation density otherwise. Nothing about the choice is
+/// exposed to the user, who only asks to see the bonding electrons.
+pub fn bonding_channel(system: &System, result: &ScfResult) -> DensityChannel {
+    match pi_orbitals(system, result) {
+        Some(orbitals) => DensityChannel::Pi(orbitals),
+        None => DensityChannel::Deformation,
     }
+}
+
+/// Whether this molecule has electrons standing above and below a plane.
+///
+/// The same question [`bonding_channel`] answers, without the density that
+/// follows from it: it is what lets the interface offer the pi picture only
+/// where there is one to show, and fall back to the deformation density - which
+/// any molecule has - everywhere else. Being planar is geometry the user can
+/// see on screen, so saying it reveals nothing about the method
+/// (requirement F4).
+pub fn has_pi_system(system: &System, result: &ScfResult) -> bool {
+    pi_orbitals(system, result).is_some()
 }
 
 /// The density matrix a channel is drawn from.
@@ -451,6 +469,31 @@ mod tests {
         let grid = density::evaluate(&system.basis, &density, &spec);
         assert_relative_eq!(grid.integrate(), 6.0, max_relative = 0.02);
         assert!(grid.values.iter().all(|&v| v > -1e-10), "a density cannot be negative");
+    }
+
+    /// What the interface asks before it offers the pi picture at all.
+    #[test]
+    fn benzene_has_a_pi_system_and_methane_has_none() {
+        // Coarse: the question is which orbitals the reflection is a symmetry
+        // of, and no grid is sampled to answer it.
+        let ring =
+            System::build(rotated(&benzene(), 0.4), BasisKind::Sto3g, GridQuality::Coarse)
+                .unwrap();
+        let ring_result = scf::run_restricted(&ring, &ScfOptions::default());
+        assert!(has_pi_system(&ring, &ring_result));
+
+        let tetrahedron =
+            System::build(methane(), BasisKind::Sto3g, GridQuality::Coarse).unwrap();
+        let tetrahedron_result = scf::run_restricted(&tetrahedron, &ScfOptions::default());
+        assert!(!has_pi_system(&tetrahedron, &tetrahedron_result));
+
+        // The same decision the channel is chosen by, which is the point of
+        // asking it separately: the button and the surface behind it cannot
+        // disagree.
+        for (system, result) in [(&ring, &ring_result), (&tetrahedron, &tetrahedron_result)] {
+            let is_pi = matches!(bonding_channel(system, result), DensityChannel::Pi(_));
+            assert_eq!(is_pi, has_pi_system(system, result));
+        }
     }
 
     #[test]

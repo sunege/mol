@@ -17,11 +17,14 @@ export class Calculation {
      * Triangulates a surface of the electron density at `iso_level`, in
      * electrons per cubic Bohr.
      *
-     * `channel` is what the user asked to see: `"total"` for every electron, or
-     * `"bonding"` for the electrons that made the bonds. The engine decides how
-     * to answer the second one - the pi system of a planar molecule, otherwise
-     * the deformation density - and the answer says which it chose, because the
-     * two look different enough that the UI has to explain them differently.
+     * `channel` is what the user asked to see: `"total"` for every electron,
+     * `"deformation"` for the electrons that moved when the free atoms became
+     * this molecule, or `"bonding"` for the electrons that made the bonds. Only
+     * the last is a question rather than an instruction - the engine answers it
+     * with the pi system of a planar molecule and otherwise with the
+     * deformation density - and the answer always says which of the three it
+     * drew, because they look different enough that the UI has to explain them
+     * differently.
      *
      * The first call for a channel also samples its density, which is why it is
      * slower than the ones that follow.

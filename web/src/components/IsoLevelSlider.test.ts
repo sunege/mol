@@ -51,7 +51,12 @@ describe('isosurface threshold scale', () => {
     // A pi density peaks near 0.19 and a deformation density lower still, so a
     // slider that ran to the total density's top end would be dead over most of
     // its travel.
-    expect(ISO_RANGES.bonding.max).toBeLessThan(ISO_RANGES.total.max);
-    expect(ISO_RANGES.bonding.initial).toBeLessThan(ISO_RANGES.total.initial);
+    for (const channel of ['bonding', 'deformation'] as const) {
+      expect(ISO_RANGES[channel].max).toBeLessThan(ISO_RANGES.total.max);
+      expect(ISO_RANGES[channel].initial).toBeLessThan(ISO_RANGES.total.initial);
+    }
+    // And the two are the same range, because a bonding request is answered
+    // with one of these two densities.
+    expect(ISO_RANGES.deformation).toEqual(ISO_RANGES.bonding);
   });
 });

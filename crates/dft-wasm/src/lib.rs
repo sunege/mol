@@ -126,6 +126,14 @@ struct ScfOutput {
     /// count; the difference is the quadrature error.
     #[serde(rename = "electronsOnGrid")]
     electrons_on_grid: f64,
+    /// Whether this molecule has electrons standing above and below a plane.
+    ///
+    /// Not a DFT parameter and not hidden by requirement F4: being flat is
+    /// geometry, visible on screen. It is here because only the engine can say
+    /// whether the reflection really is a symmetry of these orbitals, and the
+    /// interface offers the pi picture only where there is one to show.
+    #[serde(rename = "hasPi")]
+    has_pi: bool,
     /// Present only when this calculation came from [`optimize`].
     #[serde(skip_serializing_if = "Option::is_none")]
     optimization: Option<OptimizationOutput>,
@@ -146,9 +154,12 @@ pub struct Calculation {
     /// How the geometry optimisation that produced this ended, when one did.
     optimization: Option<OptimizationOutput>,
     /// One sampled lattice per channel, each built on its first request and kept
-    /// for the threshold changes that follow.
-    total: Option<DensityGrid>,
-    bonding: Option<(DensityChannel, DensityGrid)>,
+    /// for the threshold changes that follow. Three at most, and fewer when two
+    /// requests land on the same channel: a molecule with no pi system answers
+    /// `"bonding"` with the deformation density, which is then the same lattice
+    /// `"deformation"` asks for. Each is 300,000 samples, so they are looked up
+    /// by channel rather than kept per request.
+    grids: Vec<(DensityChannel, DensityGrid)>,
 }
 
 #[wasm_bindgen]
@@ -171,6 +182,7 @@ impl Calculation {
             homo_lumo_gap: self.result.homo_lumo().map(|(homo, lumo)| lumo - homo),
             basis_functions: self.system.n_functions(),
             electrons_on_grid: self.result.electrons_on_grid,
+            has_pi: bonding::has_pi_system(&self.system, &self.result),
             optimization: self.optimization.clone(),
         };
         serde_wasm_bindgen::to_value(&output).map_err(Into::into)
@@ -179,39 +191,43 @@ impl Calculation {
     /// Triangulates a surface of the electron density at `iso_level`, in
     /// electrons per cubic Bohr.
     ///
-    /// `channel` is what the user asked to see: `"total"` for every electron, or
-    /// `"bonding"` for the electrons that made the bonds. The engine decides how
-    /// to answer the second one - the pi system of a planar molecule, otherwise
-    /// the deformation density - and the answer says which it chose, because the
-    /// two look different enough that the UI has to explain them differently.
+    /// `channel` is what the user asked to see: `"total"` for every electron,
+    /// `"deformation"` for the electrons that moved when the free atoms became
+    /// this molecule, or `"bonding"` for the electrons that made the bonds. Only
+    /// the last is a question rather than an instruction - the engine answers it
+    /// with the pi system of a planar molecule and otherwise with the
+    /// deformation density - and the answer always says which of the three it
+    /// drew, because they look different enough that the UI has to explain them
+    /// differently.
     ///
     /// The first call for a channel also samples its density, which is why it is
     /// slower than the ones that follow.
     #[wasm_bindgen(js_name = isosurface)]
     pub fn isosurface(&mut self, channel: &str, iso_level: f64) -> Result<IsoMesh, JsValue> {
-        let (name, grid) = match channel {
-            "total" => {
-                let grid = self.total.get_or_insert_with(|| {
-                    sample(&self.system, &self.result, &DensityChannel::Total)
-                });
-                ("total", &*grid)
-            }
-            "bonding" => {
-                let entry = self.bonding.get_or_insert_with(|| {
-                    let chosen = bonding::bonding_channel(&self.system, &self.result);
-                    let grid = sample(&self.system, &self.result, &chosen);
-                    (chosen, grid)
-                });
-                let name = match entry.0 {
-                    DensityChannel::Pi(_) => "pi",
-                    DensityChannel::Deformation => "deformation",
-                    DensityChannel::Total => "total",
-                };
-                (name, &entry.1)
-            }
+        let wanted = match channel {
+            "total" => DensityChannel::Total,
+            "deformation" => DensityChannel::Deformation,
+            "bonding" => bonding::bonding_channel(&self.system, &self.result),
             other => {
                 return Err(JsValue::from_str(&format!("unknown density channel {other:?}")))
             }
+        };
+        // Choosing the bonding channel is a pair of matrix products and is
+        // redone on every request; what is kept is the lattice behind it, which
+        // is the expensive part and the reason the threshold slider is cheap.
+        let index = match self.grids.iter().position(|(held, _)| *held == wanted) {
+            Some(index) => index,
+            None => {
+                let grid = sample(&self.system, &self.result, &wanted);
+                self.grids.push((wanted, grid));
+                self.grids.len() - 1
+            }
+        };
+        let (drawn, grid) = &self.grids[index];
+        let name = match drawn {
+            DensityChannel::Total => "total",
+            DensityChannel::Pi(_) => "pi",
+            DensityChannel::Deformation => "deformation",
         };
 
         let lowest = grid.values.iter().copied().fold(f64::INFINITY, f64::min);
@@ -428,8 +444,7 @@ pub fn scf(
         state: outcome.state,
         attempts: outcome.attempts.len(),
         optimization: None,
-        total: None,
-        bonding: None,
+        grids: Vec::new(),
     })
 }
 
@@ -557,8 +572,7 @@ pub fn optimize(
         state,
         attempts,
         optimization: Some(optimization),
-        total: None,
-        bonding: None,
+        grids: Vec::new(),
     })
 }
 

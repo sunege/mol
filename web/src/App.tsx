@@ -8,6 +8,12 @@ import { DftWorkerClient, RelaxationStopped } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
 import { PeriodicPicker } from './components/PeriodicPicker';
 import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
+import {
+  DEFAULT_REQUEST,
+  channelLabel,
+  explainChannel,
+  offeredChannels,
+} from './components/density';
 import { Elapsed, ProgressOverlay } from './components/ProgressOverlay';
 import { ObservePanel } from './components/ObservePanel';
 import { headline, type JobKind, type JobState } from './components/progress';
@@ -41,7 +47,6 @@ import { hasUsableStructure } from './worker/protocol';
 import { EngineUnavailableError, engineNotice, type EngineProblem } from './worker/engineSupport';
 import type {
   CalculationProgress,
-  DensityChannel,
   DensityRequest,
   ElementInfo,
   IsoMesh,
@@ -162,12 +167,27 @@ export default function App() {
   const [unavailable, setUnavailable] = useState<EngineProblem | null>(null);
   const [webgl, setWebgl] = useState<WebGlProbe | null>(null);
   const [showDensity, setShowDensity] = useState(true);
-  const [channel, setChannel] = useState<DensityRequest>('total');
+  const [channel, setChannel] = useState<DensityRequest>(DEFAULT_REQUEST);
   // A level per channel, so switching back and forth keeps each where it was.
   const [levels, setLevels] = useState<Record<DensityRequest, number>>({
     total: ISO_RANGES.total.initial,
     bonding: ISO_RANGES.bonding.initial,
+    deformation: ISO_RANGES.deformation.initial,
   });
+  /**
+   * Whether the molecule on screen has electrons above and below a plane, as
+   * far as anything here knows: it decides whether the bonding surface is
+   * offered at all (`components/density.ts`).
+   *
+   * Only the engine can answer it, so it is read off a calculation - but it
+   * belongs to the *molecule*, not to that calculation, which is why it is not
+   * taken from `result`. `result` is dropped the moment a new run starts, and a
+   * button that vanished for the fifteen seconds a molecule was being solved
+   * again, taking the user's choice with it, would be worse than one that says
+   * what was true a moment ago. It is cleared where the atoms are replaced or
+   * edited instead, which is where the answer really does stop applying.
+   */
+  const [hasPi, setHasPi] = useState(false);
   // The structure log. `kept` is false in a browser that will not keep it -
   // a private window - which the panel says rather than treating as an error.
   const [records, setRecords] = useState<StructureRecord[]>([]);
@@ -386,6 +406,9 @@ export default function App() {
     // The worker's copy of the density belongs to the old geometry, so the
     // surface on screen is stale whether or not the worker survives.
     hasDensityRef.current = false;
+    // And these are different atoms now: whether they have a pi system is a
+    // question nobody has asked yet.
+    setHasPi(false);
     wantedRef.current = null;
     meshRequestRef.current += 1;
     setMesh(null);
@@ -754,6 +777,15 @@ export default function App() {
     });
   }, []);
 
+  // The buttons the panel offers, which is not always all three.
+  const offered = useMemo(() => offeredChannels(hasPi), [hasPi]);
+
+  // A molecule edited until it is no longer flat loses the bonding button, and
+  // must not be left showing a surface nobody can switch away from.
+  useEffect(() => {
+    if (!offered.includes(channel)) selectChannel(DEFAULT_REQUEST);
+  }, [offered, channel, selectChannel]);
+
   /**
    * Shows a calculation that would not converge as the molecule coming apart.
    *
@@ -852,6 +884,7 @@ export default function App() {
         // The worker is now holding a density; show it without making the user
         // ask, so placing atoms and seeing the cloud is one action.
         hasDensityRef.current = true;
+        setHasPi(outcome.hasPi);
         endJob(showDensity);
         if (showDensity) requestIsosurface(channel, isoLevel);
       })
@@ -1001,6 +1034,7 @@ export default function App() {
         if (!player.playing) finishAnimation();
 
         hasDensityRef.current = true;
+        setHasPi(outcome.hasPi);
         endJob(showDensity);
         if (showDensity) requestIsosurface(channel, isoLevel);
       })
@@ -1090,6 +1124,7 @@ export default function App() {
             return;
           }
           hasDensityRef.current = true;
+          setHasPi(outcome.hasPi);
           endJob(true);
           requestIsosurface(channel, isoLevel);
         })
@@ -1148,6 +1183,9 @@ export default function App() {
       setRecordNotice(null);
       switchMode('observe');
       hasDensityRef.current = false;
+      // A record does not carry it - the oldest ones predate the question - so
+      // it comes back from the single point the surface is solved from.
+      setHasPi(false);
       wantedRef.current = null;
       meshRequestRef.current += 1;
       setMesh(null);
@@ -1224,6 +1262,7 @@ export default function App() {
       setRecordNotice(null);
       switchMode('observe');
       hasDensityRef.current = false;
+      setHasPi(false);
       wantedRef.current = null;
       meshRequestRef.current += 1;
       setMesh(null);
@@ -1612,22 +1651,17 @@ export default function App() {
           電子の雲を表示する
         </label>
         <div className="row">
-          <button
-            type="button"
-            className={channel === 'total' ? 'active' : ''}
-            disabled={!showDensity}
-            onClick={() => selectChannel('total')}
-          >
-            すべての電子
-          </button>
-          <button
-            type="button"
-            className={channel === 'bonding' ? 'active' : ''}
-            disabled={!showDensity}
-            onClick={() => selectChannel('bonding')}
-          >
-            結合に寄与する電子
-          </button>
+          {offered.map((request) => (
+            <button
+              key={request}
+              type="button"
+              className={channel === request ? 'active' : ''}
+              disabled={!showDensity}
+              onClick={() => selectChannel(request)}
+            >
+              {channelLabel(request)}
+            </button>
+          ))}
         </div>
         <IsoLevelSlider
           value={isoLevel}
@@ -1788,28 +1822,6 @@ function describeMesh(
     .map((surface) => (surface.indices.length / 3).toLocaleString());
   if (faces.length === 0) return 'しきい値が高すぎます';
   return `${faces.join(' + ')} 面 · ${Math.round(mesh.elapsedMs)} ms`;
-}
-
-/**
- * The line under the slider, which has to explain what is on screen without
- * naming a single orbital or functional (requirement F4).
- *
- * The bonding channel needs two explanations because the engine answers it two
- * different ways, so the text follows what came back rather than what was asked
- * for, and says nothing specific until the first surface arrives.
- */
-function explainChannel(request: DensityRequest, mesh: IsoMesh | null): string {
-  const shown: DensityChannel | null = mesh?.channel ?? null;
-  if (request === 'total') {
-    return 'しきい値を下げると分子全体を包む形に、上げると原子核や結合のまわりに残ります。';
-  }
-  if (shown === 'pi') {
-    return '平らな分子なので、面から上下にはみ出している電子だけを表示しています。二重結合や環がある分子で、結合がどこに広がっているかが見えます。';
-  }
-  if (shown === 'deformation') {
-    return '原子がばらばらだったときと比べて、電子が濃くなった場所（青）と薄くなった場所（赤）です。青が結合のできたところにあたります。';
-  }
-  return '原子が結びついたことで動いた電子だけを表示します。';
 }
 
 /**

@@ -47,6 +47,7 @@ export function fakeOutcome(relaxation: FakeRelaxation, xyz: number[]): ScfOutco
     homoLumoGap: 0.2,
     basisFunctions: 7,
     electronsOnGrid: 10,
+    hasPi: false,
     elapsedMs: 1000,
     optimization: {
       converged: reason === 'converged',

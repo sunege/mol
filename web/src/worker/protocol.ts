@@ -209,6 +209,17 @@ export interface ScfOutcome {
    */
   electronsOnGrid: number;
   /**
+   * Whether this molecule has electrons standing above and below a plane.
+   *
+   * Unlike the three fields above, this is not a DFT parameter and is not kept
+   * off the screen: being flat is geometry, and the user is looking at it. It
+   * crosses the boundary because only the engine can say whether the
+   * reflection really is a symmetry of these orbitals, and it is what decides
+   * whether the pi surface is offered at all - a molecule without one has
+   * nothing to draw for it (`DensityRequest`).
+   */
+  hasPi: boolean;
+  /**
    * Present only when this came from an `optimize` request, in which case the
    * calculation describes the *relaxed* geometry rather than the submitted one.
    */
@@ -220,11 +231,20 @@ export interface ScfOutcome {
 /**
  * Which electrons a surface is asked for.
  *
- * `bonding` is a request, not an answer: the engine picks how to show where the
- * bonds are, because only it knows whether the molecule has a pi system. What it
- * chose comes back in {@link IsoMesh.channel}.
+ * Two of the three name what comes back. `bonding` is the odd one: a request
+ * rather than an answer, which the engine settles by picking the sharper of the
+ * two pictures of where the bonds are - the pi system when the molecule has one,
+ * the deformation density otherwise. What it chose comes back in
+ * {@link IsoMesh.channel}.
+ *
+ * Which is why `deformation` is here beside it. A planar molecule's bonding
+ * request is always answered with its pi system, so without a way to ask for the
+ * deformation density by name there would be no way to see it for a benzene at
+ * all - and it is the picture that shows the lone pairs and the depleted
+ * regions, which the pi surface does not. Any molecule has one
+ * ({@link ScfOutcome.hasPi} says which have the other).
  */
-export type DensityRequest = 'total' | 'bonding';
+export type DensityRequest = 'total' | 'bonding' | 'deformation';
 
 /**
  * What a surface actually shows.
@@ -315,7 +335,12 @@ export type WorkerRequest =
       level?: ModelLevel;
       stop?: Int32Array | null;
     }
-  /** Cuts the density of the last `scf` or `optimize` request at a new level. */
+  /**
+   * Cuts the density of the last `scf` or `optimize` request at a new level.
+   *
+   * The worker keeps one sampled lattice per channel it has been asked for, so
+   * only the first request for each is slow; the rest are marching cubes alone.
+   */
   | { id: number; type: 'isosurface'; channel: DensityRequest; isoLevel: number };
 
 /**

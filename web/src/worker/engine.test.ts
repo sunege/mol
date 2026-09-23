@@ -11,14 +11,18 @@
  *
  * The level names (`ModelLevel`) are spelled twice in the same way. A mismatch
  * there is loud - the engine refuses a name it does not know - but only the
- * real module can say that each name reaches the basis it is meant to.
+ * real module can say that each name reaches the basis it is meant to. So are
+ * the density channels (`DensityRequest`), where the engine also decides which
+ * of them a molecule is offered at all.
  *
  * This runs the artifact in `web/src/wasm/`, which CI checks is current with
  * the Rust source, and needs WebAssembly SIMD (Node has had it since 16.4).
  */
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { initSync, optimize, scf } from '../wasm/dft_wasm.js';
+import { initSync, optimize, scf, type Calculation } from '../wasm/dft_wasm.js';
+import { PRESETS, toWorkerArrays } from '../molecules/presets';
+import type { SceneAtom } from '../scene/viewer';
 import {
   hasUsableStructure,
   progressFromEngine,
@@ -39,6 +43,13 @@ const WATER = {
   z: new Uint8Array([8, 1, 1]),
   xyz: new Float64Array([0, 0, 0.1173, 0, 0.7572, -0.4693, 0, -0.7572, -0.4693]),
 };
+
+/** A shape the panel offers, so the molecules here are the ones a user picks. */
+function preset(id: string): SceneAtom[] {
+  const found = PRESETS.find((each) => each.id === id);
+  if (!found) throw new Error(`no preset ${id}`);
+  return found.atoms;
+}
 
 type Heard = { progress: CalculationProgress } | { step: number };
 
@@ -282,6 +293,68 @@ describe('the level a calculation is asked for', { timeout: 60_000 }, () => {
       );
     }
     expect(heard).toEqual([]);
+  });
+});
+
+/**
+ * The three density channels, which are spelled in `crates/dft-wasm` and in
+ * `DensityRequest` and meet only here.
+ *
+ * Two of them name what comes back. `"bonding"` is a question, and `hasPi` is
+ * how the interface knows in advance which way the engine will answer it: it
+ * offers the button only where there is a pi system, so the two must agree
+ * about every molecule.
+ */
+describe('the electrons a surface is asked for', { timeout: 120_000 }, () => {
+  const solve = (atoms: SceneAtom[]) => {
+    const { z, xyz } = toWorkerArrays(atoms);
+    const calculation = scf(z, xyz);
+    const summary = calculation.summary() as { converged: boolean; hasPi: boolean };
+    expect(summary.converged).toBe(true);
+    return { calculation, summary };
+  };
+
+  /** What the engine drew, and how many faces each side of it came to. */
+  const cut = (calculation: Calculation, channel: string) => {
+    const iso = calculation.isosurface(channel, 0.02);
+    const drawn = {
+      channel: iso.channel,
+      positive: iso.positiveIndices.length / 3,
+      negative: iso.negativeIndices.length / 3,
+    };
+    iso.free();
+    return drawn;
+  };
+
+  it('answers a flat ring with its pi system, and its deformation density by name', () => {
+    const { calculation, summary } = solve(preset('c6h6'));
+    expect(summary.hasPi).toBe(true);
+
+    // The sharper picture, which is the one the bonding button exists for.
+    expect(cut(calculation, 'bonding').channel).toBe('pi');
+    // And the other one, which a flat molecule could not otherwise reach: it is
+    // signed, so it has a surface on each side of zero - electrons gained in
+    // the bonds, electrons lost from around the atoms.
+    const deformation = cut(calculation, 'deformation');
+    expect(deformation.channel).toBe('deformation');
+    expect(deformation.positive).toBeGreaterThan(0);
+    expect(deformation.negative).toBeGreaterThan(0);
+    calculation.free();
+  });
+
+  it('has no pi system to offer for a tetrahedron, and says so before it is asked', () => {
+    const { calculation, summary } = solve(preset('ch4'));
+    expect(summary.hasPi).toBe(false);
+    // Asked anyway, it answers with the picture any molecule has - the same one
+    // the deformation button asks for by name.
+    expect(cut(calculation, 'bonding')).toEqual(cut(calculation, 'deformation'));
+    calculation.free();
+  });
+
+  it('refuses a channel it does not know', () => {
+    const { calculation } = solve(preset('h2o'));
+    expect(() => calculation.isosurface('pi', 0.02)).toThrow('unknown density channel');
+    calculation.free();
   });
 });
 

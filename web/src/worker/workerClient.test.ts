@@ -102,6 +102,7 @@ function outcome(extra: Partial<ScfOutcome> = {}): ScfOutcome {
     homoLumoGap: 0.25,
     basisFunctions: 7,
     electronsOnGrid: 9.99999,
+    hasPi: false,
     elapsedMs: 880,
     ...extra,
   };

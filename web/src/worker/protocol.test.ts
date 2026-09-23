@@ -3,6 +3,7 @@ import { PRESETS, toWorkerArrays } from '../molecules/presets';
 import { hasUsableStructure, isTerminal, progressFromEngine } from './protocol';
 import type {
   CalculationProgress,
+  DensityRequest,
   IsoMesh,
   OptimizationOutcome,
   OptimizationReason,
@@ -59,6 +60,7 @@ describe('worker protocol', () => {
       homoLumoGap: 0.2515,
       basisFunctions: 7,
       electronsOnGrid: 9.999991,
+      hasPi: false,
       elapsedMs: 312.5,
     };
     const response: WorkerResponse = { id: 3, type: 'scf', result: outcome };
@@ -149,10 +151,13 @@ describe('worker protocol', () => {
 
   it('asks for a channel and a threshold without resending the geometry', () => {
     // The point of keeping the density in the worker: a threshold change is a
-    // number, not a molecule. The channel is a request rather than an answer -
-    // only the engine knows whether this molecule has a pi system.
-    const request: WorkerRequest = { id: 8, type: 'isosurface', channel: 'bonding', isoLevel: 0.02 };
-    expect(structuredClone(request)).toEqual(request);
+    // number, not a molecule. One of the three channels is a request rather
+    // than an answer - only the engine knows whether this molecule has a pi
+    // system - and the other two name what comes back.
+    for (const channel of ['total', 'bonding', 'deformation'] as DensityRequest[]) {
+      const request: WorkerRequest = { id: 8, type: 'isosurface', channel, isoLevel: 0.02 };
+      expect(structuredClone(request)).toEqual(request);
+    }
   });
 
   it('reports a failed geometry as an error response, not a thrown value', () => {
@@ -176,6 +181,7 @@ describe('worker protocol', () => {
         homoLumoGap: null,
         basisFunctions: 2,
         electronsOnGrid: 2,
+        hasPi: false,
         elapsedMs: 10,
       },
     };
@@ -211,6 +217,7 @@ describe('worker protocol', () => {
         homoLumoGap: 0.08,
         basisFunctions: 10,
         electronsOnGrid: 16.0,
+        hasPi: false,
         elapsedMs: 250,
       },
     };
@@ -393,6 +400,9 @@ function convergedOutcome(): ScfOutcome {
     homoLumoGap: 0.2515,
     basisFunctions: 7,
     electronsOnGrid: 9.999991,
+    // Water: three atoms lie in a plane whatever they do, so there is no pi
+    // system to be had.
+    hasPi: false,
     elapsedMs: 312.5,
   };
 }
