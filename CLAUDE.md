@@ -2,16 +2,15 @@
 
 ブラウザ上で本物の DFT（Rust → WebAssembly）を回し、化学を知らない人が原子を置くだけで
 (1) 安定な形へ緩和するアニメーションと (2) 電子密度の等値面を見られるアプリ。
-**v1（P0〜P7）・v2（P8〜P10）・v3（V3-1〜V3-9）・v4（V4-1〜V4-10）完了、Vercel にデプロイ済み。**
-**次にやるのは v5（パネルを「計算」「観察」に分け、記録をツリーにする）。着手は
-[docs/v5/README.md](docs/v5/README.md)（板）から。1 チケット = 1 セッションで、板とチケット 1 枚
-だけ読めば着手できる。**
+**v1（P0〜P7）・v2（P8〜P10）・v3（V3-1〜V3-9）・v4（V4-1〜V4-10）・v5（V5-1〜V5-11）完了、
+Vercel にデプロイ済み。** 次の版は未計画（候補は「状態と今後」）。v3〜v5 と同じく、計画したら
+板（`docs/vN/README.md`）とチケットに分け、1 チケット = 1 セッションで進める。
 
 **このファイルは毎回読み込まれるので、規約と現状だけを短く置く。** 各ファイルの先頭コメントが
 設計と理由を書いているので、細部はそこを読む。経緯・実測・却下した案・数字の出どころは
 [docs/dev-notes.md](docs/dev-notes.md)（自動では読まれない。触る領域の節だけ読む）。
 
-- v5 のチケット: [docs/v5/README.md](docs/v5/README.md)（板）。
+- v5 のチケット（完了）: [docs/v5/README.md](docs/v5/README.md)（板）。
   **なぜこの形か**だけ: [docs/plan-v5.md](docs/plan-v5.md)
 - v4 のチケット: [docs/v4/README.md](docs/v4/README.md)（板）。
   **なぜこの形か**だけ: [docs/plan-v4.md](docs/plan-v4.md)
@@ -131,6 +130,24 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
 - **編集 / 観測モード。** ポインタとキーの解釈は `gestures.ts` だけ（観測モードは構造を変える
   動作を返さない）。計算の開始時に観測モードへ、発散・エラー・中止なら開始前のモードへ戻す
   （計算中にユーザーが選んだモードは戻さない）。計測は原子の並びが変わる操作で消す。
+- **パネルのタブ＝モード**（v5）: 「計算」＝編集、「観察」＝観測（`components/Tabs.tsx`）。選ばれた
+  タブは `mode` そのもので、タブ用の状態を持たない（押すと `chooseMode`、描くのは 1 枚だけ）。
+  例外は 720px 以下の「記録」タブだけ（App の `narrowRecords`、`panelTabs.ts`）。状態・全エネルギー・
+  主ボタン 2 枠は `StatusHeader`（スクロールしない。2 枠の表は `actions.ts`）。
+- **ボタンは 4 つの型だけ**（`components/controls.tsx`: `Segmented`・`Choices`・`ActionGrid`・
+  `IconButton`、見た目は `.btn` の 1 クラス、アイコンは `icons.tsx` のインライン SVG）。**使えないときは
+  消さずに無効**（規約で「出さない」もの ＝ π の選択肢・2 原子の「近づけてみる」は縦に積む場所に）。
+  **DFT を回すボタンは `RunButton`**（緑 + ▶。止めるボタンは素の `.btn`）で、ほかに緑は使わない。
+- **記録は左の欄のツリー**（`RecordExplorer`、分子 › 段 › 記録、同じ谷は代表の下に畳む、探索の候補も
+  「形を探す」の先頭に入る。木は `records/tree.ts`、開閉は `localStorage` の `mol.explorer` で
+  **押したノードだけ**覚える。**谷の開閉の鍵は谷の最古の記録**、候補の時計は欄の中だけ `useNow`）。
+  **狭い画面では記録タブの中**で、欄は 1 か所にだけ描く（`foldable={!narrow}`）。
+- **近づけてみるは画面の 2 原子だけ**（組の選択肢は無い。`scanPairFor`）。マーカーは編集として
+  原子を置き、**止まって 400 ms で一点計算**、見ていた軌道は `carryPick`（添字ではなく対称性と順位）で
+  選び直す。はしごは `orbitalsOpen || scanOpen`（1 つの値）で取り、選んだ段を捨てるのは分子軌道を
+  閉じたときだけ。
+- **操作の説明と「全体表示」は 3D の上**（下端の帯 `viewportHint`、`pointer-events: none`、WebGL が
+  動くときだけ／右下の `IconButton`）。パネルには置かない。
 - **段の選択（`level`）は次の計算のもの**（文言は `components/level.ts`）。App は client に**いつも
   明示して渡し**、計算中は固める。**画面の数値の段は別の `resultLevel`**（状態の行に出す）。
   記録の等値面は選択ではなく**記録の段**で解く（`levelOfRecord`）。
@@ -245,30 +262,11 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   非結合性、`bondClause`）。原子軌道の名前（1s/2s/2p）は**本数で読む**。**σ/π の \* は同種の二原子なら
   反転の対称性（σg・πu が結合性）、異種なら重なり占有数**で、図 2 枚と言葉が同じ `verdictBySymmetry` /
   `diatomicName` を通る（N₂ の 3σg は重なり占有数では −0.063）。
-- **v5 は「パネルの並べ方」だけ**（2026-09-24 計画、V5-1〜V5-11）: パネルを「計算」「観察」の
-  2 タブ（**タブ＝編集／観測モード**）に分け、状態と主ボタンを上に固定、記録は左の欄の
-  **分子 › 段 › 記録のツリー**（同じ谷は畳む。探索の候補も入る）。ボタンは 4 つの型だけで、
-  **使えないときは消さずに無効**。エンジン・Worker の契約・`.wasm` は触らない。理由は plan-v5.md、
-  実測は dev-notes「v5-0 の実測」。**V5-1 完了**: 型は `components/controls.tsx`、アイコンは
-  `icons.tsx`（インライン SVG）、**見た目は `.btn` の 1 クラス**（`.row button` の CSS は無い）。**V5-2 完了**: 状態と主ボタンは
-  `StatusHeader`（`.panel-head`、スクロールしない）、2 枠の表は `components/actions.ts`、文言は `status.ts`。
-  **V5-3 完了**: タブは `components/Tabs.tsx`（`Tabs` / `TabPanel`）で、**選ばれたタブは `mode` そのもの**
-  （押すと `chooseMode`、描くのは 1 枚だけ）。記録は当面タブパネルの外（V5-8 で左へ）。
-  **V5-4 完了**: 操作の説明は 3D の下端の帯（`viewportHint(mode, atomCount)`、`pointer-events: none`、
-  WebGL が動くときだけ）、「全体表示」は 3D の右下の `IconButton` だけ（パネルには無い）。
-  **V5-5 完了**: 畳める節は `components/Fold.tsx`（予告は閉じているときだけ見出しの右に 1 行）、
-  電子の雲は `Choices`（説明は `density.ts` の `channelNote`、軌道が出ている間は値 `null`）。
-  **V5-6 完了**: 「近づけてみる」は分子軌道の後ろの別の `Fold`（`scanOpen`）。**はしごは
-  `orbitalsOpen || scanOpen`（1 つの値）で取り**、選んだ段を捨てるのは分子軌道を閉じたときだけ。
-  **V5-7 完了**: 記録の木は `records/tree.ts`（`buildRecordTree` / `defaultExpanded`、文言は `records.ts`）。
-  **谷の開閉の鍵は谷の最古の記録**（代表は探索のたびに入れ替わる）。
-  **V5-8 完了**: 記録は左の欄 `RecordExplorer`（木は `RecordTree`、「…」は `MoreMenu`、文言は
-  `EXPLORER_WORDS`）。開閉と畳みは `localStorage` の `mol.explorer`（`explorer.ts`、**押したノードだけ**覚え、
-  読み書きは try/catch）。**開いた記録の祖先は開く**（1 回だけ書き込み、閉じ直せる）。
-  **V5-9 完了**: 探索の候補は木の中（`buildRecordTree(groups, pending)`、「形を探す」の段の先頭、
-  記録になった候補は描かない）。**候補の時計は欄の中だけ**（`useNow`、計算中のあいだだけ）。
-  **V5-10 完了**: 720px 以下（`useNarrow`）はタブが 3 つ（`panelTabs.ts`）。**「記録」だけはモードではなく
-  App の `narrowRecords`**（`chooseMode` と `observeWhileRunning` で下ろす）。**欄は 1 か所にだけ描く**（左の列か記録タブ、`foldable={!narrow}`）。
+- **v5 は「パネルの並べ方」だけ**（2026-09-24、V5-1〜V5-11 完了、Firefox と講義 PC で確認済み）:
+  パネルを「計算」「観察」の 2 タブ（＝モード）に分け、状態と主ボタンを上に固定、記録を左の欄の
+  ツリーへ。エンジン・Worker の契約・`.wasm` は触っていない。1366×768 で H₂O の観察タブは
+  スクロールなし（v5 の前はパネル 2,168px の最下部に状態）。規約は上の「UI」、理由は plan-v5.md、
+  実測は dev-notes「v5-0 の実測」「v5 の実測」、各チケットの細部は dev-notes の「V5-n の実装メモ」。
 - **記録の置き場所**: 経緯・実測・却下した案は dev-notes の「フェーズの記録」に足し、この
   CLAUDE.md には規約と現状だけを 1〜2 行で足す。
 
