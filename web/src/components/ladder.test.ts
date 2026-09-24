@@ -11,7 +11,16 @@ import type { OrbitalLevel, SpinChannel } from '../worker/protocol';
 function rungs(spin: SpinChannel, rows: Array<[number, number, number]>): OrbitalLevel[] {
   let first = 0;
   return rows.map(([energy, count, occupation]) => {
-    const level = { spin, first, count, occupation, energy, parity: null, partner: null };
+    const level = {
+      spin,
+      first,
+      count,
+      occupation,
+      energy,
+      parity: null,
+      inversion: null,
+      partner: null,
+    };
     first += count;
     return level;
   });

@@ -245,6 +245,11 @@ struct OrbitalLevelOutput {
     energy: f64,
     /// `1`, `-1`, or `null` where the molecular plane does not sort this rung.
     parity: Option<i32>,
+    /// `1` (gerade), `-1` (ungerade), or `null`: inversion through the midpoint,
+    /// which only a homonuclear diatomic has. For two like atoms it is what the
+    /// textbook's star means - sigma_g and pi_u bonding, sigma_u and pi_g
+    /// antibonding - so the interface names the rung by it.
+    inversion: Option<i32>,
     /// The rung of the other spin holding the same orbital, as an index into the
     /// array this arrives in, or `null` when there is none to name.
     partner: Option<usize>,
@@ -348,7 +353,8 @@ impl Calculation {
                     count: group.len(),
                     occupation: head.occupation,
                     energy: head.energy,
-                    parity: level_parity(&set[group.clone()]),
+                    parity: level_parity(&set[group.clone()], |info| info.parity),
+                    inversion: level_parity(&set[group.clone()], |info| info.inversion),
                     partner: pairing.as_ref().and_then(|pairing| {
                         partner_level(channel, group.start, pairing, &groups, &offsets)
                     }),
@@ -552,23 +558,33 @@ fn cut(name: &str, grid: &DensityGrid, iso_level: f64) -> IsoMesh {
 /// same argument as for showing a degenerate rung whole: within it the
 /// individual orbitals are an arbitrary rotation, so a single member's parity is
 /// not a fact about the rung.
-fn level_parity(level: &[OrbitalInfo]) -> Option<i32> {
+///
+/// The same holds for the inversion parity of a homonuclear diatomic, which
+/// `parity_of` picks out instead of the mirror's.
+fn level_parity(
+    level: &[OrbitalInfo],
+    parity_of: impl Fn(&OrbitalInfo) -> Option<f64>,
+) -> Option<i32> {
     let mut sorted = None;
     for orbital in level {
-        let parity = orbital.parity?;
-        let sign = if parity >= PARITY_THRESHOLD {
-            1
-        } else if parity <= -PARITY_THRESHOLD {
-            -1
-        } else {
-            return None;
-        };
+        let sign = parity_sign(parity_of(orbital)?)?;
         if sorted.is_some_and(|held| held != sign) {
             return None;
         }
         sorted = Some(sign);
     }
     sorted
+}
+
+/// `1` or `-1` for a parity within [`PARITY_THRESHOLD`] of it, otherwise `None`.
+fn parity_sign(parity: f64) -> Option<i32> {
+    if parity >= PARITY_THRESHOLD {
+        Some(1)
+    } else if parity <= -PARITY_THRESHOLD {
+        Some(-1)
+    } else {
+        None
+    }
 }
 
 /// The rung of the other spin that holds the same orbital as the rung beginning
@@ -989,6 +1005,13 @@ struct ScanLevelOutput {
     /// zero then one for a molecule with unpaired electrons, in the order
     /// [`SpinChannel::of`] reads them.
     spin: usize,
+    /// Overlap population between the two nuclei, on `orbitalCharacter`'s
+    /// scale: positive bonding, negative antibonding. What names a rung of two
+    /// unlike atoms, which have no inversion to name it by.
+    overlap: f64,
+    /// `1`, `-1` or `null`, as [`OrbitalLevelOutput`]'s `inversion`. Also what
+    /// a line is followed by: sigma_g and sigma_u are two species and may cross.
+    inversion: Option<i32>,
 }
 
 /// One separation of a distance scan, as `ScanPoint` in
@@ -1068,12 +1091,17 @@ pub fn scan(
                         occupation: level.occupation,
                         count: level.count,
                         spin: level.spin,
+                        overlap: level.overlap,
+                        inversion: level.inversion.and_then(parity_sign),
                     })
                     .collect(),
             };
             // A callback that cannot be built or that throws stops the scan the
             // way it stops a relaxation: there is nobody left to send points to.
-            let Ok(value) = serde_wasm_bindgen::to_value(&payload) else {
+            // A missing inversion is `null`, as the contract says, where the
+            // default serialiser would write `undefined`.
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+            let Ok(value) = payload.serialize(&serializer) else {
                 return false;
             };
             on_point.call1(&JsValue::NULL, &value).is_ok()

@@ -907,3 +907,10 @@ circle.scan-total {
   fill: #8fc0ff;
   letter-spacing: 0.04em;
 }
+
+/* The textbook's name for a level: 1s / 2s / 2p beside a free atom's, σ / σ* /
+   π / π* beside the molecule's (V4-10). Quieter than the HOMO / LUMO tags,
+   which are the two to find first. */
+.correlation-name {
+  fill: #b4bfcf;
+}

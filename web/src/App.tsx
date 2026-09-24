@@ -26,6 +26,7 @@ import {
   atomFraction,
   presetFor,
   rangeAround,
+  type RungMakeup,
   type ScanPreset,
 } from './components/scan';
 import { Elapsed, ProgressOverlay } from './components/ProgressOverlay';
@@ -217,7 +218,7 @@ export default function App() {
   // correlation diagram. Only ever fetched for a molecule of two atoms, which
   // is the only shape that diagram can be drawn for, and one round trip per
   // rung: the same `orbitalCharacter` the words above are read out of.
-  const [orbitalWeights, setOrbitalWeights] = useState<number[][]>([]);
+  const [orbitalWeights, setOrbitalWeights] = useState<RungMakeup[]>([]);
   // The orbital levels of the two elements on screen as free atoms, which are
   // the two ends of that diagram. About the elements rather than about any
   // calculation, so it survives everything except a change of element.
@@ -1101,7 +1102,8 @@ export default function App() {
 
   /**
    * How much of each rung sits on each nucleus, which is what the lines between
-   * the columns of the correlation diagram are drawn from.
+   * the columns of the correlation diagram are drawn from, and whether it is
+   * bonding between them, which is the star on its name (V4-10).
    *
    * One round trip per rung, over the same `orbitalCharacter` the words under
    * the ladder are read out of, and a degenerate rung is asked about once: its
@@ -1116,11 +1118,14 @@ export default function App() {
     if (orbitalLevels === null || atomCount !== 2 || !client) return;
     let live = true;
     void (async () => {
-      const found: number[][] = [];
+      const found: RungMakeup[] = [];
       for (const level of orbitalLevels) {
         try {
           const character = await client.orbitalCharacter(level.first, level.spin);
-          found.push([0, 1].map((atom) => atomFraction(character.populations, 2, atom)));
+          found.push({
+            shares: [0, 1].map((atom) => atomFraction(character.populations, 2, atom)),
+            overlap: character.populations[1] ?? 0,
+          });
         } catch (e) {
           // The worker was replaced, or it is holding nothing: no lines rather
           // than lines belonging to another calculation.

@@ -36,12 +36,14 @@
 import type { OrbitalLevel, ScanLevel, ScanPoint } from '../worker/protocol';
 import { foldCore, layout } from './ladder';
 import {
+  BOND_POPULATION_THRESHOLD,
   coreText,
   frontierLabel,
   occupationMark,
   occupationText,
   orbitalColumns,
   spinHeading,
+  verdictBySymmetry,
   type Frontier,
 } from './orbital';
 import { SAME_VALLEY_KJ_PER_MOL } from '../records/log';
@@ -211,7 +213,11 @@ export function markerLabel(distance: number): string {
 
 /** The viewBox, in the units the ladder is drawn in so the two figures match. */
 const WIDTH = 260;
-const PLOT_LEFT = 12;
+/**
+ * Room on the left for a line's name, written just outside the plot: 12 held
+ * a `σ` or a `π`, and a starred one is about 11 units wide (V4-10).
+ */
+const PLOT_LEFT = 16;
 const PLOT_RIGHT = 248;
 /** Baseline of a panel's heading, above the plot it names. */
 const HEADING_GAP = 5;
@@ -249,7 +255,10 @@ export interface ScanCurve {
   count: number;
   /** Unbroken runs of the line: a separation that would not solve breaks it. */
   segments: ScanXY[][];
-  /** `σ` or `π`, at the left-hand end of the line, or null for neither. */
+  /**
+   * `σ`, `σ*`, `π` or `π*`, at the left-hand end of the line, or null for
+   * none ({@link diatomicName}).
+   */
   species: ScanText | null;
   /**
    * The electrons in one of its orbitals, where the marker stands.
@@ -412,7 +421,8 @@ export function buildScan(
         };
 
   const spins = new Set(points.flatMap((point) => point.levels.map((level) => level.spin)));
-  const curves = buildCurves(points, folded, spins.size > 1, xOf, levelY, marker);
+  const reference = solved.length === 0 ? null : points.indexOf(deepestOf(solved));
+  const curves = buildCurves(points, folded, spins.size > 1, xOf, levelY, marker, reference);
   const lowest = lowestPoint(points);
   return {
     width: WIDTH,
@@ -500,9 +510,14 @@ function buildCurves(
   xOf: (distance: number) => number,
   levelY: (energy: number) => number,
   marker: ScanMarker | null,
+  reference: number | null,
 ): ScanCurve[] {
   const curves = new Map<string, ScanCurve>();
   const samples = new Map<string, Array<ScanXY | null>>();
+  // What each line is named by: its level at the deepest separation, which is
+  // the molecule the pair makes (for two unlike atoms, where the name is read
+  // off the overlap population and that changes along the line).
+  const named = new Map<string, ScanLevel>();
   points.forEach((point, index) => {
     point.levels.forEach((level, position) => {
       const key = keyAt(point.levels, position);
@@ -517,12 +532,13 @@ function buildCurves(
           segments: [],
           species: null,
           mark: null,
-          label: curveLabel(key, level, twoSpins),
+          label: '',
         };
         curves.set(key, curve);
         samples.set(key, Array.from({ length: points.length }, () => null));
       }
       if (!point.converged) return;
+      if (index === reference || !named.has(key)) named.set(key, level);
       samples.get(key)![index] = { x: xOf(point.distance), y: levelY(level.energy) };
       if (marker !== null && marker.index === index) {
         // One spin's marks to the left of the marker and the other's to the
@@ -540,7 +556,10 @@ function buildCurves(
   for (const [key, curve] of curves) {
     curve.segments = split(samples.get(key)!);
     const start = curve.segments[0]?.[0];
-    const species = speciesOf(curve.count);
+    const level = named.get(key);
+    const species =
+      level === undefined ? '' : diatomicName(level.count, level.inversion, level.overlap);
+    if (level !== undefined) curve.label = curveLabel(key, level, species, twoSpins);
     // Outside the plot, at the end of the line where the levels are furthest
     // apart: two lines that have run together at the right-hand end would have
     // their names on top of each other. A molecule with unpaired electrons
@@ -594,9 +613,14 @@ function keyAt(levels: readonly ScanLevel[], position: number): string {
   const level = levels[position];
   let ordinal = 0;
   for (let i = 0; i < position; i++) {
-    if (levels[i].spin === level.spin && levels[i].count === level.count) ordinal += 1;
+    const other = levels[i];
+    if (other.spin === level.spin && other.count === level.count) {
+      if (other.inversion === level.inversion) ordinal += 1;
+    }
   }
-  return `${level.spin}:${level.count}:${ordinal}`;
+  // Two like atoms: gerade and ungerade are two species, which may cross.
+  const parity = level.inversion === null ? '' : level.inversion === 1 ? 'g' : 'u';
+  return `${level.spin}:${level.count}${parity}:${ordinal}`;
 }
 
 /**
@@ -611,11 +635,34 @@ function speciesOf(count: number): string {
   return count === 2 ? 'π' : '';
 }
 
+/**
+ * The name the textbook gives a rung of a diatomic: σ or π from how many
+ * orbitals are on it, starred where it is antibonding. `''` where that cannot
+ * be said, rather than a guess.
+ *
+ * Two like atoms are named by symmetry ({@link verdictBySymmetry}); two unlike
+ * ones by the overlap population between them, past the threshold the words
+ * under the ladder use, so a σ* here and "反結合性" there never disagree. A
+ * rung that is neither - hydrogen fluoride's lone pairs - carries no star, as
+ * in the textbook.
+ */
+export function diatomicName(
+  count: number,
+  inversion: 1 | -1 | null,
+  overlap: number | undefined,
+): string {
+  const species = speciesOf(count);
+  if (species === '') return '';
+  const bySymmetry = verdictBySymmetry(count, inversion);
+  if (bySymmetry !== null) return bySymmetry === 'antibonding' ? `${species}*` : species;
+  if (overlap === undefined) return '';
+  return overlap < -BOND_POPULATION_THRESHOLD ? `${species}*` : species;
+}
+
 /** One line, read aloud: where it sits in the picture is all it otherwise says. */
-function curveLabel(key: string, level: ScanLevel, twoSpins: boolean): string {
+function curveLabel(key: string, level: ScanLevel, species: string, twoSpins: boolean): string {
   const ordinal = Number(key.split(':')[2]) + 1;
   const said = twoSpins ? [spinHeading(level.spin === 0 ? 'up' : 'down') ?? ''] : [];
-  const species = speciesOf(level.count);
   said.push(species === '' ? `下から ${ordinal} つめ` : `${species} の下から ${ordinal} つめ`);
   said.push(occupationText(level.occupation));
   return said.join('、');
@@ -754,8 +801,22 @@ function samples(curve: ScanCurve): number {
 
 // --- the correlation diagram ----------------------------------------------
 
-/** Room for the column headings above the diagram. */
-const CORR_TOP = 22;
+/**
+ * Room for the column headings above the diagram.
+ *
+ * The top rung's circles and its HOMO or LUMO label stand about ten units above
+ * its line, so the headings sit well clear of that (V4-10: at 22, O2's
+ * "下向き" was written over the circles of the rung under it).
+ */
+const CORR_TOP = 32;
+const CORR_HEADING_Y = 13;
+/**
+ * The width of a free atom's column: its line, and the name of the atomic
+ * orbital on the outside of it. The molecule's columns share what is left,
+ * which for a molecule with unpaired electrons is what makes room for a name
+ * on the inner side of each of its two columns.
+ */
+const CORR_ATOM_SPAN = 50;
 const CORR_STEP = 18;
 const CORR_MIN_BAND = 140;
 const CORR_MAX_BAND = 420;
@@ -808,6 +869,16 @@ function columnHeading(heading: string | null): string {
  */
 const LINK_FLOOR = 0.18;
 
+/**
+ * What one rung of the molecule is made of, from `orbitalCharacter`: how much
+ * of it sits on each of the two atoms ({@link atomFraction}), and the overlap
+ * population between them, whose sign is whether it is bonding.
+ */
+export interface RungMakeup {
+  shares: readonly number[];
+  overlap: number;
+}
+
 /** One line of the diagram. */
 export interface CorrelationRung {
   key: string;
@@ -824,6 +895,13 @@ export interface CorrelationRung {
   tagX: number;
   tagAnchor: 'start' | 'end';
   label: string;
+  /**
+   * What the textbook calls it: `2p` for a free atom's, `σ*` or `π` for the
+   * molecule's. Written on the far side of the lines from the tag.
+   */
+  name: string;
+  nameX: number;
+  nameAnchor: 'start' | 'end';
   /** Orbitals on the rung, which is how many lines are drawn side by side. */
   count: number;
 }
@@ -875,6 +953,42 @@ export function atomFraction(populations: ArrayLike<number>, atoms: number, atom
   return total === 0 ? 0 : here / total;
 }
 
+/** The atomic orbitals of H-Ar in this description, one name per degenerate set. */
+const ATOMIC_SHELLS: ReadonlyArray<readonly [string, number]> = [
+  ['1s', 1],
+  ['2s', 1],
+  ['2p', 3],
+  ['3s', 1],
+  ['3p', 3],
+];
+
+/**
+ * The name of each of a free atom's orbitals, lowest first, or `''` for the
+ * second and third of a p set (the name is written once per height).
+ *
+ * Read off the count, not the energy: the smallest description has one
+ * function per atomic orbital, so the n-th degenerate set from the bottom is
+ * the n-th shell of the table above, 1s < 2s < 2p < 3s < 3p for every neutral
+ * atom from H to Ar. Where the sets do not come out the size the table says,
+ * nothing is named rather than something misnamed.
+ */
+export function atomicOrbitalNames(energies: readonly number[]): string[] {
+  const names: string[] = [];
+  let at = 0;
+  for (const [name, size] of ATOMIC_SHELLS) {
+    if (at >= energies.length) break;
+    const set = energies.slice(at, at + size);
+    const sameHeight =
+      set.length === size &&
+      set.every((energy) => Math.abs(energy - set[0]) < 1e-4) &&
+      (energies[at + size] === undefined || Math.abs(energies[at + size] - set[0]) >= 1e-4);
+    if (!sameHeight) return energies.map(() => '');
+    names.push(name, ...Array.from({ length: size - 1 }, () => ''));
+    at += size;
+  }
+  return at === energies.length ? names : energies.map(() => '');
+}
+
 /**
  * The correlation diagram: two free atoms, the molecule they make, and the
  * lines between them.
@@ -883,8 +997,8 @@ export function atomFraction(populations: ArrayLike<number>, atoms: number, atom
  * them - one column each, because a free atom is solved with its partly filled
  * shell spread evenly and so does not split by spin. `levels` is the molecule's
  * ladder, one column when it is closed and two when it is not. `weights[i]` is
- * how much of `levels[i]` sits on each of the two atoms ({@link atomFraction}),
- * and an empty list simply draws no lines between the columns.
+ * what `levels[i]` is made of ({@link RungMakeup}), and an empty list simply
+ * draws no lines between the columns and names none of the molecule's rungs.
  *
  * Every column is laid out by the ladder's own `layout` on one scale, so a rung
  * of the molecule sits at the height its energy puts it at against the atomic
@@ -896,16 +1010,20 @@ export function buildCorrelation(
   atoms: readonly (readonly number[])[],
   symbols: readonly string[],
   levels: readonly OrbitalLevel[],
-  weights: readonly (readonly number[])[],
+  makeup: readonly RungMakeup[],
 ): CorrelationFigure {
   const { core, shown } = foldCore(levels);
   const cut = shown.length === 0 ? -Infinity : Math.min(...shown.map((level) => level.energy));
   // The same electrons on either side: an atomic level below the molecule's cut
   // is the shell those folded orbitals were made out of.
-  const sides = [0, 1].map((side) => (atoms[side] ?? []).filter((energy) => energy >= cut));
+  const kept = [0, 1].map((side) => {
+    const energies = atoms[side] ?? [];
+    const names = atomicOrbitalNames(energies);
+    return energies.flatMap((energy, at) => (energy >= cut ? [{ energy, name: names[at] }] : []));
+  });
+  const sides = kept.map((side) => side.map(({ energy }) => energy));
 
   const columns = orbitalColumns(shown);
-  const places = columns.length + 2;
   const stacked = [
     ...sides[0].map((energy) => ({ energy })),
     ...shown.map((level) => ({ energy: level.energy })),
@@ -913,7 +1031,8 @@ export function buildCorrelation(
   ];
   const band = Math.max(CORR_MIN_BAND, Math.min(CORR_MAX_BAND, (stacked.length - 1) * CORR_STEP));
   const ys = layout(stacked, band).map((y) => CORR_TOP + y);
-  const span = WIDTH / places;
+  const span = (WIDTH - 2 * CORR_ATOM_SPAN) / columns.length;
+  const index = new Map(levels.map((level, at) => [level, at]));
 
   const leftYs = ys.slice(0, sides[0].length);
   const rightYs = ys.slice(ys.length - sides[1].length);
@@ -921,37 +1040,56 @@ export function buildCorrelation(
     shown.map((level, index) => [rungKey(level), ys[sides[0].length + index]]),
   );
 
-  const atomColumn = (side: number, place: number, heightOf: readonly number[]) => ({
-    key: side === 0 ? 'left' : 'right',
-    heading: symbols[side] ?? '',
-    headingY: CORR_TOP - 4,
-    x: (place + 0.5) * span,
-    rungs: sides[side].map((_, index) => ({
-      key: `${side}:${index}`,
-      x: (place + 0.5) * span,
-      y: heightOf[index],
-      half: CORR_LINE / 2,
-      lines: [(place + 0.5) * span],
-      mark: '',
-      tag: '',
-      tagX: (place + 0.5) * span,
-      tagAnchor: 'start' as const,
-      label: `${symbols[side] ?? ''} の原子の部屋`,
-      count: 1,
-    })),
-  });
+  const atomColumn = (side: number, heightOf: readonly number[]) => {
+    const x = side === 0 ? CORR_ATOM_SPAN / 2 : WIDTH - CORR_ATOM_SPAN / 2;
+    // The name goes on the outside, where no link comes in.
+    const outward = side === 0 ? -1 : 1;
+    return {
+      key: side === 0 ? 'left' : 'right',
+      heading: symbols[side] ?? '',
+      headingY: CORR_HEADING_Y,
+      x,
+      rungs: kept[side].map(({ name }, at) => ({
+        key: `${side}:${at}`,
+        x,
+        y: heightOf[at],
+        half: CORR_LINE / 2,
+        lines: [x],
+        mark: '',
+        tag: '',
+        tagX: x,
+        tagAnchor: 'start' as const,
+        label: [`${symbols[side] ?? ''} の原子の部屋`, ...(name === '' ? [] : [name])].join('、'),
+        name,
+        nameX: x + outward * (CORR_LINE / 2 + CORR_TAG_GAP),
+        nameAnchor: side === 0 ? ('end' as const) : ('start' as const),
+        count: 1,
+      })),
+    };
+  };
 
   const drawn: CorrelationColumn[] = [
-    atomColumn(0, 0, leftYs),
-    ...columns.map((column, index) => {
-      const middle = (index + 1.5) * span;
+    atomColumn(0, leftYs),
+    ...columns.map((column, at) => {
+      const middle = CORR_ATOM_SPAN + (at + 0.5) * span;
+      // Tag and name on opposite sides of the lines. The second of two spin
+      // columns is the mirror of the first, so the two names meet in the gap
+      // between the columns and each tag has the outside to itself.
+      const mirrored = columns.length === 2 && at === 1;
       return {
-        key: `mo${index}`,
+        key: `mo${at}`,
         heading: columnHeading(column.heading),
-        headingY: CORR_TOP - 4,
+        headingY: CORR_HEADING_Y,
         x: middle,
         rungs: column.rows.map((row) => {
           const half = (row.level.count * CORR_LINE + (row.level.count - 1) * CORR_LINE_GAP) / 2;
+          const name = diatomicName(
+            row.level.count,
+            row.level.inversion,
+            makeup[index.get(row.level) ?? -1]?.overlap,
+          );
+          const before = middle - half - CORR_TAG_GAP;
+          const after = middle + half + CORR_TAG_GAP;
           return {
             key: rungKey(row.level),
             x: middle,
@@ -965,22 +1103,25 @@ export function buildCorrelation(
             // Above the line rather than level with it: the links come in at
             // the rung's own height, on both sides of a middle column.
             tag: row.frontier === null ? '' : frontierLabel(row.frontier),
-            tagX: middle - half - CORR_TAG_GAP,
-            tagAnchor: 'end' as const,
-            label: rungLabel(row.level, row.frontier, column.heading),
+            tagX: mirrored ? after : before,
+            tagAnchor: mirrored ? ('start' as const) : ('end' as const),
+            label: rungLabel(row.level, row.frontier, column.heading, name),
+            name,
+            nameX: mirrored ? before : after,
+            nameAnchor: mirrored ? ('end' as const) : ('start' as const),
             count: row.level.count,
           };
         }),
       };
     }),
-    atomColumn(1, places - 1, rightYs),
+    atomColumn(1, rightYs),
   ];
 
   return {
     width: WIDTH,
     height: CORR_TOP + band + (core > 0 ? CORE_ROW : 0) + BOTTOM + 6,
     columns: drawn,
-    links: correlationLinks(columns, sides, weights, levels, drawn),
+    links: correlationLinks(columns, sides, makeup, levels, drawn),
     core: core > 0 ? foldedRow(core, CORR_TOP + band + 8) : null,
   };
 }
@@ -990,7 +1131,7 @@ export function correlationTexts(figure: CorrelationFigure): string[] {
   return [
     ...figure.columns.flatMap((column) => [
       column.heading,
-      ...column.rungs.flatMap((rung) => [rung.mark, rung.tag, rung.label]),
+      ...column.rungs.flatMap((rung) => [rung.mark, rung.tag, rung.label, rung.name]),
     ]),
     figure.core?.text ?? '',
   ];
@@ -1004,8 +1145,10 @@ function rungLabel(
   level: OrbitalLevel,
   frontier: Frontier | null,
   heading: string | null,
+  name: string,
 ): string {
   const said = heading === null ? ['分子の部屋'] : [heading];
+  if (name !== '') said.push(name);
   said.push(occupationText(level.occupation));
   if (frontier !== null) said.push(frontierLabel(frontier));
   return said.join('、');
@@ -1029,7 +1172,7 @@ function rungLabel(
 function correlationLinks(
   columns: readonly { rows: readonly { level: OrbitalLevel }[] }[],
   sides: readonly (readonly number[])[],
-  weights: readonly (readonly number[])[],
+  makeup: readonly RungMakeup[],
   levels: readonly OrbitalLevel[],
   drawn: readonly CorrelationColumn[],
 ): CorrelationLink[] {
@@ -1043,7 +1186,7 @@ function correlationLinks(
       // The rows come highest first, and the running total counts from the
       // bottom: the lowest orbital is the one that uses up the lowest level.
       for (const row of [...column.rows].reverse()) {
-        const share = (weights[index.get(row.level) ?? -1]?.[side] ?? 0) * row.level.count;
+        const share = (makeup[index.get(row.level) ?? -1]?.shares[side] ?? 0) * row.level.count;
         const slot = bestSlot(total, total + share, sides[side].length);
         total += share;
         if (share < LINK_FLOOR || slot === null) continue;

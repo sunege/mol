@@ -280,7 +280,7 @@ describe('the worker client', () => {
       distance,
       energy: -1.1,
       converged: true,
-      levels: [{ energy: -0.36, occupation: 2, count: 1, spin: 0 }],
+      levels: [{ energy: -0.36, occupation: 2, count: 1, spin: 0, overlap: 0, inversion: null }],
     });
 
     const pending = client

@@ -81,6 +81,10 @@ pub struct OrbitalInfo {
     /// symmetric about it and near -1 for a pi orbital. `None` when the
     /// molecule has no plane to reflect in.
     pub parity: Option<f64>,
+    /// `<psi|i psi>` for inversion through the midpoint of a homonuclear
+    /// diatomic: near +1 for a gerade orbital, near -1 for an ungerade one.
+    /// `None` for every other molecule ([`bonding::inversion_matrix`]).
+    pub inversion: Option<f64>,
 }
 
 impl OrbitalInfo {
@@ -97,9 +101,11 @@ impl OrbitalInfo {
 /// The parities are filled in only for a planar molecule, and they are computed
 /// for the empty orbitals as well as the occupied ones - the reflection commutes
 /// with the Kohn-Sham operator whether or not an electron is in the orbital, so
-/// a pi* orbital is as cleanly labelled as a pi one.
+/// a pi* orbital is as cleanly labelled as a pi one. The inversion parities, by
+/// the same argument, only for a homonuclear diatomic.
 pub fn list(system: &System, result: &ScfResult) -> Vec<Vec<OrbitalInfo>> {
     let plane = bonding::molecular_plane(&system.molecule);
+    let inversion = bonding::inversion_matrix(&system.basis, &system.molecule);
     result
         .channels
         .iter()
@@ -107,12 +113,16 @@ pub fn list(system: &System, result: &ScfResult) -> Vec<Vec<OrbitalInfo>> {
             let parities = plane.map(|plane| {
                 bonding::mirror_parities(&system.basis, &system.overlap, &set.coefficients, &plane)
             });
+            let inversions = inversion
+                .as_ref()
+                .map(|u| bonding::parities_under(&system.overlap, u, &set.coefficients));
             (0..set.energies.len())
                 .map(|index| OrbitalInfo {
                     index,
                     energy: set.energies[index],
                     occupation: set.occupations[index],
                     parity: parities.as_ref().map(|p| p[index]),
+                    inversion: inversions.as_ref().map(|p| p[index]),
                 })
                 .collect()
         })
@@ -615,7 +625,13 @@ mod tests {
 
     #[test]
     fn degenerate_levels_are_split_where_the_energies_really_separate() {
-        let level = |energy: f64| OrbitalInfo { index: 0, energy, occupation: 0.0, parity: None };
+        let level = |energy: f64| OrbitalInfo {
+            index: 0,
+            energy,
+            occupation: 0.0,
+            parity: None,
+            inversion: None,
+        };
         // A pair well inside the tolerance, a single level, then a pair that is
         // outside it by a hair.
         let orbitals = [

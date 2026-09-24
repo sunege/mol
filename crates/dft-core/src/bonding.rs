@@ -178,11 +178,65 @@ pub fn mirror_parities(
     orbitals: &DMatrix<f64>,
     plane: &MirrorPlane,
 ) -> DVector<f64> {
-    let transformed = overlap * reflection_matrix(basis, plane) * orbitals;
+    parities_under(overlap, &reflection_matrix(basis, plane), orbitals)
+}
+
+/// `<psi_i | R psi_i>` for every orbital, for an operation `R` written in the
+/// basis as `u` (`R phi_nu = sum_mu u[mu, nu] phi_mu`).
+pub fn parities_under(
+    overlap: &DMatrix<f64>,
+    u: &DMatrix<f64>,
+    orbitals: &DMatrix<f64>,
+) -> DVector<f64> {
+    let transformed = overlap * u * orbitals;
     DVector::from_iterator(
         orbitals.ncols(),
         (0..orbitals.ncols()).map(|i| orbitals.column(i).dot(&transformed.column(i))),
     )
+}
+
+/// Inversion through the midpoint of a homonuclear diatomic, written in the
+/// basis like [`reflection_matrix`]; `None` for any other molecule.
+///
+/// This is what the textbook's star means for two like atoms: sigma_g and pi_u
+/// are the bonding orbitals, sigma_u and pi_g the antibonding ones, and it is a
+/// symmetry, not a reading of where the electrons sit. The overlap population
+/// says otherwise for nitrogen's highest occupied orbital - 3sigma_g comes out
+/// at -0.063 at the bond length (`docs/dev-notes.md`, "V4-10 の確認") - which is
+/// the s-p mixing every textbook mentions and then still calls it bonding.
+///
+/// The inversion carries each shell of one atom onto the same shell of the
+/// other, and a Cartesian monomial of degree l centred on one nucleus onto the
+/// same monomial on the other times (-1)^l. The two atoms being the same
+/// element is what makes their shells correspond one to one.
+pub fn inversion_matrix(basis: &BasisSet, molecule: &Molecule) -> Option<DMatrix<f64>> {
+    let [one, other] = molecule.atoms.as_slice() else {
+        return None;
+    };
+    if one.z != other.z {
+        return None;
+    }
+    let on = |atom: usize| -> Vec<usize> {
+        (0..basis.n_shells()).filter(|&s| basis.shells[s].center == atom).collect()
+    };
+    let (first, second) = (on(0), on(1));
+    if first.len() != second.len() {
+        return None;
+    }
+    let n = basis.n_functions();
+    let mut u = DMatrix::zeros(n, n);
+    for (&s, &t) in first.iter().zip(&second) {
+        let shell = &basis.shells[s];
+        if shell.l != basis.shells[t].l || shell.powers != basis.shells[t].powers {
+            return None;
+        }
+        let sign = if shell.l % 2 == 0 { 1.0 } else { -1.0 };
+        for i in 0..shell.powers.len() {
+            u[(basis.offset(t) + i, basis.offset(s) + i)] = sign;
+            u[(basis.offset(s) + i, basis.offset(t) + i)] = sign;
+        }
+    }
+    Some(u)
 }
 
 /// One orbital of an [`ScfResult`], named by the spin channel it belongs to.
@@ -402,6 +456,67 @@ mod tests {
         let chain: Vec<Atom> =
             (0..4).map(|i| Atom { z: 1, pos: [0.0, 0.0, i as f64 * 1.4] }).collect();
         assert_eq!(molecular_plane(&Molecule::new(chain).unwrap()), None);
+    }
+
+    /// Nitrogen along an arbitrary direction, so the inversion is not helped by
+    /// the axes.
+    fn nitrogen() -> Molecule {
+        let axis = [0.36, -0.48, 0.8];
+        let half = 1.04;
+        Molecule::new(vec![
+            Atom { z: 7, pos: [0.3 + axis[0] * half, 0.1 + axis[1] * half, axis[2] * half] },
+            Atom { z: 7, pos: [0.3 - axis[0] * half, 0.1 - axis[1] * half, -axis[2] * half] },
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn only_two_like_atoms_have_an_inversion() {
+        let basis = |molecule: &Molecule| BasisSet::sto3g(molecule).unwrap();
+        let n2 = nitrogen();
+        let u = inversion_matrix(&basis(&n2), &n2).expect("two nitrogens");
+        let identity = DMatrix::identity(10, 10);
+        assert_relative_eq!(&u * &u, identity, epsilon = 1e-12);
+
+        let hf = Molecule::new(vec![
+            Atom { z: 1, pos: [0.0, 0.0, 0.0] },
+            Atom { z: 9, pos: [0.0, 0.0, 1.73] },
+        ])
+        .unwrap();
+        assert!(inversion_matrix(&basis(&hf), &hf).is_none());
+        assert!(inversion_matrix(&basis(&benzene()), &benzene()).is_none());
+    }
+
+    /// Two independent paths again, and the textbook's order for nitrogen's
+    /// valence: 2sigma_g, 2sigma_u, the pi_u pair, 3sigma_g, the pi_g pair and
+    /// 3sigma_u - including the 3sigma_g the overlap population calls antibonding.
+    #[test]
+    fn the_inversion_matrix_agrees_with_integrating_over_the_grid() {
+        let system = System::build(nitrogen(), BasisKind::Sto3g, GridQuality::Coarse).unwrap();
+        let result = scf::run_restricted(&system, &ScfOptions::default());
+        let orbitals = &result.channels[0].coefficients;
+        let u = inversion_matrix(&system.basis, &system.molecule).unwrap();
+        let parities = parities_under(&system.overlap, &u, orbitals);
+        let midpoint = [0.3, 0.1, 0.0];
+
+        for i in [2usize, 3, 6, 9] {
+            let numerical = system.grid.integrate(|p| {
+                let image = [2.0 * midpoint[0] - p[0], 2.0 * midpoint[1] - p[1], -p[2]];
+                let here = system.basis.evaluate(p);
+                let there = system.basis.evaluate(image);
+                let psi: f64 = (0..here.len()).map(|m| orbitals[(m, i)] * here[m]).sum();
+                let psi_inverted: f64 =
+                    (0..there.len()).map(|m| orbitals[(m, i)] * there[m]).sum();
+                psi * psi_inverted
+            });
+            assert_relative_eq!(parities[i], numerical, epsilon = 2e-4);
+        }
+
+        let signs: Vec<i32> = parities.iter().map(|p| if *p > 0.0 { 1 } else { -1 }).collect();
+        assert!(parities.iter().all(|p| (p.abs() - 1.0).abs() < 1e-8), "{parities}");
+        // The two 1s combinations are a hair apart and come in either order.
+        assert_eq!(signs[0] + signs[1], 0);
+        assert_eq!(signs[2..], [1, -1, -1, -1, 1, 1, 1, -1]);
     }
 
     #[test]

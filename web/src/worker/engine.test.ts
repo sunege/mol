@@ -407,6 +407,8 @@ describe('the ladder of orbital levels', { timeout: 180_000 }, () => {
     // Three atoms lie in some plane whatever they do, so sorting water's
     // orbitals by a reflection would claim a symmetry it does not have.
     expect(levels.every((level) => level.parity === null)).toBe(true);
+    // And water is not two like atoms, so it has no inversion either.
+    expect(levels.every((level) => level.inversion === null)).toBe(true);
     calculation.free();
   });
 
@@ -581,6 +583,16 @@ describe('the ladder of orbital levels', { timeout: 180_000 }, () => {
     // A diatomic has no plane it is not in, so no rung is labelled by one: the
     // sigma and pi of O2 are told apart by their degeneracy instead.
     expect(levels.every((level) => level.parity === null)).toBe(true);
+    // What it does have is an inversion, which sorts every rung (V4-10): the
+    // unpaired electrons' pi* pair is gerade - antibonding, for a pi - in both
+    // spins, and the empty sigma* at the top of each ladder is ungerade.
+    expect(levels.every((level) => level.inversion !== null)).toBe(true);
+    for (const spin of ['up', 'down'] as const) {
+      const own = levels.filter((level) => level.spin === spin);
+      const piStar = own.filter((level) => level.count === 2).at(-1)!;
+      expect(piStar.inversion).toBe(1);
+      expect(own.at(-1)!.inversion).toBe(-1);
+    }
 
     // Every rung names one of the other spin, and the naming agrees both ways.
     for (const [index, level] of levels.entries()) {
@@ -649,6 +661,18 @@ describe('a distance scan', { timeout: 180_000 }, () => {
       expect(point.levels.map((level) => level.spin)).toEqual([0, 0]);
       expect(point.levels.map((level) => level.occupation)).toEqual([2, 0]);
     }
+
+    // Bonding and antibonding, by symmetry and by the electrons between the
+    // nuclei, and a missing inversion would be `null` rather than `undefined`.
+    for (const point of points) {
+      expect(point.levels.map((level) => level.inversion)).toEqual([1, -1]);
+      expect(point.levels[0].overlap).toBeGreaterThan(0);
+      expect(point.levels[1].overlap).toBeLessThan(0);
+    }
+    const unlike = walk(new Uint8Array([1, 9]), 0.9, 1.0, 2);
+    expect(unlike.every((point) => point.levels.every((level) => level.inversion === null))).toBe(
+      true,
+    );
 
     // The measured gaps are 1.34 Hartree at 0.4 Angstrom and 0.019 at 3.0.
     const gap = (point: ScanPoint) => point.levels[1].energy - point.levels[0].energy;

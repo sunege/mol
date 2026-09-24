@@ -167,7 +167,14 @@ export function spinHeading(spin: SpinChannel): string | null {
 export const LADDER_LABEL = '分子軌道の準位';
 
 /**
- * The rungs folded off the bottom of the ladder, in one line.
+ * The rungs folded off the bottom of the ladder, in one line - and off the
+ * bottom of the correlation diagram and the distance scan, which say it the
+ * same way.
+ *
+ * "閉殻の内殻電子" (V4-10): what is folded is always a filled inner shell - only
+ * occupied rungs are ever cut (`foldCore` in `ladder.ts`) - and that is the word the
+ * lecture uses for it. "原子に張りついた電子" said the same thing without the
+ * term the students are meant to learn.
  *
  * The electrons that stay on one atom sit far below every other rung - about 17
  * Hartree below in water, 9 in benzene - so a ladder drawn to scale with them
@@ -177,7 +184,7 @@ export const LADDER_LABEL = '分子軌道の準位';
  * into (`components/ladder.ts`).
  */
 export function coreText(orbitals: number): string {
-  return `ここより下に ${orbitals} 本（原子に張りついた電子）`;
+  return `ここより下に ${orbitals} 本（閉殻の内殻電子）`;
 }
 
 /**
@@ -286,9 +293,6 @@ export const BOND_POPULATION_THRESHOLD = 0.05;
  */
 export const AMPLITUDE_FLOOR = 0.05;
 
-/** Nothing this orbital does to any bond the viewer is drawing. */
-export const NO_BOND_EFFECT = 'どの結合も強めていません（弱めてもいません）。';
-
 /** The rung the picked orbital sits on, which is what knows whether it is pi. */
 export function rungOf(
   levels: readonly OrbitalLevel[] | null,
@@ -312,7 +316,24 @@ function bondLabel(one: string, other: string): string {
 }
 
 /** What an orbital does to the bonds of one kind, summed over all of them. */
-type BondVerdict = 'bonding' | 'antibonding' | 'mixed' | 'none';
+export type BondVerdict = 'bonding' | 'antibonding' | 'mixed' | 'none';
+
+/**
+ * Bonding or antibonding by symmetry, for a rung of a homonuclear diatomic:
+ * sigma_g and pi_u bond, sigma_u and pi_g antibond. `null` where there is no
+ * inversion to read (`OrbitalLevel.inversion`), or no sigma or pi to read it of.
+ *
+ * This is the textbook's definition for two like atoms, and it overrules the
+ * overlap population wherever both are to hand: nitrogen's highest occupied
+ * orbital is 3sigma_g, and its population is slightly negative at the bond
+ * length (`docs/dev-notes.md`, "V4-10 の確認").
+ */
+export function verdictBySymmetry(count: number, inversion: 1 | -1 | null): BondVerdict | null {
+  if (inversion === null) return null;
+  if (count === 1) return inversion === 1 ? 'bonding' : 'antibonding';
+  if (count === 2) return inversion === -1 ? 'bonding' : 'antibonding';
+  return null;
+}
 
 /**
  * Which bonds the orbital is holding together and which it is pulling apart.
@@ -334,6 +355,7 @@ export function describeBonds(
   populations: ArrayLike<number>,
   bonds: readonly Bond[],
   symbols: readonly string[],
+  bySymmetry: BondVerdict | null = null,
 ): string {
   const atoms = symbols.length;
   const kinds = new Map<string, { strengthens: number; weakens: number; strongest: number }>();
@@ -350,14 +372,12 @@ export function describeBonds(
   if (kinds.size === 0) return '';
   // Loudest first, which puts the bonds it leaves alone at the end.
   const ordered = [...kinds].sort(([, a], [, b]) => b.strongest - a.strongest);
-  if (ordered.every(([, kind]) => kind.strengthens === 0 && kind.weakens === 0)) {
-    return NO_BOND_EFFECT;
-  }
+  // Two like atoms have one bond and a symmetry that says what the orbital does
+  // to it ({@link verdictBySymmetry}), so the words agree with the σ* beside
+  // the rung in the correlation diagram.
   return (
     ordered
-      .map(([label, kind], index) =>
-        bondClause(label, verdictOf(kind), index === ordered.length - 1),
-      )
+      .map(([label, kind]) => bondClause(label, bySymmetry ?? verdictOf(kind)))
       .join('、') + '。'
   );
 }
@@ -368,19 +388,23 @@ function verdictOf(kind: { strengthens: number; weakens: number }): BondVerdict 
   return kind.weakens > 0 ? 'antibonding' : 'none';
 }
 
-/** One clause, in the form that ends the sentence or the one that carries on. */
-function bondClause(label: string, verdict: BondVerdict, last: boolean): string {
+/**
+ * One clause, in the words a lecture uses: bonding, antibonding, nonbonding.
+ *
+ * Not "strengthens" and "weakens" (V4-10): those read as a claim about how much
+ * stronger the bond is, and the terms the textbook uses are what the student is
+ * meant to come away with.
+ */
+function bondClause(label: string, verdict: BondVerdict): string {
   switch (verdict) {
     case 'bonding':
-      return last ? `${label} を強めています` : `${label} を強め`;
+      return `${label} 結合性`;
     case 'antibonding':
-      return last ? `${label} を弱めています` : `${label} を弱め`;
+      return `${label} 反結合性`;
     case 'mixed':
-      return last
-        ? `${label} は強めるところと弱めるところがあります`
-        : `${label} は強めるところと弱めるところがあり`;
+      return `${label} 結合性と反結合性が混在`;
     case 'none':
-      return last ? `${label} には効いていません` : `${label} には効いておらず`;
+      return `${label} 非結合性`;
   }
 }
 

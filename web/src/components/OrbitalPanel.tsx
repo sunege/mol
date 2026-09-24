@@ -34,6 +34,7 @@ import {
   describeLobes,
   describeNodes,
   rungOf,
+  verdictBySymmetry,
   type Bond,
   type OrbitalPick,
 } from './orbital';
@@ -94,7 +95,15 @@ export function OrbitalPanel({
   // the nodes of an arbitrary orbital, and a molecule with no plane has no
   // amplitudes to count them from (`countNodes`).
   const rung = rungOf(levels, picked);
-  const bondWords = character === null ? '' : describeBonds(character.populations, bonds, symbols);
+  const bondWords =
+    character === null
+      ? ''
+      : describeBonds(
+          character.populations,
+          bonds,
+          symbols,
+          rung === null ? null : verdictBySymmetry(rung.count, rung.inversion),
+        );
   const nodes =
     character !== null && rung?.parity === -1 ? countNodes(character.amplitudes, bonds) : null;
   const lobeWords = lobes === null ? '' : describeLobes(lobes);

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   LADDER_LABEL,
-  NO_BOND_EFFECT,
   ORBITAL_HEADING,
   ORBITAL_INTRO,
   ORBITAL_LOADING,
@@ -23,6 +22,7 @@ import {
   orbitalColumns,
   rungOf,
   spinHeading,
+  verdictBySymmetry,
   type Bond,
 } from './orbital';
 import type { OrbitalLevel, SpinChannel } from '../worker/protocol';
@@ -35,7 +35,16 @@ function rung(
   occupation: number,
   energy = 0,
 ): OrbitalLevel {
-  return { spin, first, count, occupation, energy, parity: null, partner: null };
+  return {
+    spin,
+    first,
+    count,
+    occupation,
+    energy,
+    parity: null,
+    inversion: null,
+    partner: null,
+  };
 }
 
 /**
@@ -118,7 +127,6 @@ const said = [
   ),
   // The words about the orbital picked, which are the rest of what the section
   // puts on screen: what it does to the bonds, its nodes, and its blobs.
-  NO_BOND_EFFECT,
   describeBonds(
     populations(6, [
       [0, 1, 0.384],
@@ -266,7 +274,7 @@ describe('what a row says', () => {
   it('counts what the ladder folded off the bottom, and says what it was', () => {
     expect(coreText(1)).toContain('1 本');
     expect(coreText(6)).toContain('6 本');
-    expect(coreText(6)).toContain('原子に張りついた電子');
+    expect(coreText(6)).toBe('ここより下に 6 本（閉殻の内殻電子）');
     expect(LADDER_LABEL).toBe('分子軌道の準位');
   });
 
@@ -378,25 +386,25 @@ describe('what an orbital does to the bonds', () => {
     [0, 2],
   ];
 
-  it('says so when it holds none of them together and none apart', () => {
+  it('calls an orbital that is none of the bonds nonbonding', () => {
     // Water's highest occupied orbital is the lone pair: none of it is between
     // the nuclei, and its population across both O-H bonds is zero.
     const lone = populations(3, [
       [0, 1, -0.00001],
       [0, 2, -0.00001],
     ]);
-    expect(describeBonds(lone, waterBonds, water)).toBe(NO_BOND_EFFECT);
+    expect(describeBonds(lone, waterBonds, water)).toBe('O–H 非結合性。');
   });
 
-  it('names the bonds it weakens', () => {
+  it('names the bonds it is antibonding in', () => {
     const antibonding = populations(3, [
       [0, 1, -0.934],
       [0, 2, -0.934],
     ]);
-    expect(describeBonds(antibonding, waterBonds, water)).toBe('O–H を弱めています。');
+    expect(describeBonds(antibonding, waterBonds, water)).toBe('O–H 反結合性。');
   });
 
-  it('names what it strengthens first, and what it leaves alone last', () => {
+  it('names what it is bonding in first, and what it is nonbonding in last', () => {
     // Ethylene's pi: it is the double bond and has nothing to do with the C-H
     // bonds, which is the sentence rather than a footnote to it.
     const pi = populations(6, [
@@ -407,8 +415,7 @@ describe('what an orbital does to the bonds', () => {
       [1, 5, 0],
     ]);
     const said = describeBonds(pi, ETHYLENE_BONDS, ETHYLENE_SYMBOLS);
-    expect(said).toContain('C–C を強め');
-    expect(said).toContain('C–H には効いていません');
+    expect(said).toBe('C–C 結合性、C–H 非結合性。');
     // Hydrogen goes last in a label, and the pairs are spoken of by kind: one
     // clause for the four C-H bonds rather than four.
     expect(said).not.toContain('H–C');
@@ -434,7 +441,26 @@ describe('what an orbital does to the bonds', () => {
       [5, 0],
     ];
     const said = describeBonds(ring, bonds, ['C', 'C', 'C', 'C', 'C', 'C']);
-    expect(said).toContain('強めるところと弱めるところ');
+    expect(said).toBe('C–C 結合性と反結合性が混在。');
+  });
+
+  it('lets the symmetry of two like atoms decide, where there is one', () => {
+    // Nitrogen's 3sigma_g: a population slightly on the antibonding side, and
+    // still the bonding orbital every textbook calls it (dev-notes, "V4-10 の確認").
+    const n2 = populations(2, [[0, 1, -0.063]]);
+    const bond: Bond[] = [[0, 1]];
+    expect(describeBonds(n2, bond, ['N', 'N'])).toBe('N–N 反結合性。');
+    const bySymmetry = verdictBySymmetry(1, 1);
+    expect(describeBonds(n2, bond, ['N', 'N'], bySymmetry)).toBe('N–N 結合性。');
+  });
+
+  it('reads sigma_g and pi_u as bonding, sigma_u and pi_g as antibonding', () => {
+    expect(verdictBySymmetry(1, 1)).toBe('bonding');
+    expect(verdictBySymmetry(1, -1)).toBe('antibonding');
+    expect(verdictBySymmetry(2, -1)).toBe('bonding');
+    expect(verdictBySymmetry(2, 1)).toBe('antibonding');
+    expect(verdictBySymmetry(1, null)).toBeNull();
+    expect(verdictBySymmetry(3, 1)).toBeNull();
   });
 
   it('has nothing to say about a molecule with no bonds drawn', () => {

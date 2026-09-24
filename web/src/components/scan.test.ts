@@ -3,10 +3,12 @@ import {
   MIN_WELL,
   SCAN_PRESETS,
   atomFraction,
+  atomicOrbitalNames,
   buildCorrelation,
   buildScan,
   correlationTexts,
   defaultMarker,
+  diatomicName,
   lowestPoint,
   presetFor,
   rangeAround,
@@ -51,8 +53,15 @@ const HELIUM: ScanPoint[] = [
   withLevels(4.0, -5.543777, [level(-0.83, 2), level(-0.48, 2)]),
 ];
 
-function level(energy: number, occupation = 0, count = 1, spin = 0): ScanLevel {
-  return { energy, occupation, count, spin };
+function level(
+  energy: number,
+  occupation = 0,
+  count = 1,
+  spin = 0,
+  inversion: 1 | -1 | null = null,
+  overlap = 0,
+): ScanLevel {
+  return { energy, occupation, count, spin, overlap, inversion };
 }
 
 const RANGE = (from: number, to: number, points: number): ScanRange => ({ from, to, points });
@@ -355,6 +364,79 @@ describe('the pairs the section offers', () => {
   });
 });
 
+describe('naming the lines bonding or antibonding', () => {
+  /** Hydrogen's levels, as two like atoms have them: gerade, then ungerade. */
+  const symmetric = HYDROGEN.map((point) =>
+    withLevels(point.distance, point.energy, [
+      { ...point.levels[0], inversion: 1 },
+      { ...point.levels[1], inversion: -1 },
+    ]),
+  );
+
+  it('stars the antibonding line of two like atoms, by symmetry', () => {
+    const figure = buildScan(symmetric, RANGE(0.4, 3.0, 5));
+    expect(figure.levels.curves.map((curve) => curve.species?.text)).toEqual(['σ', 'σ*']);
+    // And says it aloud too, for a reader who cannot see the lines.
+    expect(figure.levels.curves[1].label).toContain('σ*');
+    // A pi is the other way round: ungerade bonds, gerade antibonds.
+    expect(diatomicName(2, -1, undefined)).toBe('π');
+    expect(diatomicName(2, 1, undefined)).toBe('π*');
+  });
+
+  it('believes the symmetry over the overlap population', () => {
+    // Nitrogen's 3sigma_g at its bond length: gerade, and a population just
+    // past the threshold on the negative side (dev-notes, "V4-10 の確認").
+    expect(diatomicName(1, 1, -0.063)).toBe('σ');
+  });
+
+  it('follows a gerade and an ungerade line through each other', () => {
+    // Two species, so they may cross, and a line is one species all along.
+    const crossing = [
+      withLevels(1.0, -1.0, [level(-1.0, 2, 1, 0, 1), level(-0.9, 2, 1, 0, -1)]),
+      withLevels(1.5, -1.1, [level(-1.0, 2, 1, 0, -1), level(-0.9, 2, 1, 0, 1)]),
+    ];
+    const figure = buildScan(crossing, RANGE(1.0, 1.5, 2));
+    const gerade = figure.levels.curves.find((curve) => curve.key === '0:1g:0')!;
+    const [near, far] = gerade.segments[0];
+    // Lowest at the first separation, the higher of the two at the second.
+    expect(near.y).toBeGreaterThan(far.y);
+  });
+
+  it('names two unlike atoms’ lines at the bottom of the well', () => {
+    // The overlap population changes along a line of two unlike atoms - HF's
+    // third sigma is antibonding close in and nonbonding at its bond length -
+    // so the name is the molecule's: the deepest separation, 0.7 here.
+    const overlaps = [-0.3, 0.02, 0.1, 0.1, 0.05];
+    const unlike = HYDROGEN.map((point, at) =>
+      withLevels(point.distance, point.energy, [
+        { ...point.levels[0], overlap: 0.5 },
+        { ...point.levels[1], overlap: overlaps[at] },
+      ]),
+    );
+    const figure = buildScan(unlike, RANGE(0.4, 3.0, 5));
+    expect(figure.levels.curves.map((curve) => curve.species?.text)).toEqual(['σ', 'σ']);
+    overlaps[1] = -0.9;
+    const antibonding = buildScan(
+      unlike.map((point, at) =>
+        withLevels(point.distance, point.energy, [
+          point.levels[0],
+          { ...point.levels[1], overlap: overlaps[at] },
+        ]),
+      ),
+      RANGE(0.4, 3.0, 5),
+    );
+    expect(antibonding.levels.curves[1].species?.text).toBe('σ*');
+  });
+
+  it('leaves room on the left for a starred name', () => {
+    // Written right-aligned just outside the plot; a "σ*" is about 11 wide.
+    const figure = buildScan(symmetric, RANGE(0.4, 3.0, 5));
+    for (const curve of figure.levels.curves) {
+      expect(curve.species!.x).toBeGreaterThanOrEqual(11);
+    }
+  });
+});
+
 // --- the correlation diagram ----------------------------------------------
 
 /** One spin's rungs, from `[energy, orbitals on it, electrons in one of them]`. */
@@ -368,6 +450,7 @@ function rungs(rows: Array<[number, number, number]>): OrbitalLevel[] {
       occupation,
       energy,
       parity: null,
+      inversion: null,
       partner: null,
     };
     first += count;
@@ -381,10 +464,55 @@ const H2_LEVELS = rungs([
   [0.67, 1, 0],
 ]);
 const H2_ATOMS = [[-0.24], [-0.24]];
-const HALF_AND_HALF = H2_LEVELS.map(() => [0.5, 0.5]);
+const H2_MAKEUP = [
+  { shares: [0.5, 0.5], overlap: 0.6 },
+  { shares: [0.5, 0.5], overlap: -0.9 },
+];
+
+/**
+ * O2 in the shape the engine returns it: each spin's own rungs, the pi* filled
+ * for the upper spin only, and the free atom 1s, 2s and three 2p.
+ */
+const O2_ATOMS = [
+  [-18.7, -0.87, -0.34, -0.34, -0.34],
+  [-18.7, -0.87, -0.34, -0.34, -0.34],
+];
+function spinRungs(
+  spin: 'up' | 'down',
+  rows: Array<[number, number, number]>,
+): OrbitalLevel[] {
+  return rungs(rows).map((rung) => ({ ...rung, spin }));
+}
+const O2_LEVELS = [
+  ...spinRungs('up', [
+    [-18.8, 1, 1],
+    [-18.8, 1, 1],
+    [-1.3, 1, 1],
+    [-0.8, 1, 1],
+    [-0.55, 1, 1],
+    [-0.5, 2, 1],
+    [-0.3, 2, 1],
+    [0.3, 1, 0],
+  ]),
+  ...spinRungs('down', [
+    [-18.7, 1, 1],
+    [-18.7, 1, 1],
+    [-1.25, 1, 1],
+    [-0.7, 1, 1],
+    [-0.48, 1, 1],
+    [-0.45, 2, 1],
+    [-0.1, 2, 0],
+    [0.35, 1, 0],
+  ]),
+];
+const O2_OVERLAPS = [0, 0, 0.3, -0.4, 0.2, 0.3, -0.2, -0.6];
+const O2_MAKEUP = [...O2_OVERLAPS, ...O2_OVERLAPS].map((overlap) => ({
+  shares: [0.5, 0.5],
+  overlap,
+}));
 
 describe('the correlation diagram', () => {
-  const figure = buildCorrelation(H2_ATOMS, ['H', 'H'], H2_LEVELS, HALF_AND_HALF);
+  const figure = buildCorrelation(H2_ATOMS, ['H', 'H'], H2_LEVELS, H2_MAKEUP);
 
   it('is a free atom either side of the molecule', () => {
     expect(figure.columns.map((column) => column.key)).toEqual(['left', 'mo0', 'right']);
@@ -422,7 +550,7 @@ describe('the correlation diagram', () => {
       [0.35, 0.65],
       [0.0, 1.0],
       [0.55, 0.45],
-    ];
+    ].map((shares, at) => ({ shares, overlap: [0, 0.01, 0.3, 0, -0.4][at] }));
     const hf = buildCorrelation(
       [[-0.24], [-24.0, -1.1, -0.4, -0.4, -0.4]],
       ['H', 'F'],
@@ -456,6 +584,88 @@ describe('the correlation diagram', () => {
 
   it('draws no lines at all until the compositions have arrived', () => {
     expect(buildCorrelation(H2_ATOMS, ['H', 'H'], H2_LEVELS, []).links).toEqual([]);
+  });
+
+  it('keeps the column headings clear of the top rung and what stands on it', () => {
+    // V4-10: O2's "下向き" was written over the circles of the rung below it.
+    // The circles and the tags stand 2.5 above a line and are about 9 tall.
+    for (const shown of [figure, buildCorrelation(O2_ATOMS, ['O', 'O'], O2_LEVELS, O2_MAKEUP)]) {
+      const top = Math.min(...shown.columns.flatMap((column) => column.rungs.map((r) => r.y)));
+      for (const column of shown.columns) expect(column.headingY).toBeLessThan(top - 2.5 - 12);
+    }
+  });
+
+  it('names the levels as the textbook does', () => {
+    // The free atoms' orbitals, and a bonding and an antibonding sigma.
+    expect(figure.columns[0].rungs.map((rung) => rung.name)).toEqual(['1s']);
+    expect(figure.columns[2].rungs.map((rung) => rung.name)).toEqual(['1s']);
+    expect(figure.columns[1].rungs.map((rung) => rung.name).sort()).toEqual(['σ', 'σ*']);
+    // No name before the makeup has arrived, rather than a guess at the star.
+    const early = buildCorrelation(H2_ATOMS, ['H', 'H'], H2_LEVELS, []);
+    expect(early.columns[1].rungs.map((rung) => rung.name)).toEqual(['', '']);
+  });
+
+  it('names two like atoms’ rungs by symmetry, where the engine gives one', () => {
+    const levels = H2_LEVELS.map((level, at) => ({ ...level, inversion: at === 0 ? 1 : -1 }));
+    // A makeup that says the opposite, which the symmetry overrules.
+    const contrary = H2_MAKEUP.map((makeup) => ({ ...makeup, overlap: -makeup.overlap }));
+    const named = buildCorrelation(H2_ATOMS, ['H', 'H'], levels as OrbitalLevel[], contrary);
+    const names = named.columns[1].rungs.map((rung) => rung.name);
+    // Highest first: the ungerade sigma*, then the gerade sigma.
+    expect(names).toEqual(['σ*', 'σ']);
+  });
+
+  it('names both spins of O2, facing each other between the two columns', () => {
+    const o2 = buildCorrelation(O2_ATOMS, ['O', 'O'], O2_LEVELS, O2_MAKEUP);
+    // 1s is folded away with the molecule's innermost pair; 2p once per height.
+    expect(o2.columns[0].rungs.map((rung) => rung.name)).toEqual(['2s', '2p', '', '']);
+    const [, up, down] = o2.columns;
+    const names = (column: typeof up) => column.rungs.map((rung) => rung.name).reverse();
+    expect(names(up)).toEqual(['σ', 'σ*', 'σ', 'π', 'π*', 'σ*']);
+    expect(names(down)).toEqual(['σ', 'σ*', 'σ', 'π', 'π*', 'σ*']);
+    // Names on the inner side of each spin's column, tags on the outer side.
+    for (const rung of up.rungs) {
+      expect(rung.nameAnchor).toBe('start');
+      expect(rung.tagAnchor).toBe('end');
+    }
+    for (const rung of down.rungs) {
+      expect(rung.nameAnchor).toBe('end');
+      expect(rung.tagAnchor).toBe('start');
+    }
+    // Room for a "π*" from each side at one height, about 11 units apiece.
+    const widest = (column: typeof up, pick: (rung: (typeof up.rungs)[0]) => number) =>
+      column.rungs.filter((rung) => rung.count === 2).map(pick);
+    expect(
+      Math.min(...widest(down, (rung) => rung.nameX)) -
+        Math.max(...widest(up, (rung) => rung.nameX)),
+    ).toBeGreaterThanOrEqual(24);
+    // And every word inside the figure's width.
+    for (const column of o2.columns) {
+      for (const rung of column.rungs) {
+        expect(rung.nameX).toBeGreaterThanOrEqual(12);
+        expect(rung.nameX).toBeLessThanOrEqual(o2.width - 12);
+      }
+    }
+  });
+});
+
+describe('the textbook names of a free atom’s orbitals', () => {
+  it('reads them off the count, one name per degenerate set', () => {
+    expect(atomicOrbitalNames([-0.24])).toEqual(['1s']);
+    expect(atomicOrbitalNames([-18.7, -0.87, -0.34, -0.34, -0.34])).toEqual([
+      '1s',
+      '2s',
+      '2p',
+      '',
+      '',
+    ]);
+    const argon = [-113, -10.8, -8.4, -8.4, -8.4, -0.9, -0.4, -0.4, -0.4];
+    expect(atomicOrbitalNames(argon)).toEqual(['1s', '2s', '2p', '', '', '3s', '3p', '', '']);
+  });
+
+  it('names nothing rather than something wrong when the sets are not the table’s', () => {
+    expect(atomicOrbitalNames([-18.7, -0.87, -0.34, -0.33, -0.34])).toEqual(['', '', '', '', '']);
+    expect(atomicOrbitalNames([-18.7, -0.87, -0.34, -0.34])).toEqual(['', '', '', '']);
   });
 });
 

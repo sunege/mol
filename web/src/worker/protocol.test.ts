@@ -463,8 +463,8 @@ describe('streaming a distance scan', () => {
     energy: -1.1199,
     converged: true,
     levels: [
-      { energy: -0.3606, occupation: 2, count: 1, spin: 0 },
-      { energy: 0.4397, occupation: 0, count: 1, spin: 0 },
+      { energy: -0.3606, occupation: 2, count: 1, spin: 0, overlap: 0, inversion: null },
+      { energy: 0.4397, occupation: 0, count: 1, spin: 0, overlap: 0, inversion: null },
     ],
   });
 
@@ -483,8 +483,8 @@ describe('streaming a distance scan', () => {
       energy: -147.19,
       converged: true,
       levels: [
-        { energy: -0.0811, occupation: 1, count: 2, spin: 0 },
-        { energy: -0.0011, occupation: 0, count: 2, spin: 1 },
+        { energy: -0.0811, occupation: 1, count: 2, spin: 0, overlap: 0, inversion: null },
+        { energy: -0.0011, occupation: 0, count: 2, spin: 1, overlap: 0, inversion: null },
       ],
     };
     const response: WorkerResponse = { id: 8, type: 'scanPoint', point: open };

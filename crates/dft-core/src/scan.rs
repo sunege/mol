@@ -39,6 +39,7 @@
 //! exactly as `on_step` stops a relaxation.
 
 use crate::basis::BasisKind;
+use crate::bonding::OrbitalRef;
 use crate::driver::{self, DriverOptions, SpinState};
 use crate::grid::GridQuality;
 use crate::molecule::{Atom, GeometryError, Molecule};
@@ -75,6 +76,19 @@ pub struct ScanLevel {
     /// [`ScfResult::channels`]: always zero for a closed shell, and zero then
     /// one - alpha then beta - for a molecule with unpaired electrons.
     pub spin: usize,
+    /// Mulliken overlap population between the two nuclei, averaged over the
+    /// orbitals on the rung and weighted as `orbitalCharacter` weights it (by
+    /// the occupation, and by one electron where there is less): positive for
+    /// a bonding level, negative for an antibonding one. The average because a
+    /// degenerate rung's orbitals are any rotation of one another, and the
+    /// average is the part of the answer that does not depend on which.
+    pub overlap: f64,
+    /// The inversion parity, averaged over the rung for the same reason, for a
+    /// homonuclear pair; `None` for two unlike atoms. Where there is one it is
+    /// what says bonding or antibonding ([`crate::bonding::inversion_matrix`]),
+    /// and it is also what a line is followed by: a gerade and an ungerade
+    /// sigma are two symmetry species and may cross.
+    pub inversion: Option<f64>,
 }
 
 /// One separation, solved.
@@ -202,11 +216,28 @@ fn describe(distance: f64, system: &System, result: &ScfResult) -> ScanPoint {
     for (spin, set) in orbital::list(system, result).iter().enumerate() {
         for group in orbital::degenerate_groups(set) {
             let head = set[group.start];
+            let count = group.len();
+            let overlap = group
+                .clone()
+                .map(|k| {
+                    let at = OrbitalRef { channel: spin, index: set[k].index };
+                    let occupation = set[k].occupation.max(1.0);
+                    orbital::overlap_population(system, result, at, occupation, 0, 1)
+                })
+                .sum::<f64>()
+                / count as f64;
+            let inversion = set[group.clone()]
+                .iter()
+                .map(|info| info.inversion)
+                .sum::<Option<f64>>()
+                .map(|sum| sum / count as f64);
             levels.push(ScanLevel {
                 energy: head.energy,
                 occupation: head.occupation,
-                count: group.len(),
+                count,
                 spin,
+                overlap,
+                inversion,
             });
         }
     }
@@ -266,6 +297,16 @@ mod tests {
             .iter()
             .all(|point| point.levels.iter().filter(|level| occupied(level)).count() == 1));
         assert!(points.iter().all(|point| point.levels[0].occupation == 2.0));
+
+        // Which is which, by symmetry and by where the electrons sit, and the two
+        // agree: gerade and piling up between the nuclei, then ungerade and
+        // pulling out from between them.
+        for point in &points {
+            let [lower, upper] = [point.levels[0], point.levels[1]];
+            assert!(lower.inversion.is_some_and(|parity| parity > 0.999), "{lower:?}");
+            assert!(upper.inversion.is_some_and(|parity| parity < -0.999), "{upper:?}");
+            assert!(lower.overlap > 0.0 && upper.overlap < 0.0, "at {} Bohr", point.distance);
+        }
 
         let bonding: Vec<f64> = points.iter().map(|point| point.levels[0].energy).collect();
         let antibonding: Vec<f64> = points.iter().map(|point| point.levels[1].energy).collect();
@@ -380,6 +421,12 @@ mod tests {
         assert_eq!(down.len(), up.len());
         assert_eq!(down[highest].count, 2);
         assert!(!occupied(&down[highest]), "the down pi* has to be empty");
+
+        // And it is a pi*: gerade, which for a pi is antibonding, in both spins.
+        for rung in [up[highest], down[highest]] {
+            assert!(rung.inversion.is_some_and(|parity| parity > 0.999), "{rung:?}");
+            assert!(rung.overlap < 0.0, "{rung:?}");
+        }
         // Nothing below it in that ladder is empty: it is the lowest empty rung
         // of the spin that has fewer electrons.
         assert_eq!(down.iter().position(|level| !occupied(level)), Some(highest));
@@ -387,6 +434,21 @@ mod tests {
 
     /// The degenerate cases of the spacing, which no figure asks for but a
     /// caller can.
+    /// Two unlike atoms have no inversion, so their rungs carry none; what names
+    /// them is the overlap population, and hydrogen fluoride's lone pairs have
+    /// nothing between the nuclei.
+    #[test]
+    fn hydrogen_fluoride_has_no_inversion_and_nonbonding_lone_pairs() {
+        let points = scan([1, 9], 0.9, 1.0, 2);
+        for point in &points {
+            assert!(point.levels.iter().all(|level| level.inversion.is_none()));
+            let pi = point.levels.iter().find(|level| level.count == 2).expect("a pi pair");
+            assert!(pi.overlap.abs() < 1e-3, "{pi:?}");
+            let top = point.levels.last().unwrap();
+            assert!(top.overlap < -0.5, "the empty sigma* is antibonding: {top:?}");
+        }
+    }
+
     #[test]
     fn asking_for_one_distance_or_none_is_answered_literally() {
         let one = scan([1, 1], 0.74, 3.0, 1);
@@ -400,4 +462,5 @@ mod tests {
         // Nor is an element the tables do not cover.
         assert!(scan([1, 30], 0.4, 3.0, 5).is_empty());
     }
+
 }

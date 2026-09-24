@@ -45,6 +45,7 @@ import {
   buildScan,
   markerLabel,
   scanProgress,
+  type RungMakeup,
   type ScanPreset,
   type ScanRange,
   type ScanXY,
@@ -75,8 +76,8 @@ interface Props {
   atomLevels: number[][] | null;
   /** The molecule's own ladder, or null while there is none. */
   levels: readonly OrbitalLevel[] | null;
-  /** How much of each rung of `levels` sits on each of the two atoms. */
-  weights: readonly (readonly number[])[];
+  /** What each rung of `levels` is made of: its share of each atom, and bonding or not. */
+  weights: readonly RungMakeup[];
   /** One symbol per atom, in the order the engine was given them. */
   symbols: readonly string[];
 }
@@ -155,6 +156,16 @@ export function DistanceScan({
                         textAnchor={rung.tagAnchor}
                       >
                         {rung.tag}
+                      </text>
+                    )}
+                    {rung.name !== '' && (
+                      <text
+                        className="correlation-name"
+                        x={rung.nameX}
+                        y={rung.y - 2.5}
+                        textAnchor={rung.nameAnchor}
+                      >
+                        {rung.name}
                       </text>
                     )}
                     {rung.lines.map((x) => (

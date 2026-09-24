@@ -292,6 +292,16 @@ export interface OrbitalLevel {
    */
   parity: 1 | -1 | null;
   /**
+   * Inversion through the midpoint: `1` for a gerade rung, `-1` for an
+   * ungerade one, and `null` for anything but a homonuclear diatomic (V4-10).
+   *
+   * For two like atoms this is what the textbook's star means - sigma_g and
+   * pi_u are bonding, sigma_u and pi_g antibonding - and it is a symmetry, where
+   * the overlap population is a reading: nitrogen's highest occupied orbital
+   * comes out slightly negative there and is still the bonding 3sigma_g.
+   */
+  inversion: 1 | -1 | null;
+  /**
    * The rung of the other spin that is the same orbital, as an index into the
    * array these came in.
    *
@@ -362,7 +372,8 @@ export const MAX_SCAN_POINTS = 60;
  * in every plane through its axis, and measuring against one of them splits a
  * genuinely degenerate pair - so `count` is what names the symmetry species
  * here: two for a pi level, one for a sigma level, and nothing else in a
- * minimal basis over H-Ar. That is what the lines of the figure are followed
+ * minimal basis over H-Ar. With `inversion`, which two like atoms have, that
+ * is the whole species, and it is what the lines of the figure are followed
  * along, since levels of the same species never cross and levels of different
  * ones do.
  */
@@ -383,6 +394,15 @@ export interface ScanLevel {
    * unpaired electrons, whose figure therefore has twice as many lines.
    */
   spin: number;
+  /**
+   * Overlap population between the two nuclei, averaged over the rung, on
+   * `orbitalCharacter`'s scale: positive bonding, negative antibonding. Never a
+   * number for the screen; it names a rung of two unlike atoms, which have no
+   * inversion to name it by.
+   */
+  overlap: number;
+  /** As {@link OrbitalLevel.inversion}: `null` unless the two atoms are alike. */
+  inversion: 1 | -1 | null;
 }
 
 /** One separation of a distance scan, streamed as it is solved. */
