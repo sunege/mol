@@ -2,14 +2,17 @@
 
 ブラウザ上で本物の DFT（Rust → WebAssembly）を回し、化学を知らない人が原子を置くだけで
 (1) 安定な形へ緩和するアニメーションと (2) 電子密度の等値面を見られるアプリ。
-**v1（P0〜P7）・v2（P8〜P10）・v3（V3-1〜V3-9）完了、Vercel にデプロイ済み。**
-**次にやるのは v4（分子軌道を見せる）。着手は [docs/v4/README.md](docs/v4/README.md)（板）から。
-1 チケット = 1 セッションで、板とチケット 1 枚だけ読めば着手できる。**
+**v1（P0〜P7）・v2（P8〜P10）・v3（V3-1〜V3-9）・v4（V4-1〜V4-10）完了、Vercel にデプロイ済み。**
+**次にやるのは v5（パネルを「計算」「観察」に分け、記録をツリーにする）。着手は
+[docs/v5/README.md](docs/v5/README.md)（板）から。1 チケット = 1 セッションで、板とチケット 1 枚
+だけ読めば着手できる。**
 
 **このファイルは毎回読み込まれるので、規約と現状だけを短く置く。** 各ファイルの先頭コメントが
 設計と理由を書いているので、細部はそこを読む。経緯・実測・却下した案・数字の出どころは
 [docs/dev-notes.md](docs/dev-notes.md)（自動では読まれない。触る領域の節だけ読む）。
 
+- v5 のチケット: [docs/v5/README.md](docs/v5/README.md)（板）。
+  **なぜこの形か**だけ: [docs/plan-v5.md](docs/plan-v5.md)
 - v4 のチケット: [docs/v4/README.md](docs/v4/README.md)（板）。
   **なぜこの形か**だけ: [docs/plan-v4.md](docs/plan-v4.md)
 - v3 のチケット: [docs/v3/README.md](docs/v3/README.md)（板）。
@@ -230,8 +233,9 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   下向きが右**（実線／破線と揃える）。**相関図は「数えて」結ぶ**（原子は基底関数の数だけ
   配れるので、下から `占有割合 × count` を足して k を跨いだ段が k 番目の原子準位から来た段。
   割合は `orbitalCharacter` の**行の和 ÷ 全体の和**）。**マーカーを動かすのは編集と同じ扱い**
-  （`invalidateResult()`、`handBuilt` は偽）、**「この距離で計算」は先に原子を置いてから
-  `calculate(placed)`**、**「やめる」は `cancelAll()`**（点は残るが等値面は解き直し）。
+  （`invalidateResult()`、`handBuilt` は偽）で、**止まって 400 ms で `calculate(placed)`**、
+  選んでいた軌道は `carryPick`（添字ではなく種類と順位）で選び直す（V5-11。**スキャンは画面の
+  2 原子だけ**で組の選択肢は無い）。**「やめる」は `cancelAll()`**（点は残るが等値面は解き直し）。
   **値段は V4-9 で実測**（Node。dev-notes「V4-9 の実測」）: 軌道の切り替えはベンゼンで 0.46 秒
   （しきい値だけなら 14 ms）、`orbitals()` / `orbitalCharacter()` は 1 ms 未満、スキャンはプリセット
   27 点で 0.6〜2.4 秒。**メモリの山は v3 のまま**（軌道・密度 3 種・スキャンを足しても増えない）ので
@@ -241,6 +245,30 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   非結合性、`bondClause`）。原子軌道の名前（1s/2s/2p）は**本数で読む**。**σ/π の \* は同種の二原子なら
   反転の対称性（σg・πu が結合性）、異種なら重なり占有数**で、図 2 枚と言葉が同じ `verdictBySymmetry` /
   `diatomicName` を通る（N₂ の 3σg は重なり占有数では −0.063）。
+- **v5 は「パネルの並べ方」だけ**（2026-09-24 計画、V5-1〜V5-11）: パネルを「計算」「観察」の
+  2 タブ（**タブ＝編集／観測モード**）に分け、状態と主ボタンを上に固定、記録は左の欄の
+  **分子 › 段 › 記録のツリー**（同じ谷は畳む。探索の候補も入る）。ボタンは 4 つの型だけで、
+  **使えないときは消さずに無効**。エンジン・Worker の契約・`.wasm` は触らない。理由は plan-v5.md、
+  実測は dev-notes「v5-0 の実測」。**V5-1 完了**: 型は `components/controls.tsx`、アイコンは
+  `icons.tsx`（インライン SVG）、**見た目は `.btn` の 1 クラス**（`.row button` の CSS は無い）。**V5-2 完了**: 状態と主ボタンは
+  `StatusHeader`（`.panel-head`、スクロールしない）、2 枠の表は `components/actions.ts`、文言は `status.ts`。
+  **V5-3 完了**: タブは `components/Tabs.tsx`（`Tabs` / `TabPanel`）で、**選ばれたタブは `mode` そのもの**
+  （押すと `chooseMode`、描くのは 1 枚だけ）。記録は当面タブパネルの外（V5-8 で左へ）。
+  **V5-4 完了**: 操作の説明は 3D の下端の帯（`viewportHint(mode, atomCount)`、`pointer-events: none`、
+  WebGL が動くときだけ）、「全体表示」は 3D の右下の `IconButton` だけ（パネルには無い）。
+  **V5-5 完了**: 畳める節は `components/Fold.tsx`（予告は閉じているときだけ見出しの右に 1 行）、
+  電子の雲は `Choices`（説明は `density.ts` の `channelNote`、軌道が出ている間は値 `null`）。
+  **V5-6 完了**: 「近づけてみる」は分子軌道の後ろの別の `Fold`（`scanOpen`）。**はしごは
+  `orbitalsOpen || scanOpen`（1 つの値）で取り**、選んだ段を捨てるのは分子軌道を閉じたときだけ。
+  **V5-7 完了**: 記録の木は `records/tree.ts`（`buildRecordTree` / `defaultExpanded`、文言は `records.ts`）。
+  **谷の開閉の鍵は谷の最古の記録**（代表は探索のたびに入れ替わる）。
+  **V5-8 完了**: 記録は左の欄 `RecordExplorer`（木は `RecordTree`、「…」は `MoreMenu`、文言は
+  `EXPLORER_WORDS`）。開閉と畳みは `localStorage` の `mol.explorer`（`explorer.ts`、**押したノードだけ**覚え、
+  読み書きは try/catch）。**開いた記録の祖先は開く**（1 回だけ書き込み、閉じ直せる）。
+  **V5-9 完了**: 探索の候補は木の中（`buildRecordTree(groups, pending)`、「形を探す」の段の先頭、
+  記録になった候補は描かない）。**候補の時計は欄の中だけ**（`useNow`、計算中のあいだだけ）。
+  **V5-10 完了**: 720px 以下（`useNarrow`）はタブが 3 つ（`panelTabs.ts`）。**「記録」だけはモードではなく
+  App の `narrowRecords`**（`chooseMode` と `observeWhileRunning` で下ろす）。**欄は 1 か所にだけ描く**（左の列か記録タブ、`foldable={!narrow}`）。
 - **記録の置き場所**: 経緯・実測・却下した案は dev-notes の「フェーズの記録」に足し、この
   CLAUDE.md には規約と現状だけを 1〜2 行で足す。
 

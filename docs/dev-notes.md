@@ -13,7 +13,7 @@ CLAUDE.md には守るべき規約と状態だけを短く足す。
 - [コマンドの詳細](#コマンドの詳細)
 - [規約の詳細](#規約の詳細)
 - [要件定義書に対する技術的な補足](#要件定義書に対する技術的な補足)
-- [フェーズの記録](#フェーズの記録): 書かれた順に P5, P6, P7, P8, P9, P10, v3-0, V3-1〜V3-9, v4-0, V4-1〜V4-9, P3・P4, P2（P0・P1 は記録なし）
+- [フェーズの記録](#フェーズの記録): 書かれた順に P5, P6, P7, P8, P9, P10, v3-0, V3-1〜V3-9, v4-0, V4-1〜V4-10, v5-0, P3・P4, P2（P0・P1 は記録なし）
 
 ## コマンドの詳細
 
@@ -2799,6 +2799,394 @@ g/u と重なり占有数の符号を足した）。lint の警告は 15 件で�
 **2026-09-24、ユーザーの Firefox と講義 PC の確認が完了し、V4-10 完了となった。手直しは
 性格の言葉（6）、相関図（8）、距離スキャンの線の名前と内殻の 1 行（追加の指摘）。これで
 v4 のチケットは全部終わり。**
+
+### v5-0 の実測: パネルの高さとボタンの揺れ（2026-09-24）
+
+v5（パネルを「計算」「観察」の 2 タブに分け、記録を左のツリーにする）の出発点。dev サーバーを
+Browser の 1366×768 で開き、パネルの見出しの位置を `getBoundingClientRect().top + scrollTop` で
+測った。提案のページ（モック付き）は https://claude.ai/artifact/GHSYCekVorryZYqetkKCcS 。
+
+| 状態 | `.panel` の `scrollHeight` |
+| --- | --- |
+| 起動直後（編集、記録 1 件） | 1,999px |
+| H₂O を計算した直後（観測に切り替わる） | 2,168px |
+| O₂ を計算して「分子軌道」を開く | **3,055px**（768px の約 4 画面） |
+
+O₂・分子軌道を開いた状態の節ごとの高さ（px）: 見出しとモード 156、観測 213、プリセット 82、
+計算 254、いろいろな形を試す 250、記録 329、電子密度 202、分子軌道のはしご 398、相関図 501、
+近づけてみる 約 390、**状態・エネルギーの一覧 約 280（パネルの最下部）**。編集モードでは観測の
+213 の代わりに配置する元素＋編集が 293 で、**モードを切り替えるとプリセットから下が 80px ずれる**。
+
+ボタンの並びが揺れる理由（v5 の V5-1 が止める）:
+- どの行も `.row`（`flex-wrap: wrap`、ボタンは内容幅）。記録の「書き出す／O₂ だけ／読み込む／
+  全部消す」は 4 つめだけが 2 行目に落ちる。「削除（O）」は元素名で幅が変わる。
+- 出たり消えたりするボタン: 「〇〇 だけ」「緩和を再生」「結合に寄与する電子」。
+- ラベルが変わる: 「安定な形にする」→「中止」→「すぐ止める」。
+- ボタンの CSS が 6 種類（`.row button` / `.mode-switch` / `.level-switch` / `.record-actions` /
+  `.candidate-actions` / `.file-button`）。
+- 720px 以下ではパネルが下の 50vh・全幅になり、300px では折り返していた行が 1 行になる。
+
+決めたこと（ユーザーが提案の推奨どおりと決定）は plan-v5.md、作業は docs/v5/README.md。
+
+### V5-1 の実装メモ（ボタンの型をそろえる、2026-09-24）
+
+- **部品は `components/controls.tsx` の 4 つ**（状態を持たない）: `Segmented`（列数は選択肢の数から
+  inline の `gridTemplateColumns` で決める）・`Choices`（`radiogroup`/`radio`、まだ使っていない。
+  V5-5 用）・`ActionGrid`（`.action-grid.cols-2|3|5`）・`IconButton`（26px、`aria-label` と
+  `title` に同じ `label`）。アイコンは `components/icons.tsx`（全体表示・再生・名前・削除・中止・
+  「…」・くの字の 7 つ、16×16 の `currentColor`）。
+- **見た目は `.btn` の 1 クラス**。`ActionGrid` の中身も `.action-grid > button` で染めず、呼ぶ側が
+  `className="btn"` を書く（どこにあってもボタンの見た目が 1 つのクラスで決まるように）。ラベルは
+  `nowrap` + `ellipsis`、セルは `minmax(0, 1fr)`。`.btn.primary` は今の `.active` と同じ見た目。
+- **`.row button` の CSS を消した**ので `.row` は隙間だけの flex。`.row` のまま残した
+  `RecordsPanel`・`ObservePanel`・`DistanceScan` のボタンには `className="btn"` だけ足した。
+  `.mode-switch` / `.level-switch` も消し、モードの上の余白は `.phase` の下の余白（14px）に移した。
+- 「削除（O）」は「削除」に固定（`selectedSymbol` も消した）。パネルは 300px → 340px。
+- **実測**（Browser 1366×768、`getBoundingClientRect`）: `Segmented` 2 つと `ActionGrid` 5 つが
+  **どれも 32px ＝ボタン 1 つ分**、はみ出して `…` になったラベルは無し（5 列のプリセットも
+  「ゆらして 3 通り試す」も収まる）。O₂ と C₆H₆ を押し比べて全行の高さとボタンの x が一致。
+- lint の警告は全部 v4 までからあるもの（新しいファイルは 0）。見た目の確認は V5-11 で Firefox。
+
+### V5-2 の実装メモ（状態と主ボタンをパネルの上に固定する、2026-09-24）
+
+- **パネルは縦の flex**: `.panel`（`overflow: hidden`）＝ `.panel-head`（`flex: none`、下に線）＋
+  `.panel-body`（`overflow-y: auto`、`min-height: 0`）。ヘッダーは `components/StatusHeader.tsx`
+  （props だけ。題・主ボタン 2 枠・`dl.status` の 3 行・途中までのときの 1 行）。
+- **主ボタンの表は `components/actions.ts` の `actionSlots`**（`[左, 右]`、`action` は
+  `'relax' | 'calculate' | 'stop'`）。App は `onAction` で 3 つの関数に写すだけ。`key` は位置。
+- **チケットと違えたところ: 2 枠を 3 行の上に置いた**（題のすぐ下）。状態の行は計算中に
+  「1 回目の移動 · 新しい形で電子を解いています · 14.3 秒」「止めています · いまの一歩が終わるまで」
+  と 2 行に折れ、形の調整も止めた後に折れるので、下に置くと押した直後に枠が 20px 動く。上に
+  置けば枠の top は常に 40.5px。3 行の高さが変わるとヘッダーの下端（＝本体の上端）だけが動く。
+- 文言は `components/status.ts`（`describeOutcome` ＝ 計算していないときの状態の行、
+  `describeRelaxation`・`describeMesh` は App から移しただけ、`isPartWay`）。計算中の行
+  （`headline(job)` + `Elapsed`）は JSX なので `StatusHeader` に残した。
+- 説明文: 止めている途中の説明は消した（状態の行と「すぐ止める」が言う）。途中までの 1 行は
+  **計算していないときだけ**（計算中は左が「中止」なので「もう一度押すと」が合わない）。既定の
+  長い説明は本体の段の選択の下。`.phase`（題の副題）は本体の先頭に残した。原子数は消した。
+- 反復・計算時間・等値面・WebGL は本体の最後の `<details className="details">`「詳細」
+  （既定で閉じる。見た目は `.orbitals` と同じ `summary h2` の inline）。
+- **実測**（Browser 1366×768）: ヘッダー 167px（計算中で状態が 2 行なら 187px、止めた後の
+  1 行を足して 212px）、本体は 601px の窓に `scrollHeight` 1,464px。H₂O の計算中に本体を
+  いちばん下（`scrollTop` 874）まで送っても「中止」は top 40.5px で `elementFromPoint` が当たる。
+  C₆H₆ で 1 歩目の後に「中止」→ 左「止めています…」（無効）・右「すぐ止める」→ 押すと止まり
+  「途中で止めました（形を探す）」。**2 枠の x（1045 / 1199.5）・幅 148.5・top はどの状態でも同じ**。
+  1 歩目より前の「中止」はその場で終わる（`stopRelaxations` が `'stopping'` を返さない、前からの動き）。
+- HMR で `StatusHeader` を差し替えるとボタンが効かなくなることがある（再読み込みで直る）。
+
+### V5-3 の実装メモ（「計算」「観察」のタブ、2026-09-24）
+
+- **帯は `components/Tabs.tsx` の `Tabs({ mode, onChoose })`**（状態なし。`onChoose` は App の
+  `chooseMode`）と **`TabPanel({ mode, children })`**（`role="tabpanel"`、id は `tabpanel-edit` /
+  `tabpanel-observe`、タブは `tab-edit` / `tab-observe`。id は Tabs.tsx の中だけで組む ＝
+  react-refresh の警告を増やさないため関数を export しない）。**描くのは選ばれた 1 枚だけ**
+  （もう 1 枚は DOM に無い）。←→ は roving tabindex で隣へ移ってフォーカスも移す。
+  `MODE_OPTIONS` とモードの `Segmented` は消した。帯は `.panel-head` と `.panel-body` の間の
+  `flex: none`（`.tabs` / `.tab` / `.tab-label` / `.tab-subtitle`、選ばれたタブは 2px の下線）。
+- 振り分け: 計算 ＝ プリセット → 配置する元素（元素表・操作の説明・削除/全消去/全体表示）→
+  **「次の計算」**（見出しを「計算」から改名。タブ名と重なるので）→ いろいろな形を試す。
+  観察 ＝ 計測（ObservePanel の見出しを「観測」→「計測」）→ 電子密度 → 分子軌道 → 詳細。
+  **記録はタブパネルの外、本体のいちばん下**（両タブに出る。V5-8 で左の欄へ）。
+  `.phase`（題の副題）は本体の先頭、タブパネルの外に残した。
+- 「編集」の見出しを消したので操作の説明（`.hint`）のすぐ下に格子が来る。`.hint + .action-grid`
+  に `margin-top: 10px` を足した（V5-4 で説明が 3D へ行くと、格子は元素表の直後になる）。
+- **実測**（Browser 1366×768）: 帯 57px、ヘッダー 167px、本体の窓 544px。本体の `scrollHeight`
+  は **計算タブ 1,253px（起動直後）→ 1,286px（H₂O と CH₄ を計算して記録が増えた後）、観察タブ
+  1,059px（H₂O の後。計算中は 1,026px）**。記録を除いたタブパネルだけなら計算 723px・観察 496px。
+  V5-2 の 1,464px（モード切り替えの 1 本）から、どちらのタブでも短くなった。
+- 動き: 起動直後は計算タブ。H₂O で「安定な形にする」→ 観察へ移り、完了後もそのまま。観察で
+  「計算」を押すと元素表が戻る。CH₄ の計算中に「計算」を押すと、終わっても計算タブのまま
+  （`chooseMode` が `restoreModeRef` を捨てる、前からの動き）。←→ で両方向に切り替わる。
+- lint の警告は全部既存（Tabs.tsx は 0）。3D のクリックがタブと一致するかは V5-11 で Firefox。
+
+### V5-4 の実装メモ（操作の説明と「全体表示」を 3D の上へ、2026-09-24）
+
+- **文言は `components/viewportHint.ts` の `viewportHint(mode, atomCount)`**（定数 `START_HINT` /
+  `EDIT_HINT` / `OBSERVE_HINT` / `EMPTY_OBSERVE_HINT`、テスト 6 本）。**チケットから 1 つ足した**:
+  原子 0 個の**観察**も専用の 1 行（「原子がありません · 「計算」タブで置けます」）。選ぶ原子が
+  無いのに「クリックで選ぶ」と言わないため。ObservePanel の `pickingHint` はパネルに残した。
+- 帯は `.viewport` の中の `<p className="viewport-hint">`（下端中央、`pointer-events: none`、
+  `z-index: 1` ＝ 測定ラベルと同じ、`white-space: nowrap` + 省略記号、`max-width:
+  calc(100% - 120px)` で右下のアイコンに被らない）。出すのは `!unavailable && webgl?.ok` のときだけ。
+- 「全体表示」は `<div className="viewport-tools">`（右下、`z-index: 2`）の中の `IconButton` +
+  `FrameIcon`。3D の上では `.icon-btn` を 32px にしてパネルの地と枠を付けた（地が無いと分子と
+  混ざる）。**出すのは `!unavailable` のときだけで、WebGL が無くても出る**（チケットの完了条件が
+  このブラウザの `read_page` で見る前提のため。`viewerRef` が無ければ押しても何も起きない）。
+- パネル側: 編集の説明文と「全体表示」を消し、格子は「削除」「全消去」の `columns={2}`。
+  `ObservePanel` の props から `onFrame` / `canFrame` と最後の説明文を消した（`.observe-actions` は
+  「計測を解除」1 つ）。`.hint + .action-grid` は使われなくなったので `.periodic + .action-grid`
+  （元素表の直後の 10px）に置き換えた。
+- **実測**（Browser、条件を一時的に外して）: 帯の文言は 計算 3 原子 → 編集の 1 行、観察 →
+  観察の 1 行、全消去の後は始め方の 1 行／空の観察の 1 行。帯は 1 行で高さ 26px、いちばん長い
+  始め方の 1 行が 466px（3D の列 684px の中）。アイコンは `aria-label="全体表示"`、原子 0 個で
+  `disabled`。条件を戻すと `.webgl-error` の下で帯は DOM に無い。
+- 見た目と、帯の上でクリック・ドラッグが通るかは V5-11 で Firefox。
+
+### V5-5 の実装メモ（観察タブの中身、2026-09-24）
+
+- **畳める節は `components/Fold.tsx`**（`heading` / `teaser` / `className?` / `open?` /
+  `onOpenChange?` / `children`）。`open` を渡せば制御（分子軌道 ＝ App の `orbitalsOpen`）、渡さなければ
+  自分の状態で既定は閉（詳細）。`onToggle` は React が属性を書いたときにも来るので、**値が変わった
+  ときだけ**通す。予告は閉じているときだけ `summary` の中の `<span className="fold-teaser">`
+  （見出しは `<h2>` 1 つのまま）。
+- **`summary` を flex にしたので開閉の印は自前**（`::before` の ▸／▾、`list-style: none` と
+  `::-webkit-details-marker` を消す）。list-item でない `summary` からは Chrome が印を落とすため。
+  `.details summary` / `.orbitals summary` の塊は `.fold > summary` に寄せて消した。
+- **`ORBITAL_TEASER` を短くした**（「電子の「部屋」を形と色で見る」）。元の 1 文は見出しの右の
+  1 行に入らなかった（省略記号で切れる）。詳細の予告は「反復・計算時間・等値面」（App に直書き）。
+- 電子の雲: 見出し「電子の雲」＋右に「表示する」のトグル（`.section-head`、トグルの
+  `aria-label` は「電子の雲を表示する」）→ `Choices`。値は `orbitalPick === null ?
+  densityRequest : null`、`onChange={selectChannel}`。説明は `density.ts` の `channelNote`
+  （`CHANNEL_NOTES`）。**`bonding` の 1 行はチケットに無かったので「結合をかたちづくる電子だけ」**
+  （π と差密度のどちらで答えても嘘にならない言い方）。テストは F4 の検査の `said` に足したのと、
+  「全部違う」「20 字以内」。
+- 計測: トグルと「計測を解除」（`btn small`）を `.observe-row`（左右に振る flex）の 1 行に。
+  `.observe-toggle` / `.observe-actions` の CSS は消した。
+- **実測**（Browser、1366×768、観察タブ、分子軌道と詳細は閉）: 選択肢の行は 49px（ラベル＋説明の
+  2 段）。「すべての電子」の行の y は本体の上から **H₂O 241px・C₆H₆ 241px**（π の行は 2 番目に
+  入り、下の 1 行だけ 54px 下がる）。タブパネルの高さ **H₂O 464px・C₆H₆ 518px**（V5-3 の 496px は
+  ボタンが 2 列だった頃）。本体の `scrollHeight`（記録 2 件込み）1,044px、見える高さ 544px。
+  C₆H₆ で HOMO を選ぶと 3 行とも `aria-checked="false"`、「すべての電子」で戻り段の選択も消える。
+  予告はどちらも 1 行に収まる（省略記号なし）。
+
+### V5-6 の実装メモ（「近づけてみる」を分子軌道から分ける、2026-09-24）
+
+- **App に `scanOpen`**（`useState(false)`）。節は観察タブの分子軌道と詳細の間の
+  `<Fold heading={SCAN_HEADING} teaser={SCAN_TEASER} open={scanOpen} onOpenChange={setScanOpen}>`
+  で、**`atoms.length === 2` のときだけ節ごと出す**。`OrbitalPanel` の `scan` prop は消した。
+- **軌道の一覧の effect は `const wantLevels = orbitalsOpen || scanOpen` を依存に取る**
+  （相関図の真ん中の列にも要る）。1 つの値にしたので、分子軌道を開いたまま近づけてみるを
+  開閉しても effect は走らず、先頭の `forgetOrbital()` で選んだ段が消えない。**分子軌道を
+  閉じたら段を捨てる**のは別の小さな effect（`if (!orbitalsOpen) forgetOrbital()`）に分けた。
+  近づけてみるが開いていればはしごは残る（取り直さない）。
+- 原子の準位（`atomLevels`）は `scanOpen` だけで取る。閉じると `null` に戻すので、開き直すと
+  1 往復する（前は分子軌道の開閉で同じことが起きていた。1 ms 未満）。
+- 文言: **`SCAN_TEASER` を短い予告に作り直した**（「距離を変えて部屋の高さを見る」、14 字）。
+  元の 2 文は `SCAN_INTRO` として節の先頭（相関図より上。両方の図の話なので）に置き、スキャンの
+  部分には小見出し `SCAN_PART_HEADING`（「距離を変える」）を足した。`scan.test.ts` は 4 つの文言を
+  「小数・単位なし」「F4 の語なし」に入れ、予告は 15 字以内を検査する。
+- ボタン: 組は `ActionGrid columns={3}`（`label` が `SCAN_GROUP_LABEL`）、スキャン／この距離で
+  計算は `ActionGrid columns={2}`。`.row scan-pairs` と `.scan-pairs` の CSS は消し、2 つの格子の
+  間は `.scan .action-grid + .action-grid`（6px）。`.scan` の上の罫線と余白は節の中に
+  入ったので消し、`.scan h3` に上の余白 16px を持たせた。
+- **Worker の往復**（Browser、O₂、effect に一時的な `console.debug` を置いて数えて消した）:
+  計算前に近づけてみるを開く → `atomLevels` 1 回（`orbitals` は 0）。計算後 → `orbitals` 1 回＋
+  重なりが段の数だけ（16、前と同じ）。分子軌道を開く・段を選ぶ・近づけてみるを閉じる/開く・
+  分子軌道を閉じる → `orbitals` は増えず、`atomLevels` が近づけてみるを開き直した 1 回だけ。
+  段は開閉で残り、分子軌道を閉じると外れて電子の雲の「すべての電子」に戻る。H₂O では節が無い。
+- **実測**（Browser、1024×768、O₂、計算前、観察タブ）: 3 つの節を閉じてタブパネル 551px、
+  近づけてみるだけ開いて（スキャン済み）1,446px。閉じた節の見出しは 18px、予告は省略記号なしで収まる。
+
+### V5-7 の実装メモ（記録のツリー、2026-09-24）
+
+- **新規 `records/tree.ts`**（`buildRecordTree` / `defaultExpanded`）と `tree.test.ts`、
+  `components/records.ts` に `OTHER_LEVEL` / `formulaMeta` / `levelHeading` / `levelMeta` /
+  `valleySizeText`。App と `.tsx` は触っていない（`groupHeading` はまだ `RecordsPanel` が使う）。
+- **谷の鍵はチケットの「代表の id」から「谷の最古の記録の id」に変えた。** 同じ谷の記録は
+  0.03 kJ/mol 以内でばらつき（「P9 の実測」）、探索がもう一度見つけると半分ほどは代表より深い
+  ＝ 代表が入れ替わる。代表で鍵を作ると、開いていた谷がそのたびに閉じる。最古は記録を足しても
+  動かない（ファイルから古い記録を読み込んだときだけ動く。それは許す）。
+- **1 件の谷は葉（`r:`）、2 件目が来ると谷（`v:`）に変わる。** 「記録を足しても既存の id が
+  残る」のテストは、新しい谷・既存の谷のより深いところ・別の分子に足す 3 通りで見て、葉が谷に
+  なる場合は「谷の名前が元の葉の記録から取られる」を別に見ている（最初は同じエネルギーの
+  アンモニアを足して葉が谷になり、テストが落ちた）。
+- `defaultExpanded` は `openId` が畳まれた谷にあれば、**画面の分子でなくても**その祖先を開く
+  （記録を開けば普通は画面の分子と一致するが、電荷違いの群は同じ分子式なので問題にならない）。
+- 実物の記録（`docs/C₃H₆-記録-20260920-1859.json`、3 件）は `readStructureLog` で読んで、
+  葉 1 つ（いちばん低い形）と 2 件の谷になることをテストに入れた。
+- F4: 木の文言（分子式・件数・段の名前・谷の印・記録の名前・差・同じ形）を全部集めて、
+  既存の `FORBIDDEN` に「STO」「6-31」を足した語と、群の `key` が出ないことを見る。電荷だけ違う
+  2 群は段の見出しも件数も同じ文字列になる。
+
+### V5-8 の実装メモ（記録を左の欄へ、2026-09-24）
+
+- **新規** `components/RecordExplorer.tsx`（欄）・`RecordTree.tsx`（木）・`MoreMenu.tsx`（「…」と
+  落ちてくる短い一覧）・`explorer.ts`（＋テスト。開閉の記憶）。**消した**: `RecordsPanel.tsx`、
+  `records.ts` の `groupHeading` とそのテスト（F4 は「the words of the tree」が見ている）。
+  文言は `records.ts` の `EXPLORER_WORDS` に集め、F4 のテストに `Object.values` で足した。
+  `IconButton` に `expanded`（`aria-expanded`）を足した（谷のくの字と「…」）。App の中身は
+  `<RecordsPanel>` を消して `.app` の最初の子に `<RecordExplorer>` を置いただけ。
+- **グリッドは `auto 1fr 340px`**（チケットの `var(--explorer)` ではない）。畳んだかどうかは欄の
+  中の状態で、`.app` に変数を立てるには App に状態を上げるか `:has()` が要る。`:has()` は
+  Firefox 121 からで、下限の 114 に届かない。欄が自分で 236px / 40px になれば `auto` で足りる。
+- **記録の行は 2 行**: 1 行目は名前だけ、2 行目に差（`+19.7 kJ/mol`）・`×2`・右寄せの時刻。
+  最初は差と `×2` を名前と同じ行にしたら、深さ 2 の谷の行で名前が「C₃H₆ · 1…」まで削れた
+  （名前に使える幅が 50px ほど）。**`sameShapeText` は使っていない**（木では谷の `×N` と同じことを
+  言うだけで、葉では常に空）。
+- **狭い画面の `.explorer { display: none }` は `App.css` の末尾の別の `@media`**。既存の
+  720px の塊の中に書いたら、後ろにある `.explorer { display: flex }` に負けて 700px でも出ていた。
+- **記憶**（`localStorage` の `mol.explorer`、`{ collapsed, open[], closed[] }`）は**ユーザーが
+  押したノードだけ**。押していないノードは `defaultExpanded` に従うので、画面の分子が変われば
+  その枝が開く。**開いた記録の祖先は「ユーザーが開いた」として書き込む**（`openAncestors`、
+  `openId` 1 つにつき 1 回、木に現れてから）。強制ではないので閉じ直せる。古い id は刈らない
+  （起動直後は IndexedDB がまだ空で、刈ると全部消える。数十バイトずつしか増えない）。
+  祖先を開く動きは木のクリックだけでは起きない（閉じた枝の中の記録は押せない）ので、
+  `explorer.test.ts` で見ている。効くのは V5-9 の候補から開いたとき。
+- 「読み込む」の `<input type="file">` は `display: none` をやめて見えない 1px にした（Tab で届く。
+  `.btn.file-label:focus-within` で枠）。ラベルは `:disabled` を持たないので `.btn.disabled`。
+- **確認（Claude のブラウザ、1366×768）**: 欄 236px・3D 790px → 畳んで 40px・986px（+196）。
+  再読み込みで畳んだまま、開いた C₃H₆ › 形を探す › 谷もそのまま。`docs/C₃H₆-記録-…json` を
+  `DataTransfer` で読み込むと「3 件を読み込みました。」、C₃H₆ は既定で閉じ（画面は H₂O）、開くと
+  「いちばん低い」の行と「+19.7 kJ/mol ×2」の谷、谷を開くと 18:43 の 1 件（字下げ 28 → 42px）。
+  記録を開くとタブが観察に、状態が「完了（形を探す）· 77 回 · −115.339720 Ha」、操作（再生・名前・
+  削除）はその行の下だけ（`.tree-actions` は 1 つ）。「…」→「全部消す」は `confirm` を出す
+  （false に差し替えて確かめた）、分子の「…」→「この分子だけ書き出す」は `C₃H₆-記録-…json` を
+  作って「3 件を書き出しました。」（`a.click` を差し替えて落とさない）。700px で欄は `none`。
+- **名前の変更の確認は本物のクリックとキーで**: Browser ペインは `document.hasFocus()` が偽で、
+  合成の keydown で Enter を送っても `blur()` が効かず確定しない。`computer` の triple_click →
+  cmd+a → Delete → 入力 → Return で確定、Escape で元に戻ることを見た。
+- 読み込んだ C₃H₆ の 3 件は Claude のブラウザの IndexedDB に残してある（計 8 件）。
+
+### V5-9 の実装メモ（探索の候補をツリーへ、2026-09-24）
+
+- **木**: `buildRecordTree(groups, pending = [])`（`records/tree.ts`）。`PendingCandidate` は
+  `{ id, formula, name, status, text }`（チケットの形に**`name` を足した**。行の見出し「候補 n」を
+  木が数えずに済むように、App ではなく欄が `candidateName` で作る）。ノードは
+  `CandidateNode { kind: 'candidate', id: 'c:…', candidateId, name, status, text }`。
+  **`'settled'` / `'partial'` は入れない**（同じ id の記録がその行）。置き場所は `SEARCH_LEVEL` の
+  段ノードの**先頭**（候補どうしは来た順）。群の無い分子は**木の先頭に**空の分子ノード
+  （`count: 0`）と段ノードを作る（新しく試した分子がいちばん新しい出来事なので。末尾だと
+  記録の多い画面で下に埋もれる）。記録はあるが「形を測る」だけの分子には段ノードを先頭に足す。
+- **`LevelNode` に `level: ModelLevel | null` を足し、`group` は `LogGroup | null`**（候補だけの段）。
+  段の空 id は `g:pending:<式>:shape`（記録ができると `g:<key>` に変わるが、どちらも画面の分子なら
+  既定で開くので困らない）。`levelHeading` は `ModelLevel | null` を取るように、`levelMeta(null)` は
+  空文字。`records.test.ts` / `tree.test.ts` の `level.group.level` は `level.level` に直した。
+- **既定で開く**: 順番待ち・計算中の候補がある分子と段（`defaultExpanded`）。終わった候補
+  （`failed` など）は開かない。`ancestorsOf` は候補を飛ばす。
+- **時計は欄の中**: `components/useNow.ts`（`SearchPanel` から移した）を `RecordExplorer` が
+  `candidates.some(canCancel)` のあいだだけ回す。`pending` と木は 100 ms ごとに作り直すが、
+  描き直すのは欄だけ。
+- 行: 順番待ち・計算中は 26px の枠に `.spinner`（進捗カードと同じ）と `StopIcon` の中止、
+  `failed` は `button.tree-record` で `openCandidate`（本文は `—`、F5）、中止・計算できないは
+  `div.tree-record.static.unsettled`（`.static` は押せない行: `cursor: default`、hover の地なし）。
+  計算中の文言（「計算中 · 0 回目の移動 · 2.5 秒」）は欄の幅では 2 行に折り返す。時刻が動くのが
+  肝なので省略記号にはしなかった。
+- 欄の「…」は「すべて中止」（計算中が無ければ無効）・「終わった候補を消す」（`canCancel` でない
+  候補が無ければ無効）・「全部消す」の順。畳んだ帯と見出しの行は、何かが回っているあいだ
+  バッジの横に `.spinner`（`role="img"`、`EXPLORER_WORDS.running`）。
+- **消した**: `SearchPanel` の一覧と下の 2 つのボタン、`search.ts` の `SEARCH_EMPTY` /
+  `depthText` / `canOpen`（とそのテスト。深さは記録の行が言う）、App の `entryOfCandidate` /
+  `settledOfCandidate`（`entryFor` の import と `settledCount` の import も）、`App.css` の
+  `ul.candidates` / `.candidate*`。**`SEARCH_HINT` は 1 文**:「上の選択にかかわらず裏側で
+  「形を探す」で計算し、落ち着いた形は左の記録に入ります。」（段の名前を言うテストはそのまま効く）。
+  探索の節は見出し・ボタン 2 つ・要約 1 行・説明で、高さ 105px。
+- **確認（Claude のブラウザ）**: H₂O で「ゆらして 3 通り試す」→ H₂O › 形を探す の先頭に候補 1
+  （計算中 · 回転 · 中止）と候補 2・3（順番待ち）、記録の谷の上。数秒で 3 つとも谷（×3 → ×6）に
+  吸われて候補の行が消えた。もう一度走らせて計算中の 1 行を中止 →「中止しました」（薄い色）、
+  次の候補が計算中に。畳んだ帯は `[開くボタン, .badge, .spinner]`。C₆H₆（記録なし）で試すと
+  木の先頭に「C₆H₆ 0 › 形を探す」ができ（この機械は `poolSize` 1 で 1 本ずつ）、「…」→
+  「すべて中止」で 3 行とも「中止しました」、要約は「3 件が終わりました」、「終わった候補を消す」で
+  C₆H₆ の枝ごと消えた。Claude のブラウザの IndexedDB の H₂O は 11 件に増えている。
+
+### V5-10 の実装メモ（狭い画面の 3 タブ、2026-09-24）
+
+- **タブの並びは `components/panelTabs.ts`**（`PanelTab = ViewerMode | 'records'`、
+  `panelTabs(narrow)`・`chosenTab(mode, records)`、テストは `panelTabs.test.ts`）。`Tabs` は
+  `records?: { chosen, onChoose, busy, busyLabel }` を受け、あれば 3 つめを描く（←→ は 3 つを巡回）。
+  列数は inline の `gridTemplateColumns`（`.tabs` の CSS から `repeat(2, …)` を消した）。
+  `TabPanel` の props は **`mode` → `tab`**（`'records'` も取る）。記録タブの見出しには、候補が
+  回っているあいだ `.spinner`（`candidates.some(canCancel)`、`EXPLORER_WORDS.running`）。
+- **狭いかどうかは `components/useNarrow.ts`**（`NARROW_QUERY = '(max-width: 720px)'` を
+  `useSyncExternalStore`、サーバー側の値は false）。App は `narrow` と `narrowRecords` を持ち、
+  **`showRecords = narrow && narrowRecords`**（広い画面に戻れば旗は無視され、細くし直すと記録タブに
+  戻る）。旗を下ろすのは `chooseMode` と `observeWhileRunning` だけ。
+- **欄は App の `const explorer = (<RecordExplorer … foldable={!narrow} />)` の 1 つ**で、
+  `{!narrow && explorer}`（左の列）か記録タブの `<TabPanel tab="records">{explorer}</TabPanel>`
+  のどちらかにだけ描く。記録タブでは `.phase` の 1 行も描かない。`RecordExplorer` の
+  **`foldable?: boolean`**（既定 true）が偽なら畳むボタンを出さず、覚えた `collapsed` も無視し、
+  クラスは `explorer in-sheet`。
+- **CSS**: 末尾の 720px の塊は `.app > .explorer { display: none }` に絞った（保険。App はもう
+  左の列に描かない）。シートの記録は `.panel-body.records { padding: 0 }` と `.explorer.in-sheet`
+  （`width: auto`・枠と地なし・`overflow: visible`）、`.explorer.in-sheet .explorer-tree` は
+  `flex: none; overflow: visible` で、**本体ごとスクロール**する。既存の 720px の塊に `.tab` の
+  横の余白 4px と、帯 `.viewport-hint` の 2 行（`-webkit-line-clamp: 2`・`width: max-content`・
+  `white-space: normal`）。
+- **却下**: 木だけをスクロールさせる（広い画面と同じ）。375×812 ではシート 406px からヘッダーと
+  タブの帯を引いた本体が 183px しかなく、欄の見出し・ボタンの行・注意書きを引くと木が 1〜2 行に
+  なる。本体ごとスクロールなら注意書きは木の下（375×812 で本体の `scrollHeight` 475px）。
+- **記録を開くとモードは観察に変わる**（`openRecord` の `switchMode('observe')`、前からの動き）が、
+  タブは記録のまま（旗は `chooseMode` / `observeWhileRunning` でしか下りず、記録の等値面のための
+  一点計算は `observeWhileRunning` を通らない）。観察タブを押せばその記録の観察が出る。
+- **確認（Claude のブラウザ、375×812 → 1366×768）**: タブ 3 つ（各 125px、副題は省略されない）、
+  欄は 0 個 →「記録」で 1 個（`.panel` の中、畳むボタンなし）。H₂O の谷を開くとタブは記録のまま、
+  「安定な形にする」で観察に移り欄は 0 個。記録タブから → で計算へ巡回。1366×768 にすると
+  グリッド `236px 790px 340px`、タブ 2 つ、欄は `.app` の直下に 1 個（畳むボタンあり）。
+  コンソールのエラーなし。帯の 2 行は WebGL が無いので見ていない（V5-11）。
+  Claude のブラウザの記録は 17 件（H₂O 12）に増えている。
+
+### v5 の実測: パネルの高さの前後（V5-11、2026-09-24）
+
+「v5-0 の実測」と同じ条件（dev サーバー、Browser 1366×768）。プリセットを置いて「安定な形にする」、
+終わったところで測った（観察へは自動で移る。計算タブは帯を押して測り直した）。観察タブの節
+（分子軌道・近づけてみる・詳細）は閉じたまま。v5 ではパネルがヘッダー（状態・全エネルギー・
+主ボタン 2 枠、スクロールしない）＋タブの帯＋本体（スクロールする）に分かれたので、比べるのは
+本体の `scrollHeight` と、その窓の高さ。
+
+| 部分 | 高さ・幅 |
+| --- | --- |
+| ヘッダー（`.panel-head`） | 167px（H₂O・O₂ とも） |
+| タブの帯（`.tabs`） | 57px |
+| 本体の窓（`.panel-body` の `clientHeight`） | 544px |
+| 左の欄（`.explorer`） | 236px（畳んで 40px。グリッド `236px 790px 340px` → `40px 986px 340px`） |
+
+| 状態 | v5 の前（`.panel` の `scrollHeight`） | v5（本体の `scrollHeight` / 窓 544px） |
+| --- | --- | --- |
+| H₂O を計算した直後（観察） | 2,168px | **544px**（スクロールなし。タブパネル 464px） |
+| H₂O・計算タブ | （同じ 1 本） | 654px（110px 余る） |
+| O₂ を計算した直後（観察） | — | 584px（40px 余る。「近づけてみる」の節の分。タブパネル 504px） |
+| O₂・計算タブ | — | 654px（分子によらない） |
+| O₂ で「分子軌道」を開く | **3,055px** | 974px（タブパネル 894px） |
+
+- **状態と全エネルギーはどの状態でも最初の画面に見えている**（v5 の前はパネルの最下部、
+  2,168px のいちばん下）。H₂O の観察タブは 1 画面に収まる。O₂ で分子軌道を開いても 3,055px →
+  974px（記録と計算の節が本体から抜けたのが大きい）。
+- 計算タブの 654px は元素表と「いろいろな形を試す」の節まで。はみ出す 110px は探索の説明文の
+  あたりで、主ボタンはヘッダーにあるので計算を始めるのにスクロールは要らない。
+- 記録の木は左の欄の中だけでスクロールする（Claude のブラウザに溜まった記録で、木の窓 609px に
+  対して `scrollHeight` 1,004px）。
+- コンソールのエラーなし。
+
+### V5-11 の実装メモ（ユーザーの確認と、そこで出た 2 つの直し、2026-09-24）
+
+- **確認**: V5-11.md の「やること」2 と各チケットの「Firefox で見てほしいこと」を 22 項目の
+  チェックリストに、講義 PC は見た目とスクロール量の 3 項目にまとめて渡し、**すべて良好**との報告。
+  そのうえで指摘が 2 つ（下）。
+- **計算が走るボタンが分からない → `RunButton`**（`controls.tsx`、`.btn.run`: 地 `#173a26`・
+  枠 `#2ea043`・▶ は `icons.tsx` の塗りの `RunIcon` で `#56d364`）。4 つの型の 5 つめではなく、
+  型の中の 1 セル（`ActionGrid` に入る）。付けたのは DFT を回すボタンだけ: ヘッダーの
+  「安定な形にする」「この形のまま計算」（計算中に無効になっても緑のまま。止める側は素の `.btn`）、
+  探索の「今の形を試す」「ゆらして 3 通り試す」、近づけてみるの「スキャンする」「この距離で計算」
+  （「やめる」は素）。`ActionSlot.primary` は `runs` に置き換え（`.btn.primary` の CSS は消した。
+  青は「選ばれている」だけの色になった）。記録を開いたときの一点計算・電子の雲の切り替えは
+  ボタンの主目的が観察なので付けない。
+- **近づけてみるの 2 原子の選択肢（H₂・He₂・N₂・O₂・HF・いまの 2 原子）を消した。** 画面と別の組を
+  選んでマーカーを動かすと、3D の分子がその組に置き換わって混乱する、という指摘。スキャンは
+  **常に画面の 2 原子**（`scan.ts` の `scanPairFor(z, distance)`: 画面の並び順のまま、測った範囲の
+  ある組はその範囲、無ければ `rangeAround`）。`SCAN_PRESETS` は範囲の表としてだけ残し `label` を
+  削った。`SCAN_CURRENT_ID` / `SCAN_CURRENT_LABEL` / `SCAN_GROUP_LABEL` は消した。
+  **App は `scanOnScreen`（走らせた組と画面の 2 原子が同じ元素・同じ順）のときだけ図を渡す**ので、
+  別の 2 原子に替えると古い図は出ず、マーカーで別の組を置くこともできない（同じ組に戻せば出る）。
+- 確かめたこと（Claude のブラウザ、1366×768）: 緑のボタンは idle で 4 つ（ヘッダー 2・探索 2）、
+  ヘッダーの高さは 167px のまま。O₂ で近づけてみるの中のボタンは「スキャンする」「この距離で計算」の
+  2 つだけ、スキャン中は「やめる」。スキャン後にスライダーで距離を変えると結果が消え、
+  「この距離で計算」で完了、図は残る。`npm test` 528 件・lint（既存の警告だけ）・build 通過。
+- **3 つめの指摘: スライダーで距離を変えると電子の雲や分子軌道が消える。** マーカーは編集と同じ
+  扱い（`invalidateResult()`）なので等値面は古くなって消え、計算は「この距離で計算」を押すまで
+  走らなかった。**マーカーが `MARKER_SETTLE_MS`（400 ms）止まったら App が一点計算する**
+  （`moveMarker`。ドラッグ中の途中の距離は解かない。計算中に動かせばその計算は編集として取り消されて
+  新しい距離で解き直す。ほかの計算が始まっていれば何もしない）。そのためスライダーは一点計算中は
+  動かせるままで、止めるのは緩和中だけ（`markerDisabled`）。**「この距離で計算」は消した**
+  （ヘッダーの「この形のまま計算」と同じことしかしないので、ユーザーの判断で。`SCAN_CALCULATE` も
+  消し、近づけてみるのボタンは「スキャンする」／「やめる」の 1 つを `ActionGrid columns={1}`）。
+  **電子の雲は `densityRequest` と `showDensity` が編集で消えないので、計算が終われば同じ種類で
+  戻る。分子軌道は「同じ軌道」を探して選び直す**: `orbital.ts` の `carryPick(pick, 前の段, 新しい段)`
+  は添字ではなく、スピン・段の軌道の数・`parity`・`inversion` が同じ段のうち下から何番目か、
+  縮退の中の何番目か、で引く（伸ばすと N₂・O₂ の σ と π は入れ替わる）。App は `carryRef` に
+  「選んでいた軌道と段」を持ち、新しい計算の段（`orbitals()`）が届いたところで `selectOrbital`。
+  ほかの編集と、分子軌道の節を閉じたときに捨てる。
+- 確かめたこと（Claude のブラウザ、O₂）: HOMO の上向きの 2 つめを選んでスキャン → スライダーを
+  4 回すばやく（60 ms おき）動かして 2.01 Å → 止めたあとの計算が完了し、同じ「上向き・HOMO・2 つのうち 2 つめ」が
+  選ばれ直した。「原子から動いた電子」を選んで 1.36 Å へ → 完了後も同じ選択。`npm test` 531 件。
 
 ### P3・P4 の実装メモ
 
