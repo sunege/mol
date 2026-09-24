@@ -1,6 +1,9 @@
+/* Three columns (V5-8): the records, the view, the panel. The records column
+   is `auto` because it sizes itself - 236px, or its 40px strip when folded -
+   and the viewer follows whatever is left with its own ResizeObserver. */
 .app {
   display: grid;
-  grid-template-columns: 1fr 300px;
+  grid-template-columns: auto 1fr 340px;
   height: 100vh;
   width: 100vw;
 }
@@ -16,6 +19,46 @@
 .viewport canvas {
   display: block;
   touch-action: none;
+}
+
+/* What the pointer does in the view, one line along its bottom edge. It never
+   takes the pointer, so atoms can be placed and the view turned through it.
+   Level with the measurement labels (1), below the progress card (2), and far
+   from that card, which sits top left. */
+.viewport-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 120px);
+  margin: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgb(14 17 22 / 0.72);
+  color: #7c8798;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Buttons over the view, bottom right. These do take the pointer. */
+.viewport-tools {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+}
+
+.viewport-tools .icon-btn {
+  width: 32px;
+  height: 32px;
+  border-color: #2d3644;
+  background: rgb(21 26 33 / 0.88);
 }
 
 /* The layer the viewer lays its labels on, the same size as the canvas. It
@@ -52,15 +95,160 @@
   white-space: nowrap;
 }
 
+/* A column of a head that stays and a body that scrolls (V5-2): the state and
+   the two main buttons never scroll out of reach, however far down the body
+   is read. Not `position: sticky`, so that the tabs of V5-3 can sit between
+   the two as a third fixed row. */
 .panel {
-  padding: 20px 18px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: #151a21;
   border-left: 1px solid #262d38;
+  overflow: hidden;
+}
+
+.panel-head {
+  flex: none;
+  padding: 12px 18px 14px;
+  border-bottom: 1px solid #262d38;
+}
+
+/* The tabs between the head and the body (V5-3), fixed like the head. Each is
+   a name and, under it, what a click in the view does; the chosen one is
+   underlined. Two of them, or three on a narrow screen (V5-10): the columns
+   are set inline from the count. */
+.tabs {
+  flex: none;
+  display: grid;
+  border-bottom: 1px solid #262d38;
+}
+
+.tab {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 9px 12px 7px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  color: #7c8798;
+  text-align: center;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: #d6dde8;
+}
+
+.tab.active {
+  border-bottom-color: #3f8cff;
+  color: #d6dde8;
+}
+
+.tab-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.tab-subtitle {
+  font-size: 0.68rem;
+  color: #7c8798;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 16px 18px 20px;
   overflow-y: auto;
 }
 
 .panel h1 {
-  font-size: 1.05rem;
+  font-size: 0.85rem;
+  margin: 0 0 8px;
+}
+
+/* State, shape and energy as three label-value lines, so the head stays short. */
+.panel dl.status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 12px;
+  margin: 12px 0 0;
+}
+
+.panel dl.status dt {
+  margin-top: 0;
+}
+
+.panel dl.status dd {
+  margin: 0;
+}
+
+.panel-head .hint {
+  margin-top: 8px;
+}
+
+/* A section closed until asked for (components/Fold.tsx). The summary is a
+   row of its own - the one heading and, while closed, a line saying what is
+   behind it - so the disclosure marker is drawn here rather than left to the
+   browser, which drops it from a summary that is not a list item. */
+.fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 22px;
+  cursor: pointer;
+  color: #7c8798;
+  list-style: none;
+}
+
+.fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fold > summary::before {
+  content: '▸';
+  flex: none;
+  width: 0.8em;
+  font-size: 0.75rem;
+}
+
+.fold[open] > summary {
+  margin-bottom: 8px;
+}
+
+.fold[open] > summary::before {
+  content: '▾';
+}
+
+.fold > summary h2 {
+  flex: none;
+  margin: 0;
+}
+
+.fold-teaser {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+}
+
+/* A heading with a switch on the right of the same line. */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 22px 0 8px;
+}
+
+.section-head h2 {
   margin: 0;
 }
 
@@ -73,7 +261,7 @@
 }
 
 .phase {
-  margin: 4px 0 0;
+  margin: 4px 0 14px;
   font-size: 0.75rem;
   color: #7c8798;
 }
@@ -91,28 +279,144 @@
   gap: 6px;
 }
 
-.row button {
+/* The one look every button in the panel shares (`components/controls.tsx`).
+   The label never wraps and never widens its cell: the grid it sits in has
+   already decided how wide it is, and a long label ends in an ellipsis. */
+.btn {
+  min-width: 0;
   padding: 6px 10px;
   font-size: 0.85rem;
+  line-height: 1.3;
   border-radius: 6px;
   border: 1px solid #2d3644;
   background: #1c222c;
   color: #d6dde8;
   cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.row button:hover:not(:disabled) {
+.btn:hover:not(:disabled) {
   border-color: #3f8cff;
 }
 
-.row button:disabled {
+.btn:disabled {
   opacity: 0.4;
   cursor: default;
 }
 
-.row button.active {
+.btn.active {
   background: #1d3a66;
   border-color: #3f8cff;
+}
+
+/* A button that starts a DFT calculation (`RunButton`): green, which no other
+   button is, and a ▶ before its label. Blue stays "chosen". */
+.btn.run {
+  background: #173a26;
+  border-color: #2ea043;
+}
+
+.btn.run:hover:not(:disabled) {
+  border-color: #56d364;
+}
+
+.run-icon {
+  margin-right: 6px;
+  vertical-align: -1px;
+  color: #56d364;
+}
+
+.btn.small {
+  padding: 3px 8px;
+  font-size: 0.78rem;
+}
+
+/* One of a few, side by side. Its columns come from the number of options
+   (set inline by `Segmented`), always equal. */
+.seg {
+  display: grid;
+  gap: 6px;
+}
+
+/* One of a few, stacked, each with an optional line under its label. */
+.choices {
+  display: grid;
+  gap: 6px;
+}
+
+.btn.choice {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.choice-label,
+.choice-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.choice-description {
+  font-size: 0.72rem;
+  color: #7c8798;
+}
+
+/* A fixed number of columns of ordinary buttons. */
+.action-grid {
+  display: grid;
+  gap: 6px;
+}
+
+/* The table is not a heading: keep the buttons under it off it. */
+.periodic + .action-grid {
+  margin-top: 10px;
+}
+
+.action-grid.cols-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.action-grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.action-grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.action-grid.cols-5 {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+/* A square holding one icon, inside a row of text. */
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: none;
+  color: #7c8798;
+  cursor: pointer;
+}
+
+.icon-btn:hover:not(:disabled) {
+  border-color: #2d3644;
+  color: #d6dde8;
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-btn.active {
+  color: #3f8cff;
 }
 
 .panel dl {
@@ -164,6 +468,22 @@
     border-left: none;
     border-top: 1px solid #262d38;
     max-height: 50vh;
+  }
+
+  /* Three tabs in the width of a phone. */
+  .tab {
+    padding: 8px 4px 6px;
+  }
+
+  /* The line under the view may take two lines here rather than lose its end. */
+  .viewport-hint {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    width: max-content;
+    white-space: normal;
+    text-align: center;
+    border-radius: 10px;
   }
 }
 
@@ -345,17 +665,6 @@
   color: #ff9a9a;
 }
 
-/* Edit / observe, at the top of the panel. Two equal halves, so it reads as
-   one switch rather than two unrelated buttons. */
-.mode-switch {
-  margin-top: 14px;
-  flex-wrap: nowrap;
-}
-
-.mode-switch button {
-  flex: 1;
-}
-
 .panel dl.measurement dt {
   margin-top: 0;
 }
@@ -371,247 +680,29 @@
   color: #ffd699;
 }
 
-.observe-toggle {
+.observe-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin-top: 14px;
 }
 
-.observe-actions {
-  margin-top: 10px;
-}
-
-/* The structure log. A row is a name, how deep the valley is, and a bar behind
-   both: the bar is the comparison, so it is read before the number is. */
-.record-group {
-  margin-top: 12px;
-}
-
-.record-group h3 {
-  margin: 0 0 6px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: #9aa6b8;
-}
-
-ul.records {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.record {
-  position: relative;
-  padding: 6px 8px;
-  border: 1px solid #262d38;
-  border-radius: 6px;
-  background: #171d26;
-  overflow: hidden;
-}
-
-.record.open {
-  border-color: #3f8cff;
-}
-
-.record-bar {
-  position: absolute;
-  inset: 0 auto 0 0;
-  background: #1d3a66;
-  pointer-events: none;
-}
-
-.record-row {
-  position: relative;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.record-meta {
-  margin-top: 2px;
-  font-size: 0.7rem;
-  color: #7c8798;
-}
-
-button.record-name,
-input.record-name {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  font: inherit;
-  font-size: 0.85rem;
-  text-align: left;
-  color: #d6dde8;
-  background: none;
-  border: none;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-button.record-name:hover {
-  color: #8fc0ff;
-}
-
-input.record-name {
-  cursor: text;
-  border-bottom: 1px solid #3f8cff;
-}
-
-.record-relative {
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-  color: #9aa6b8;
-  white-space: nowrap;
-}
-
-.record-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.record-actions button {
-  padding: 0;
-  font: inherit;
-  font-size: 0.7rem;
-  color: #7c8798;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-
-.record-actions button:hover {
-  color: #8fc0ff;
-}
-
-/* A file input, dressed as one of the buttons beside it. */
-.file-button {
-  padding: 6px 10px;
-  font-size: 0.85rem;
-  border-radius: 6px;
-  border: 1px solid #2d3644;
-  background: #1c222c;
-  color: #d6dde8;
-  cursor: pointer;
-}
-
-.file-button:hover {
-  border-color: #3f8cff;
-}
-
-.file-button input {
-  display: none;
+.observe-row .btn {
+  flex: none;
 }
 
 .hint.warning {
   color: #ffc48f;
 }
 
-.file-button.disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.record-list {
-  max-height: 34vh;
-  overflow-y: auto;
-}
-
-/* The search section: candidates being tried behind the molecule on screen.
-   Shaped like a record row so the two lists read as the same kind of thing,
-   without the depth bar - a candidate has no depth until it has settled, and
-   by then it is a record. */
-ul.candidates {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 24vh;
-  overflow-y: auto;
-}
-
-.candidate {
-  padding: 6px 8px;
-  border: 1px solid #262d38;
-  border-radius: 6px;
-  background: #171d26;
-}
-
-.candidate.open {
-  border-color: #3f8cff;
-}
-
-.candidate-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.candidate-name {
-  font-size: 0.85rem;
-  color: #d6dde8;
-  white-space: nowrap;
-}
-
-.candidate-status {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-  color: #9aa6b8;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.candidate-depth {
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-  color: #9aa6b8;
-  white-space: nowrap;
-}
-
-.candidate-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 2px;
-}
-
-.candidate-actions button {
-  padding: 0;
-  font: inherit;
-  font-size: 0.7rem;
-  color: #7c8798;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-
-.candidate-actions button:hover {
-  color: #8fc0ff;
-}
-
+/* The search section's one line on how the set is doing; the candidates
+   themselves are rows of the records tree (V5-9). */
 .search-summary {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: #9aa6b8;
-}
-
-/* 形を探す / 形を測る, above the buttons that start a calculation. Two equal
-   halves like the mode switch, because one of the two is always chosen. */
-.level-switch {
-  flex-wrap: nowrap;
-}
-
-.level-switch button {
-  flex: 1;
 }
 
 .hint.level-hint {
@@ -625,16 +716,6 @@ ul.candidates {
    rather than in rem. A molecule with unpaired electrons puts two columns in
    the same SVG - which is what lets a faint line join the pairs across the gap
    between them. */
-.orbitals summary {
-  cursor: pointer;
-  color: #7c8798;
-}
-
-.orbitals summary h2 {
-  display: inline-block;
-  margin-bottom: 0;
-}
-
 .orbital-ladder {
   display: block;
   width: 100%;
@@ -742,19 +823,14 @@ ul.orbital-character {
   color: #9aa6b8;
 }
 
-/* "近づけてみる": the distance scan and the correlation diagram, inside the
-   molecular-orbital section (V4-8). Both figures are plain SVG - the page is
-   cross-origin isolated, so no chart library can be fetched from anywhere - and
-   both are drawn in the same 260-unit viewBox as the ladder above them, so a
-   rung of one is the same size as a rung of the other. */
-.scan {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #222b38;
-}
-
+/* "近づけてみる": the distance scan and the correlation diagram (V4-8), a closed
+   section of its own after the molecular-orbital one (V5-6). Both figures are
+   plain SVG - the page is cross-origin isolated, so no chart library can be
+   fetched from anywhere - and both are drawn in the same 260-unit viewBox as
+   the ladder in that section, so a rung of one is the same size as a rung of
+   the other. */
 .scan h3 {
-  margin: 0 0 6px;
+  margin: 16px 0 6px;
   font-size: 0.78rem;
   font-weight: 600;
   color: #9aa6b8;
@@ -764,10 +840,7 @@ ul.orbital-character {
   margin-top: 0;
 }
 
-.scan-pairs {
-  margin-top: 8px;
-}
-
+/* The pairs, then starting and calculating: two grids, one under the other. */
 .scan-figure,
 .correlation {
   display: block;
@@ -913,4 +986,377 @@ circle.scan-total {
    which are the two to find first. */
 .correlation-name {
   fill: #b4bfcf;
+}
+
+/* The records column (V5-8, `RecordExplorer`): a head, a row of file buttons,
+   the tree - the only part that scrolls - and the caveat at the foot. */
+.explorer {
+  display: flex;
+  flex-direction: column;
+  width: 236px;
+  min-height: 0;
+  background: #151a21;
+  border-right: 1px solid #262d38;
+  overflow: hidden;
+}
+
+/* Folded: a strip with the button that opens it and the count. */
+.explorer.collapsed {
+  width: 40px;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.explorer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 6px 14px;
+}
+
+.explorer-head h2 {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7c8798;
+}
+
+.explorer-head .icon-btn {
+  margin-left: auto;
+}
+
+/* The chevron points down when open; turned a quarter, it points left - the
+   way the column folds. */
+.chevron-left .icon {
+  display: block;
+  transform: rotate(90deg);
+}
+
+.badge {
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: #1c222c;
+  border: 1px solid #2d3644;
+  color: #9aa6b8;
+  font-size: 0.68rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.explorer-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 8px 14px;
+  border-bottom: 1px solid #262d38;
+}
+
+.explorer-tools .more-menu {
+  margin-left: auto;
+}
+
+.explorer > .hint {
+  margin: 8px 14px 0;
+}
+
+.explorer-tree {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 4px 10px;
+}
+
+.explorer-tree > .hint {
+  margin: 4px 10px;
+}
+
+.explorer-caveat {
+  flex: none;
+  margin: 0;
+  padding: 8px 14px 10px;
+  border-top: 1px solid #262d38;
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: #6b7686;
+}
+
+/* A file input, dressed as the button it sits in: the input is kept in the
+   page (not `display: none`) so Tab still reaches it. */
+.btn.file-label {
+  position: relative;
+  display: inline-block;
+}
+
+.btn.file-label input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.btn.file-label:focus-within {
+  outline: 2px solid #3f8cff;
+  outline-offset: 1px;
+}
+
+.btn.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.btn.disabled:hover {
+  border-color: #2d3644;
+}
+
+/* The "…" button and the short list it drops. */
+.more-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 5;
+  min-width: 170px;
+  margin-top: 4px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: #1c222c;
+  border: 1px solid #2d3644;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 40%);
+}
+
+.menu-item {
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  color: #d6dde8;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.menu-item:hover:not(:disabled) {
+  background: #1d3a66;
+}
+
+.menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.menu-note {
+  margin: 4px 8px 4px;
+  max-width: 200px;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: #7c8798;
+}
+
+/* The tree. Every row starts with a 26px slot - a chevron, or nothing - so
+   names line up at each depth; the depth itself is inline padding. */
+ul.tree,
+.tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tree-spacer,
+.tree-chevron {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: #7c8798;
+}
+
+.tree-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px 0 0;
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  color: #9aa6b8;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tree-toggle.formula {
+  color: #d6dde8;
+  font-weight: 600;
+}
+
+.tree-toggle:hover,
+.tree-record:hover {
+  background: #1c222c;
+}
+
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-meta {
+  flex: none;
+  font-size: 0.68rem;
+  font-weight: 400;
+  color: #6b7686;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A record: its name and where it sits, when it was made under them, and
+   the depth bar along the bottom edge. */
+.tree-record {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px 5px;
+  font: inherit;
+  text-align: left;
+  color: #d6dde8;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.tree-item.open > .tree-row > .tree-record {
+  background: #1d3a66;
+  border-color: #3f8cff;
+}
+
+.tree-record.unsettled {
+  color: #7c8798;
+}
+
+/* A candidate still going, or stopped: a row to read, not to press. */
+.tree-record.static {
+  cursor: default;
+}
+
+.tree-record.static:hover {
+  background: none;
+}
+
+.tree-record > .tree-name {
+  font-size: 0.8rem;
+}
+
+.tree-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-relative {
+  color: #9aa6b8;
+}
+
+.tree-record.unsettled .tree-relative,
+.tree-count,
+.tree-time {
+  color: #6b7686;
+}
+
+.tree-time {
+  margin-left: auto;
+}
+
+.tree-bar {
+  position: absolute;
+  left: 6px;
+  bottom: 1px;
+  max-width: calc(100% - 12px);
+  height: 2px;
+  border-radius: 1px;
+  background: #3f8cff;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.tree-actions {
+  display: flex;
+  gap: 2px;
+  padding-bottom: 4px;
+}
+
+input.tree-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  color: #d6dde8;
+  background: #1c222c;
+  border: 1px solid #3f8cff;
+  border-radius: 4px;
+}
+
+/* On a narrow screen the App draws the records in the sheet's 記録 tab and
+   not in the left column (V5-10, `useNarrow`, the same 720px). This only
+   guards the column itself; after `.explorer`, so it wins. */
+@media (max-width: 720px) {
+  .app > .explorer {
+    display: none;
+  }
+}
+
+/* The records in the sheet's 記録 tab: the same column, but the sheet's body
+   scrolls it whole - at 50vh, with the head and the tabs fixed above, the
+   tree alone would get a few lines. */
+.panel-body.records {
+  padding: 0;
+}
+
+.explorer.in-sheet {
+  width: auto;
+  background: none;
+  border-right: none;
+  overflow: visible;
+}
+
+.explorer.in-sheet .explorer-tree {
+  flex: none;
+  overflow: visible;
+}
+
+.tab-label .spinner {
+  display: inline-block;
+  margin-left: 6px;
+  vertical-align: -1px;
 }

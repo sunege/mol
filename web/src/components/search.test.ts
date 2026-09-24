@@ -1,23 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   NUDGED_COUNT,
-  SEARCH_EMPTY,
   SEARCH_HEADING,
   SEARCH_HINT,
   canCancel,
-  canOpen,
   candidateName,
-  depthText,
   isOver,
   searchDisabledReason,
   searchSummary,
   statusText,
 } from './search';
 import type { Candidate, CandidateStatus } from '../search/pool';
-import { groupRecords } from '../records/log';
-import { fakeRecord } from '../records/fixtures';
-import { HARTREE_TO_KJ_PER_MOL } from '../records/units';
-import { settledCount } from './records';
 import { levelLabel } from './level';
 
 const ALL_STATUSES: CandidateStatus[] = [
@@ -86,8 +79,7 @@ describe('what a row says', () => {
     const said = [
       SEARCH_HEADING,
       SEARCH_HINT,
-      SEARCH_EMPTY,
-      searchDisabledReason(0) ?? '',
+          searchDisabledReason(0) ?? '',
       ...ALL_STATUSES.map((status) => statusText(candidate(status), 5000)),
       searchSummary([candidate('running'), candidate('waiting'), candidate('settled')]),
     ].join(' ');
@@ -99,9 +91,7 @@ describe('which level the search runs at', () => {
   it('says so by the name the choice above gives it', () => {
     // Choosing the other level for the calculations in front changes nothing
     // here, and the hint is where a class finds that out.
-    expect(SEARCH_HINT).toContain(
-      `上で何を選んでいても、ここで試す形は「${levelLabel('shape')}」で計算します。`,
-    );
+    expect(SEARCH_HINT).toContain(`上の選択にかかわらず裏側で「${levelLabel('shape')}」で計算し`);
     expect(SEARCH_HINT).not.toContain(levelLabel('measure'));
   });
 
@@ -119,51 +109,7 @@ describe('which level the search runs at', () => {
   });
 });
 
-describe('how deep the shape a candidate found is', () => {
-  /** Two ammonia records, the second `kj` above the first. */
-  function entriesFor(kj: number) {
-    const bottom = -55.2963015;
-    const groups = groupRecords([
-      fakeRecord({ energy: bottom, id: 'first', savedAt: '2026-09-20T09:00:00.000Z' }),
-      fakeRecord({
-        energy: bottom + kj / HARTREE_TO_KJ_PER_MOL,
-        id: 'second',
-        savedAt: '2026-09-20T09:01:00.000Z',
-      }),
-    ]);
-    return groups[0];
-  }
-
-  it('reads the same as the row in the log does', () => {
-    const group = entriesFor(38.7);
-    const settled = settledCount(group);
-    const higher = group.entries.find((entry) => entry.record.id === 'second')!;
-    expect(depthText(candidate('settled'), higher, settled)).toBe('+38.7 kJ/mol');
-  });
-
-  it('says nothing for a candidate that did not settle', () => {
-    const group = entriesFor(38.7);
-    const deepest = group.entries[0];
-    for (const status of ALL_STATUSES) {
-      if (status === 'settled') continue;
-      expect(depthText(candidate(status), deepest, 2)).toBe('');
-    }
-  });
-
-  it('says nothing before the record exists', () => {
-    expect(depthText(candidate('settled'), null, 2)).toBe('');
-  });
-});
-
 describe('what can be done to a candidate', () => {
-  it('lets a finished one be opened, including one that came apart', () => {
-    expect(ALL_STATUSES.filter((status) => canOpen(candidate(status)))).toEqual([
-      'settled',
-      'partial',
-      'failed',
-    ]);
-  });
-
   it('lets only an unfinished one be stopped', () => {
     expect(ALL_STATUSES.filter((status) => canCancel(candidate(status)))).toEqual([
       'waiting',

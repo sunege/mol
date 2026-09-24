@@ -1,20 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import {
+  EXPLORER_WORDS,
   ISOMER_CAVEAT,
   RECORDS_HINT,
   depthBar,
   exportFileName,
-  groupHeading,
+  formulaMeta,
   importProblemText,
   importedText,
+  levelHeading,
+  levelMeta,
   relativeText,
   sameShapeText,
   savedAtText,
   settledCount,
   spreadOf,
+  valleySizeText,
 } from './records';
 import { groupRecords, SAME_VALLEY_KJ_PER_MOL } from '../records/log';
 import { fakeRecord } from '../records/fixtures';
+import { buildRecordTree } from '../records/tree';
 import { HARTREE_TO_KJ_PER_MOL } from '../records/units';
 
 const hartree = (kj: number) => kj / HARTREE_TO_KJ_PER_MOL;
@@ -86,45 +91,66 @@ describe('the bar', () => {
 /** Everything a calculation must not be described by on screen (requirement F4). */
 const FORBIDDEN = ['基底', 'STO-3G', '6-31G', '汎関数', 'LDA', 'VWN', '電荷', '多重度', 'DFT'];
 
-describe('the heading of a group', () => {
-  it('counts the records, and the shapes once there are two', () => {
-    expect(groupHeading(group({ kj: 0 }))).toBe('H₂O · 形を探す · 1 件');
-    expect(groupHeading(group({ kj: 0 }, { kj: 0.1 }))).toBe('H₂O · 形を探す · 2 件');
-    expect(groupHeading(group({ kj: 0 }, { kj: 38.7 }))).toBe(
-      'H₂O · 形を探す · 2 件（2 種類の形）',
-    );
-  });
-
-  it('says which level the group is at, in the words of the choice', () => {
-    const groups = groupRecords([
-      fakeRecord({ energy: BOTTOM, id: 'shape' }),
-      fakeRecord({ energy: BOTTOM - 1, level: 'measure', id: 'measure' }),
-    ]);
-    expect(groups.map(groupHeading).sort()).toEqual(['H₂O · 形を探す · 1 件', 'H₂O · 形を測る · 1 件']);
-  });
-
-  it('says no level for a model it does not know', () => {
-    const odd = { ...fakeRecord({ energy: BOTTOM }), model: 'sto-3g/lda-vwn5/medium' };
-    expect(groupHeading(groupRecords([odd])[0])).toBe('H₂O · 1 件');
-  });
-
-  it('names no DFT parameter, whichever the level and the charge (requirement F4)', () => {
-    const groups = groupRecords(
-      (['shape', 'measure'] as const).flatMap((level) =>
-        [0, 1].map((charge) =>
-          fakeRecord({ energy: BOTTOM, level, charge, id: `${level}-${charge}` }),
-        ),
+describe('the words of the tree', () => {
+  const tree = buildRecordTree(
+    groupRecords([
+      ...[0, 0.2, 0.4, 38.7].map((kj, i) =>
+        fakeRecord({ energy: BOTTOM + hartree(kj), id: `s${i}`, savedAt: `2026-09-20T09:0${i}:00.000Z` }),
       ),
-    );
-    expect(groups).toHaveLength(4);
-    for (const each of groups) {
-      const heading = groupHeading(each).toLowerCase();
-      for (const word of FORBIDDEN) expect(heading).not.toContain(word.toLowerCase());
-      expect(heading).not.toContain(each.entries[0].record.model);
+      fakeRecord({ energy: BOTTOM, level: 'measure', id: 'm0' }),
+      fakeRecord({ energy: BOTTOM, level: 'measure', charge: 1, id: 'm1' }),
+      fakeRecord({ energy: BOTTOM + 1, reason: 'interrupted', id: 'late' }),
+      { ...fakeRecord({ energy: BOTTOM, id: 'odd' }), model: 'sto-3g/lda-vwn5/medium' },
+    ]),
+  );
+  const [water] = tree;
+  const [shape, measure, ion, other] = water.children;
+
+  it('counts the records of a molecule beside its formula', () => {
+    expect(water.formula).toBe('H₂O');
+    expect(formulaMeta(water)).toBe('8');
+  });
+
+  it('names a level and counts it, with the shapes once there are two', () => {
+    expect(levelHeading(shape.level)).toBe('形を探す');
+    expect(levelMeta(shape.group!)).toBe('5 · 2 種類の形');
+    expect(levelHeading(measure.level)).toBe('形を測る');
+    expect(levelMeta(measure.group!)).toBe('1');
+    expect(levelHeading(other.level)).toBe('ほかの計算');
+  });
+
+  it('names a valley by its first record, how deep it is and how many found it', () => {
+    const valley = shape.children[0];
+    if (valley.kind !== 'valley') throw new Error('expected a valley');
+    expect(relativeText(valley.head, settledCount(shape.group!))).toBe('いちばん低い');
+    expect(valleySizeText(valley)).toBe('×3');
+  });
+
+  it('names no DFT parameter and no group key, even with two charges (requirement F4)', () => {
+    // Two groups at one level that differ by the charge read the same.
+    expect(levelHeading(ion.level)).toBe(levelHeading(measure.level));
+    expect(levelMeta(ion.group!)).toBe(levelMeta(measure.group!));
+
+    const words: string[] = [];
+    for (const molecule of tree) {
+      words.push(molecule.formula, formulaMeta(molecule));
+      for (const level of molecule.children) {
+        const settled = settledCount(level.group!);
+        words.push(levelHeading(level.level), levelMeta(level.group));
+        for (const child of level.children) {
+          if (child.kind === 'candidate') continue;
+          const entries = child.kind === 'valley' ? [child.head, ...child.rest] : [child.entry];
+          if (child.kind === 'valley') words.push(valleySizeText(child));
+          for (const entry of entries) {
+            words.push(entry.record.name, relativeText(entry, settled), sameShapeText(entry));
+          }
+        }
+      }
     }
-    // The charge splits the groups and changes nothing that is shown.
-    const [neutral, ion] = groups.filter((each) => each.level === 'measure');
-    expect(groupHeading(neutral)).toBe(groupHeading(ion));
+    words.push(...Object.values(EXPLORER_WORDS));
+    const text = words.join('\n').toLowerCase();
+    for (const word of [...FORBIDDEN, 'STO', '6-31']) expect(text).not.toContain(word.toLowerCase());
+    for (const level of water.children) expect(text).not.toContain(level.group!.key.toLowerCase());
   });
 });
 

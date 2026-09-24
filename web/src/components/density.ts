@@ -48,6 +48,25 @@ export function channelLabel(request: DensitySurface): string {
 }
 
 /**
+ * The line under each choice's label: what pressing it shows, short enough for
+ * one line of the panel. The line under the slider (`explainChannel`) is the
+ * longer account of what is on screen now.
+ *
+ * The bonding one cannot say which of its two answers it will get, and does
+ * not need to: it is offered only where there is a pi system, so it always says
+ * what the pi picture is for.
+ */
+const CHANNEL_NOTES: Record<DensitySurface, string> = {
+  total: '分子全体を包む電子の広がり',
+  bonding: '結合をかたちづくる電子だけ',
+  deformation: '結合で濃く・薄くなったところ',
+};
+
+export function channelNote(request: DensitySurface): string {
+  return CHANNEL_NOTES[request];
+}
+
+/**
  * The buttons to show for a molecule, given whether it has a pi system.
  *
  * `hasPi` is false whenever the answer is not known - a molecule nobody has

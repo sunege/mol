@@ -59,11 +59,13 @@ export interface ScanRange {
 }
 
 /** A pair of elements to walk together, and the range worth walking. */
-export interface ScanPreset extends ScanRange {
-  id: string;
-  /** As the button says it. */
-  label: string;
+export interface ScanPair extends ScanRange {
   z: [number, number];
+}
+
+/** A pair whose range was measured before it was written down. */
+export interface ScanPreset extends ScanPair {
+  id: string;
 }
 
 /**
@@ -80,7 +82,12 @@ export interface ScanPreset extends ScanRange {
 export const SCAN_POINTS = 27;
 
 /**
- * The pairs the section offers, and the range each is worth seeing over.
+ * The pairs with a measured range, and the range each is worth seeing over.
+ *
+ * Not offered as buttons (they were until V5-11): the scan only ever walks the
+ * two atoms on screen, and one of these only lends it its range
+ * ({@link scanPairFor}). A scan of some other pair would put that pair in the
+ * viewer as soon as its marker moved, in place of the molecule being looked at.
  *
  * All five were measured through the engine before they were written down
  * (`docs/dev-notes.md`, "V4-7 の実装メモ"), and the ranges are what those
@@ -100,19 +107,18 @@ export const SCAN_POINTS = 27;
  *   state loses the solution and the points that come back are noise.
  */
 export const SCAN_PRESETS: ScanPreset[] = [
-  { id: 'h2', label: 'H₂', z: [1, 1], from: 0.4, to: 3.0, points: SCAN_POINTS },
-  { id: 'he2', label: 'He₂', z: [2, 2], from: 1.5, to: 4.0, points: SCAN_POINTS },
-  { id: 'n2', label: 'N₂', z: [7, 7], from: 0.8, to: 2.0, points: SCAN_POINTS },
-  { id: 'o2', label: 'O₂', z: [8, 8], from: 0.9, to: 2.1, points: SCAN_POINTS },
-  { id: 'hf', label: 'HF', z: [1, 9], from: 0.6, to: 1.7, points: SCAN_POINTS },
+  { id: 'h2', z: [1, 1], from: 0.4, to: 3.0, points: SCAN_POINTS },
+  { id: 'he2', z: [2, 2], from: 1.5, to: 4.0, points: SCAN_POINTS },
+  { id: 'n2', z: [7, 7], from: 0.8, to: 2.0, points: SCAN_POINTS },
+  { id: 'o2', z: [8, 8], from: 0.9, to: 2.1, points: SCAN_POINTS },
+  { id: 'hf', z: [1, 9], from: 0.6, to: 1.7, points: SCAN_POINTS },
 ];
 
 /**
- * The offered pair that is the two atoms on screen, or none.
+ * The measured pair that is the two atoms on screen, or none.
  *
- * What the section starts on, so that a molecule the app has a measured range
- * for gets that range rather than one worked out from where its atoms happen to
- * be. The curated ranges are the ones that were walked end to end before they
+ * So that a molecule the app has a measured range for gets that range rather
+ * than one worked out from where its atoms happen to be. The curated ranges are the ones that were walked end to end before they
  * were written down; a range reaching much further out can find the engine
  * calling a degenerate pair degenerate at one separation and not at the next
  * ({@link buildScan}'s last note).
@@ -158,13 +164,35 @@ export function rangeAround(distance: number): ScanRange {
   };
 }
 
+/**
+ * What a scan of the two atoms on screen walks: those two, in the order they
+ * are on screen (so the marker puts each element back where it was), over the
+ * measured range when there is one and otherwise around their separation.
+ */
+export function scanPairFor(z: readonly [number, number], distance: number): ScanPair {
+  const preset = presetFor(z);
+  const range = preset === null ? rangeAround(distance) : preset;
+  return { z: [z[0], z[1]], from: range.from, to: range.to, points: range.points };
+}
+
 // --- words ----------------------------------------------------------------
 
+/** The heading of the section, which is a fold of its own in the observe tab (V5-6). */
 export const SCAN_HEADING = '近づけてみる';
 
-export const SCAN_TEASER =
+/**
+ * Beside the heading while the section is closed: one line, and a short one -
+ * about fourteen characters are what fit to the right of it in the panel.
+ */
+export const SCAN_TEASER = '距離を変えて部屋の高さを見る';
+
+/** The first thing inside the section, about both of its figures. */
+export const SCAN_INTRO =
   '2 つの原子を近づけると、電子の部屋の高さがどう変わるかを見られます。' +
   '離れていれば原子それぞれの部屋、近づけば分子の部屋です。';
+
+/** Over the scan itself, below the correlation diagram. */
+export const SCAN_PART_HEADING = '距離を変える';
 
 /** Under the upper panel: how to read the lines. */
 export const SCAN_LEVELS_HINT =
@@ -177,27 +205,21 @@ export const SCAN_ENERGY_HINT =
 
 /** The one thing the marker does to the rest of the app. */
 export const SCAN_MARKER_HINT =
-  'スライダーを動かすと、その距離の形が 3D に置かれます。' +
-  'その距離の部屋を見るには「この距離で計算」を押してください。';
+  'スライダーを動かすと、その距離の形が 3D に置かれます。止めたところで計算し直し、' +
+  '見ていた電子の雲や分子軌道をその距離で描き直します。';
 
 /** Stopping a scan is the brutal kind of cancel, and takes the surface with it. */
 export const SCAN_STOP_HINT = '途中でやめると、画面の等値面はもう一度計算し直しになります。';
 
-/** The pair already on screen, which is offered beside the written-down ones. */
-export const SCAN_CURRENT_ID = 'current';
-
 export const SCAN_START = 'スキャンする';
 export const SCAN_STOP = 'やめる';
-export const SCAN_CALCULATE = 'この距離で計算';
-export const SCAN_CURRENT_LABEL = 'いまの 2 原子';
-export const SCAN_GROUP_LABEL = '近づける 2 原子';
 export const SCAN_FIGURE_LABEL = '原子を近づけたときの部屋の高さと全エネルギー';
 
 /** The section is only about two atoms approaching, so it needs two. */
 export const SCAN_NEEDS_TWO = '原子が 2 つのときに、近づけたり離したりできます。';
 
 /** Nothing has been scanned yet. */
-export const SCAN_EMPTY = '上のどれかを選んで「スキャンする」を押すと、ここに図が出ます。';
+export const SCAN_EMPTY = '「スキャンする」を押すと、画面の 2 原子を近づけたり離したりした図がここに出ます。';
 
 /** How far along a running scan is. */
 export function scanProgress(received: number, asked: number): string {

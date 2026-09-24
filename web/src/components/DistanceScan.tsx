@@ -1,15 +1,23 @@
 /**
  * "近づけてみる": the distance scan and the correlation diagram, drawn (V4-8).
  *
- * Inside the molecular-orbital section, and only for a molecule of exactly two
- * atoms - which is the only shape either figure can be drawn for.
+ * A closed section of its own in the observe tab, after the molecular-orbital
+ * one (V5-6; it used to sit at the bottom of that section, which made it about
+ * 1,300px long when open). App draws it only for a molecule of exactly two
+ * atoms - which is the only shape either figure can be drawn for. This is the
+ * inside of that fold: its heading and the line beside it are App's.
  *
- * The correlation diagram comes first, because it is about the molecule on
- * screen and reads as the ladder above it continued outwards to the free atoms.
- * The scan is below it, because it need not be about that molecule at all: it
- * walks whichever pair is chosen, and it is a calculation per separation, so it
- * is started deliberately, reports how far along it is, and can be given up on.
- * Its figure grows as the points arrive.
+ * The correlation diagram comes first, because it reads as the ladder above it
+ * continued outwards to the free atoms. The scan is below it: a calculation per
+ * separation, so it is started deliberately, reports how far along it is, and
+ * can be given up on. Its figure grows as the points arrive.
+ *
+ * Both are about the two atoms on screen and nothing else. The section used to
+ * offer five other pairs to scan as well (H₂, He₂, N₂, O₂, HF), and moving the
+ * marker of one of those replaced the molecule in the viewer with that pair -
+ * which, in a user's hands (V5-11), read as the section taking the atoms away.
+ * App hands in the pair (`scanPairFor`) and draws a scan only while it is still
+ * the pair on screen.
  *
  * Two SVGs, both plain: the page is cross-origin isolated, so no chart library
  * can be loaded from anywhere (`docs/plan-v4.md`, decision 8). Every string
@@ -19,44 +27,39 @@
  *
  * The marker is the one control here that reaches outside the section: moving
  * it puts the two atoms at that separation in the viewer, which makes the
- * numbers beside them stale exactly as an edit would. It is deliberately not a
- * calculation - the button next to it is - because dragging it would otherwise
- * queue one per step.
+ * numbers beside them stale exactly as an edit would, and once it is still App
+ * calculates them there, bringing back the cloud or the orbital that was on
+ * screen (V5-11). Only once it is still: a drag passes through every separation
+ * and would otherwise start one calculation per step.
  */
 import { useMemo } from 'react';
+import { ActionGrid, RunButton } from './controls';
 import {
   CORRELATION_HEADING,
   CORRELATION_HINT,
   CORRELATION_LABEL,
   CORR_LINE,
-  SCAN_CALCULATE,
   SCAN_EMPTY,
   SCAN_ENERGY_HINT,
   SCAN_FIGURE_LABEL,
-  SCAN_GROUP_LABEL,
-  SCAN_HEADING,
+  SCAN_INTRO,
   SCAN_LEVELS_HINT,
   SCAN_MARKER_HINT,
+  SCAN_PART_HEADING,
   SCAN_START,
   SCAN_STOP,
   SCAN_STOP_HINT,
-  SCAN_TEASER,
   buildCorrelation,
   buildScan,
   markerLabel,
   scanProgress,
   type RungMakeup,
-  type ScanPreset,
   type ScanRange,
   type ScanXY,
 } from './scan';
 import type { OrbitalLevel, ScanPoint } from '../worker/protocol';
 
 interface Props {
-  /** The pairs on offer, the last of which is the two atoms on screen. */
-  presets: readonly ScanPreset[];
-  chosenId: string;
-  onChoose: (id: string) => void;
   /** A scan is in flight: the worker is busy and the marker must hold still. */
   running: boolean;
   /** Everything else is busy instead - a calculation of the molecule itself. */
@@ -67,11 +70,14 @@ interface Props {
   range: ScanRange | null;
   /** Where the user put the marker, or null while it is where it started. */
   markerIndex: number | null;
+  /**
+   * The marker cannot move. Not while the calculation it started itself is
+   * running - moving it again replaces that one - but while a relaxation is.
+   */
+  markerDisabled: boolean;
   onMarker: (index: number) => void;
   onStart: () => void;
   onStop: () => void;
-  /** Solves the electrons at one of the separations, placing the pair first. */
-  onCalculate: (index: number) => void;
   /** One list of a free atom's orbital energies per nucleus, or null. */
   atomLevels: number[][] | null;
   /** The molecule's own ladder, or null while there is none. */
@@ -83,18 +89,15 @@ interface Props {
 }
 
 export function DistanceScan({
-  presets,
-  chosenId,
-  onChoose,
   running,
   disabled,
   points,
   range,
   markerIndex,
+  markerDisabled,
   onMarker,
   onStart,
   onStop,
-  onCalculate,
   atomLevels,
   levels,
   weights,
@@ -116,6 +119,7 @@ export function DistanceScan({
 
   return (
     <section className="scan">
+      <p className="hint">{SCAN_INTRO}</p>
       {correlation !== null && (
         <>
           <h3>{CORRELATION_HEADING}</h3>
@@ -211,42 +215,18 @@ export function DistanceScan({
         </>
       )}
 
-      <h3>{SCAN_HEADING}</h3>
-      <p className="hint">{SCAN_TEASER}</p>
-      <div className="row scan-pairs" role="group" aria-label={SCAN_GROUP_LABEL}>
-        {presets.map((preset) => (
-          <button
-            key={preset.id}
-            type="button"
-            className={preset.id === chosenId ? 'active' : ''}
-            aria-pressed={preset.id === chosenId}
-            disabled={running || disabled}
-            onClick={() => onChoose(preset.id)}
-          >
-            {preset.label}
+      <h3>{SCAN_PART_HEADING}</h3>
+      <ActionGrid columns={1}>
+        {running ? (
+          <button type="button" className="btn" disabled={disabled} onClick={onStop}>
+            {SCAN_STOP}
           </button>
-        ))}
-      </div>
-      <div className="row">
-        <button
-          type="button"
-          className={running ? '' : 'active'}
-          disabled={disabled}
-          onClick={running ? onStop : onStart}
-        >
-          {running ? SCAN_STOP : SCAN_START}
-        </button>
-        {/* The pair is placed at the marker before it is solved, so this
-            answers about the separation in the figure whether or not anyone has
-            dragged the marker yet. */}
-        <button
-          type="button"
-          disabled={running || disabled || figure?.marker == null}
-          onClick={() => figure?.marker != null && onCalculate(figure.marker.index)}
-        >
-          {SCAN_CALCULATE}
-        </button>
-      </div>
+        ) : (
+          <RunButton disabled={disabled} onClick={onStart}>
+            {SCAN_START}
+          </RunButton>
+        )}
+      </ActionGrid>
       {running && (
         <p className="hint">
           {scanProgress(points.length, range?.points ?? 0)} · {SCAN_STOP_HINT}
@@ -386,7 +366,7 @@ export function DistanceScan({
                 max={points.length - 1}
                 step={1}
                 value={figure.marker.index}
-                disabled={running || disabled}
+                disabled={running || markerDisabled}
                 onChange={(event) => onMarker(Number(event.target.value))}
               />
             </label>

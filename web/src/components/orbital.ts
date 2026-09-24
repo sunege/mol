@@ -37,8 +37,8 @@ import { levelLabel } from './level';
 /** The heading of the section, which is also what the closed summary says. */
 export const ORBITAL_HEADING = '分子軌道';
 
-/** The line under the closed section: what is inside, in one sentence. */
-export const ORBITAL_TEASER = '電子が入る「部屋」を 1 つずつ、形と色で見られます。';
+/** Beside the closed section's heading: what is inside, short enough for one line. */
+export const ORBITAL_TEASER = '電子の「部屋」を形と色で見る';
 
 /**
  * The line above the ladder: how to read it.
@@ -307,6 +307,35 @@ export function rungOf(
         pick.index < level.first + level.count,
     ) ?? null
   );
+}
+
+/**
+ * The same orbital in the ladder of a new calculation of the same atoms at
+ * another geometry - the marker of "近づけてみる" moved (V5-11) - or none.
+ *
+ * Not the same index: stretching a bond can carry one level past another, as
+ * O₂'s and N₂'s sigma and pi levels cross. The same the way the scan's lines are
+ * followed (`components/scan.ts`): the same spin, the same kind of rung (how many
+ * orbitals it holds, and its symmetries), and the same place from the bottom
+ * among the rungs of that kind; and within a degenerate rung, the same member.
+ */
+export function carryPick(
+  pick: OrbitalPick,
+  from: readonly OrbitalLevel[],
+  to: readonly OrbitalLevel[],
+): OrbitalPick | null {
+  const rung = rungOf(from, pick);
+  if (rung === null) return null;
+  const alike = (level: OrbitalLevel) =>
+    level.spin === rung.spin &&
+    level.count === rung.count &&
+    level.parity === rung.parity &&
+    level.inversion === rung.inversion;
+  const byEnergy = (a: OrbitalLevel, b: OrbitalLevel) => a.energy - b.energy;
+  const place = from.filter(alike).sort(byEnergy).indexOf(rung);
+  const found = to.filter(alike).sort(byEnergy)[place];
+  if (found === undefined) return null;
+  return { index: found.first + (pick.index - rung.first), spin: pick.spin };
 }
 
 /** `C–H`, `O–H`, `C–C`: hydrogen last, and the rest in alphabetical order. */

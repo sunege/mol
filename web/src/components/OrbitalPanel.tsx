@@ -18,6 +18,7 @@
  * cut at, belong to the App beside the density's own: only one surface is ever
  * drawn, so the two selections have to be one decision.
  */
+import { Fold } from './Fold';
 import { ISO_RANGES, IsoLevelSlider } from './IsoLevelSlider';
 import { OrbitalLadder } from './OrbitalLadder';
 import {
@@ -39,7 +40,6 @@ import {
   type OrbitalPick,
 } from './orbital';
 import type { IsoMesh, OrbitalCharacter, OrbitalLevel } from '../worker/protocol';
-import type { ReactNode } from 'react';
 
 interface Props {
   open: boolean;
@@ -63,15 +63,6 @@ interface Props {
   symbols: readonly string[];
   /** The blobs the surface on screen came out in, or null while there is none. */
   lobes: IsoMesh['lobes'] | null;
-  /**
-   * Two atoms being moved together, for a molecule that is two atoms.
-   *
-   * Outside everything above it on purpose: a distance scan solves its own
-   * geometries, so it is there whether or not anything has been calculated for
-   * the molecule on screen, and at whichever level the numbers beside it came
-   * from (`components/DistanceScan.tsx`).
-   */
-  scan: ReactNode;
 }
 
 export function OrbitalPanel({
@@ -88,7 +79,6 @@ export function OrbitalPanel({
   bonds,
   symbols,
   lobes,
-  scan,
 }: Props) {
   // What the picked orbital is like, in the three lines under the ladder. The
   // nodes are counted only for a rung the reflection calls pi: nobody counts
@@ -108,53 +98,46 @@ export function OrbitalPanel({
     character !== null && rung?.parity === -1 ? countNodes(character.amplitudes, bonds) : null;
   const lobeWords = lobes === null ? '' : describeLobes(lobes);
   return (
-    <>
-      <details
-        className="orbitals"
-        open={open}
-        onToggle={(event) => onOpenChange(event.currentTarget.open)}
-      >
-        <summary>
-          <h2>{ORBITAL_HEADING}</h2>
-        </summary>
-        {otherLevel ? (
-          <p className="hint">{ORBITAL_OTHER_LEVEL}</p>
-        ) : levels === null ? (
-          <p className="hint">{loading ? ORBITAL_LOADING : ORBITAL_NEEDS_CALCULATION}</p>
-        ) : (
-          <>
-            <p className="hint">{ORBITAL_INTRO}</p>
-            <OrbitalLadder levels={levels} picked={picked} onPick={onPick} />
-            {/* The threshold is the orbital's own, and appears only while one
-                is on screen: with none, it would slide nothing. */}
-            {picked !== null && (
-              <>
-                <IsoLevelSlider
-                  value={isoLevel}
-                  range={ISO_RANGES.orbital}
-                  scale={ORBITAL_SCALE}
-                  onChange={onIsoLevel}
-                />
-                <p className="hint">{ORBITAL_SURFACE_HINT}</p>
-                {/* What the orbital is, as opposed to what it looks like. Each
-                    line appears only once there is something true to put in
-                    it: the first two wait for the round trip that fetches
-                    them, and the last for the surface itself, since the blobs
-                    it counts are the ones on screen at this threshold. */}
-                <ul className="orbital-character">
-                  {bondWords !== '' && <li>{bondWords}</li>}
-                  {nodes !== null && <li>{describeNodes(nodes)}</li>}
-                  {lobeWords !== '' && <li>{lobeWords}</li>}
-                </ul>
-              </>
-            )}
-          </>
-        )}
-        {scan}
-      </details>
-      {/* What is behind the closed section, since the heading alone does not
-          say. It is replaced by the section's own words once it is open. */}
-      {!open && <p className="hint">{ORBITAL_TEASER}</p>}
-    </>
+    <Fold
+      heading={ORBITAL_HEADING}
+      teaser={ORBITAL_TEASER}
+      className="orbitals"
+      open={open}
+      onOpenChange={onOpenChange}
+    >
+      {otherLevel ? (
+        <p className="hint">{ORBITAL_OTHER_LEVEL}</p>
+      ) : levels === null ? (
+        <p className="hint">{loading ? ORBITAL_LOADING : ORBITAL_NEEDS_CALCULATION}</p>
+      ) : (
+        <>
+          <p className="hint">{ORBITAL_INTRO}</p>
+          <OrbitalLadder levels={levels} picked={picked} onPick={onPick} />
+          {/* The threshold is the orbital's own, and appears only while one
+              is on screen: with none, it would slide nothing. */}
+          {picked !== null && (
+            <>
+              <IsoLevelSlider
+                value={isoLevel}
+                range={ISO_RANGES.orbital}
+                scale={ORBITAL_SCALE}
+                onChange={onIsoLevel}
+              />
+              <p className="hint">{ORBITAL_SURFACE_HINT}</p>
+              {/* What the orbital is, as opposed to what it looks like. Each
+                  line appears only once there is something true to put in
+                  it: the first two wait for the round trip that fetches
+                  them, and the last for the surface itself, since the blobs
+                  it counts are the ones on screen at this threshold. */}
+              <ul className="orbital-character">
+                {bondWords !== '' && <li>{bondWords}</li>}
+                {nodes !== null && <li>{describeNodes(nodes)}</li>}
+                {lobeWords !== '' && <li>{lobeWords}</li>}
+              </ul>
+            </>
+          )}
+        </>
+      )}
+    </Fold>
   );
 }

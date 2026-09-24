@@ -1,18 +1,16 @@
 /**
  * The words and numbers of the search section of the panel.
  *
- * What a class sees of a candidate is what it is doing, how long it has been
- * doing it, and - once it has settled - how deep the shape it found is compared
- * with the others of the same molecule. Nothing about the calculation itself
+ * What a class sees of a candidate is what it is doing and how long it has been
+ * doing it; once it has settled it is a record, and the records column says how
+ * deep it is (V5-9: the rows live there, in the tree). Nothing about the calculation itself
  * reaches this file (requirement F4), and a candidate the engine could not solve
  * gets no number and no word for it (requirement F5): the row is a dash, and
  * opening it plays the molecule coming apart, which is the whole answer.
  */
 import { SEARCH_LEVEL, type Candidate, type CandidateStatus } from '../search/pool';
-import type { LogEntry } from '../records/log';
 import { levelLabel } from './level';
 import { formatElapsed } from './progress';
-import { relativeText } from './records';
 
 /**
  * How many shapes "ゆらして試す" starts at once.
@@ -36,17 +34,14 @@ export const SEARCH_HEADING = 'いろいろな形を試す';
 /**
  * The line under the buttons.
  *
- * It names the level the search always runs at, by the name the choice above
- * gives it, because choosing the other one up there does nothing down here - and
- * it is also why the records of these candidates sit in that level's group.
+ * One sentence (V5-9), and still the two things a class needs from it: the
+ * level the search always runs at, by the name the choice above gives it -
+ * choosing the other one up there does nothing down here, and it is why these
+ * records sit in that level's group - and where the results go.
  */
 export const SEARCH_HINT =
-  '押すと裏側で計算します。そのあいだも画面は動かせますし、「安定な形にする」も今までどおり使えます。' +
-  `上で何を選んでいても、ここで試す形は「${levelLabel(SEARCH_LEVEL)}」で計算します。` +
-  '落ち着いた形は記録に入ります。';
-
-export const SEARCH_EMPTY =
-  'まだ何も試していません。「今の形を試す」で今の形を、「ゆらして試す」で少しずらした形をいくつか試します。';
+  `上の選択にかかわらず裏側で「${levelLabel(SEARCH_LEVEL)}」で計算し、` +
+  '落ち着いた形は左の記録に入ります。';
 
 /**
  * Why the buttons are off, or null when they are not.
@@ -84,30 +79,6 @@ export function statusText(candidate: Candidate, now: number): string {
     case 'unavailable':
       return '計算できませんでした';
   }
-}
-
-/**
- * How deep the shape this candidate found is, against the others of its
- * molecule - or an empty string when there is nothing to compare or nothing to
- * say.
- *
- * `entry` is the log entry of the record this candidate became, which is where
- * the comparison lives; the wording is the log's own, so a row here and a row
- * there never disagree.
- */
-export function depthText(
-  candidate: Candidate,
-  entry: LogEntry | null,
-  settledInGroup: number,
-): string {
-  if (candidate.status !== 'settled' || entry === null) return '';
-  return relativeText(entry, settledInGroup);
-}
-
-/** Whether this candidate has something to put on screen. */
-export function canOpen(candidate: Candidate): boolean {
-  return candidate.status === 'settled' || candidate.status === 'partial' ||
-    candidate.status === 'failed';
 }
 
 /** Whether stopping this candidate would do anything. */

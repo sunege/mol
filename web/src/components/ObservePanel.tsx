@@ -27,8 +27,6 @@ interface Props {
   showBondLengths: boolean;
   onShowBondLengths: (show: boolean) => void;
   onClear: () => void;
-  onFrame: () => void;
-  canFrame: boolean;
 }
 
 export function ObservePanel({
@@ -38,8 +36,6 @@ export function ObservePanel({
   showBondLengths,
   onShowBondLengths,
   onClear,
-  onFrame,
-  canFrame,
 }: Props) {
   const now = useSyncExternalStore(live.subscribe, live.get);
   // Two or more picked but nothing measured yet happens only for the moment
@@ -50,7 +46,7 @@ export function ObservePanel({
 
   return (
     <>
-      <h2>観測</h2>
+      <h2>計測</h2>
       {measuring ? (
         <dl className="measurement">
           <dt>
@@ -65,25 +61,25 @@ export function ObservePanel({
       {comparing && <p className="hint">{BEFORE_AFTER_HINT}</p>}
       <p className="hint">{pickingHint(symbols.length)}</p>
 
-      <label className="toggle observe-toggle">
-        <input
-          type="checkbox"
-          checked={showBondLengths}
-          onChange={(event) => onShowBondLengths(event.target.checked)}
-        />
-        結合の長さをすべて表示（Å）
-      </label>
-      <div className="row observe-actions">
-        <button type="button" onClick={onClear} disabled={symbols.length === 0}>
+      {/* The switch on the left and the button on the right, on one line. */}
+      <div className="observe-row">
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={showBondLengths}
+            onChange={(event) => onShowBondLengths(event.target.checked)}
+          />
+          結合の長さをすべて表示（Å）
+        </label>
+        <button
+          type="button"
+          className="btn small"
+          onClick={onClear}
+          disabled={symbols.length === 0}
+        >
           計測を解除
         </button>
-        <button type="button" onClick={onFrame} disabled={!canFrame}>
-          全体表示
-        </button>
       </div>
-      <p className="hint">
-        原子をクリックで選ぶ · もう一度クリックで外す · ドラッグで回転 · Esc で計測を解除
-      </p>
     </>
   );
 }

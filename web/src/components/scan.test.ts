@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   MIN_WELL,
+  SCAN_HEADING,
+  SCAN_INTRO,
+  SCAN_PART_HEADING,
   SCAN_PRESETS,
+  SCAN_TEASER,
   atomFraction,
   atomicOrbitalNames,
   buildCorrelation,
@@ -13,6 +17,7 @@ import {
   presetFor,
   rangeAround,
   scanAxisLabels,
+  scanPairFor,
   scanTexts,
   type ScanRange,
 } from './scan';
@@ -306,8 +311,29 @@ describe('what the picture is allowed to say', () => {
     expect(labels.length).toBeLessThanOrEqual(7);
   });
 
+  it('writes no number in the words around the figures either', () => {
+    // The section's own words, which are on screen before any scan has run -
+    // the line beside the heading most of all, which is seen while it is shut.
+    for (const text of [SCAN_HEADING, SCAN_TEASER, SCAN_INTRO, SCAN_PART_HEADING]) {
+      expect(text).not.toMatch(/\d+\.\d+/);
+      for (const unit of ['Ha', 'eV', 'ハートリー', 'kJ', 'Å']) expect(text).not.toContain(unit);
+    }
+  });
+
+  it('keeps the line beside the heading short enough to fit beside it', () => {
+    // About fourteen characters are what fit to the right of the heading in
+    // the panel, and past that the line is cut short with an ellipsis.
+    expect([...SCAN_TEASER].length).toBeLessThanOrEqual(15);
+  });
+
   it('names no DFT parameter either (requirement F4)', () => {
-    const said = figures.flatMap(scanTexts).join(' ');
+    const said = [
+      ...figures.flatMap(scanTexts),
+      SCAN_HEADING,
+      SCAN_TEASER,
+      SCAN_INTRO,
+      SCAN_PART_HEADING,
+    ].join(' ');
     for (const word of ['基底', 'STO-3G', '6-31G', '汎関数', 'LDA', '電荷', '多重度', 'DFT']) {
       expect(said).not.toContain(word);
     }
@@ -321,7 +347,7 @@ describe('what the picture is allowed to say', () => {
   });
 });
 
-describe('the pairs the section offers', () => {
+describe('the pair a scan walks', () => {
   it('asks for no more separations than the worker will take', () => {
     for (const preset of SCAN_PRESETS) {
       expect(preset.points).toBeLessThanOrEqual(MAX_SCAN_POINTS);
@@ -349,6 +375,17 @@ describe('the pairs the section offers', () => {
     expect(range.from).toBeLessThan(1.2);
     expect(range.to).toBeGreaterThan(1.2);
     expect(rangeAround(0.1).from).toBeGreaterThanOrEqual(0.3);
+  });
+
+  it('walks the two atoms on screen, in their order, over the measured range if any', () => {
+    // Hydrogen fluoride placed fluorine first: the measured range, but the
+    // elements stay where they were on screen.
+    expect(scanPairFor([9, 1], 0.92)).toEqual({ z: [9, 1], from: 0.6, to: 1.7, points: 27 });
+    // Carbon monoxide has no measured range: one around where it sits.
+    expect(scanPairFor([6, 8], 1.13)).toEqual({ z: [6, 8], ...rangeAround(1.13) });
+    // And the measured range does not follow the marker: a stretched O2 is
+    // still walked over O2's own range.
+    expect(scanPairFor([8, 8], 1.9)).toMatchObject({ from: 0.9, to: 2.1 });
   });
 
   it('stops short of where a stretched pair stops being the same molecule', () => {

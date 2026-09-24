@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_REQUEST,
   channelLabel,
+  channelNote,
   explainChannel,
   offeredChannels,
   type DensitySurface,
@@ -16,6 +17,7 @@ const REQUESTS: DensitySurface[] = ['total', 'bonding', 'deformation'];
 /** Everything this module puts on screen, as one string. */
 const said = REQUESTS.flatMap((request) => [
   channelLabel(request),
+  channelNote(request),
   explainChannel(request, null),
   ...(['total', 'pi', 'deformation'] as DensityChannel[]).map((channel) =>
     explainChannel(request, drew(channel)),
@@ -38,6 +40,19 @@ describe('which surfaces are offered', () => {
   it('keeps the same order whichever are offered, so a button does not move', () => {
     const many = offeredChannels(true);
     expect(offeredChannels(false)).toEqual(many.filter((request) => request !== 'bonding'));
+  });
+});
+
+describe('the line under each choice', () => {
+  it('says something different for every surface', () => {
+    const notes = REQUESTS.map(channelNote);
+    for (const note of notes) expect(note).not.toBe('');
+    expect(new Set(notes).size).toBe(REQUESTS.length);
+  });
+
+  it('is short enough for one line of the panel', () => {
+    // The panel is 340px and the line is 0.72rem: about 24 characters fit.
+    for (const request of REQUESTS) expect(channelNote(request).length).toBeLessThanOrEqual(20);
   });
 });
 

@@ -9,6 +9,7 @@ import {
   ORBITAL_SCALE,
   ORBITAL_SURFACE_HINT,
   ORBITAL_TEASER,
+  carryPick,
   coreText,
   countNodes,
   degenerateText,
@@ -512,5 +513,32 @@ describe('what the section is allowed to say', () => {
   it('warns that the two colours are not more electrons and fewer', () => {
     expect(ORBITAL_SURFACE_HINT).toContain('符号');
     expect(ORBITAL_SURFACE_HINT).toContain('青');
+  });
+});
+
+describe('carrying the picked orbital to another separation', () => {
+  /** A rung of N2, with its inversion: sigma rungs hold one, pi rungs two. */
+  const n2 = (first: number, count: number, occupation: number, energy: number, g: 1 | -1) => ({
+    ...rung('both', first, count, occupation, energy),
+    inversion: g,
+  });
+  // Near the bond the pi_u pair lies below 3sigma_g; stretched, above it.
+  const NEAR = [n2(0, 1, 2, -14, 1), n2(1, 2, 2, -0.45, -1), n2(3, 1, 2, -0.38, 1), n2(4, 2, 0, -0.1, 1)];
+  const FAR = [n2(0, 1, 2, -14, 1), n2(1, 1, 2, -0.5, 1), n2(2, 2, 2, -0.4, -1), n2(4, 2, 0, -0.2, 1)];
+
+  it('follows the level by its kind and place, not by its index', () => {
+    // 3sigma_g is orbital 3 near the bond and orbital 1 stretched.
+    expect(carryPick({ index: 3, spin: 'both' }, NEAR, FAR)).toEqual({ index: 1, spin: 'both' });
+    // The second member of the pi_u pair stays the second member.
+    expect(carryPick({ index: 2, spin: 'both' }, NEAR, FAR)).toEqual({ index: 3, spin: 'both' });
+  });
+
+  it('keeps the same orbital where nothing crossed', () => {
+    expect(carryPick({ index: 4, spin: 'both' }, WATER, WATER)).toEqual({ index: 4, spin: 'both' });
+  });
+
+  it('gives up where the new ladder has no such level', () => {
+    expect(carryPick({ index: 4, spin: 'both' }, NEAR, FAR.slice(0, 3))).toBeNull();
+    expect(carryPick({ index: 9, spin: 'both' }, NEAR, FAR)).toBeNull();
   });
 });

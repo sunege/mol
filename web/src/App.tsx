@@ -12,26 +12,25 @@ import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
 import {
   DEFAULT_REQUEST,
   channelLabel,
+  channelNote,
   explainChannel,
   offeredChannels,
   type DensitySurface,
 } from './components/density';
 import { OrbitalPanel } from './components/OrbitalPanel';
 import { DistanceScan } from './components/DistanceScan';
-import { samePick, type Bond, type OrbitalPick } from './components/orbital';
+import { carryPick, samePick, type Bond, type OrbitalPick } from './components/orbital';
 import {
-  SCAN_CURRENT_ID,
-  SCAN_CURRENT_LABEL,
-  SCAN_PRESETS,
+  SCAN_HEADING,
+  SCAN_TEASER,
   atomFraction,
-  presetFor,
-  rangeAround,
+  scanPairFor,
   type RungMakeup,
-  type ScanPreset,
+  type ScanPair,
 } from './components/scan';
-import { Elapsed, ProgressOverlay } from './components/ProgressOverlay';
+import { ProgressOverlay } from './components/ProgressOverlay';
 import { ObservePanel } from './components/ObservePanel';
-import { headline, type JobKind, type JobState } from './components/progress';
+import { type JobKind, type JobState } from './components/progress';
 import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
 import { needsNudge, perturb, randomSeed, PERTURB_AMPLITUDE } from './records/perturb';
@@ -41,13 +40,18 @@ import {
   levelOfModel,
   type StructureRecord,
 } from './records/record';
-import { entryFor, groupRecords } from './records/log';
+import { groupRecords } from './records/log';
 import { openRecordStore, type RecordStore } from './records/store';
 import { mergeRecords, readStructureLog, writeStructureLog } from './records/file';
-import { RecordsPanel } from './components/RecordsPanel';
-import { exportFileName, importProblemText, importedText, settledCount } from './components/records';
+import { RecordExplorer } from './components/RecordExplorer';
+import {
+  EXPLORER_WORDS,
+  exportFileName,
+  importProblemText,
+  importedText,
+} from './components/records';
 import { SearchPanel } from './components/SearchPanel';
-import { NUDGED_COUNT } from './components/search';
+import { NUDGED_COUNT, canCancel } from './components/search';
 import {
   DEFAULT_LEVEL,
   LEVEL_GROUP_LABEL,
@@ -66,14 +70,34 @@ import type {
   ElementInfo,
   IsoMesh,
   ModelLevel,
-  OptimizationOutcome,
   OrbitalCharacter,
   OrbitalLevel,
   ScanPoint,
   ScfOutcome,
   SpinChannel,
 } from './worker/protocol';
+import {
+  ActionGrid,
+  Choices,
+  IconButton,
+  Segmented,
+  type SegmentedOption,
+} from './components/controls';
+import { Fold } from './components/Fold';
+import { FrameIcon } from './components/icons';
+import { viewportHint } from './components/viewportHint';
+import { StatusHeader } from './components/StatusHeader';
+import { TabPanel, Tabs } from './components/Tabs';
+import { useNarrow } from './components/useNarrow';
+import { actionSlots } from './components/actions';
+import { describeMesh, describeOutcome, describeRelaxation, isPartWay } from './components/status';
 import './App.css';
+
+/** 形を探す / 形を測る, in the order the panel shows them. */
+const LEVEL_OPTIONS: readonly SegmentedOption<ModelLevel>[] = LEVEL_ORDER.map((each) => ({
+  value: each,
+  label: levelLabel(each),
+}));
 
 /**
  * What the frame player is showing.
@@ -154,6 +178,13 @@ export default function App() {
   const [activeZ, setActiveZ] = useState(6);
   const [selected, setSelected] = useState<number | null>(null);
   const [mode, setMode] = useState<ViewerMode>('edit');
+  // The narrow screen's third tab (V5-10): the records in place of the tab's
+  // body, without touching `mode`. Choosing a mode tab, or a calculation
+  // moving the panel to 観察, puts it away. Ignored on a wide screen, where the
+  // records have their own column.
+  const narrow = useNarrow();
+  const [narrowRecords, setNarrowRecords] = useState(false);
+  const showRecords = narrow && narrowRecords;
   // Atoms picked for measuring, in the order they were picked. They survive
   // anything that only moves atoms (a drag, a relaxation) - the value follows
   // - and are dropped by anything that changes which atoms there are.
@@ -202,9 +233,20 @@ export default function App() {
   // The same, for the places that drop it from inside an effect, where the
   // render's copy is a frame behind.
   const pickRef = useRef<OrbitalPick | null>(null);
+  // The orbital that was on screen when the marker of "近づけてみる" moved the
+  // atoms, with the ladder it was picked from, until the ladder of the
+  // calculation at the new separation arrives and it is found again in that
+  // (`carryPick`). Any other edit drops it (`invalidateResult`).
+  const carryRef = useRef<{ pick: OrbitalPick; levels: OrbitalLevel[] } | null>(null);
+  // The calculation the marker starts once it has been still for a moment.
+  const markerTimerRef = useRef<number | undefined>(undefined);
   // Whether the orbital section is open. It is closed to begin with, and the
   // ladder is only fetched while it is open (`components/OrbitalPanel.tsx`).
   const [orbitalsOpen, setOrbitalsOpen] = useState(false);
+  // Whether "近づけてみる" is open, which is a closed section of its own after
+  // that one (V5-6). The free atoms' levels are only fetched while it is open,
+  // and it needs the ladder too: the middle column of its correlation diagram.
+  const [scanOpen, setScanOpen] = useState(false);
   // The rungs of the calculation the worker is holding, once they have been
   // asked for. Null whenever there is no ladder that belongs to what is on
   // screen, which every calculation makes true again.
@@ -223,13 +265,10 @@ export default function App() {
   // the two ends of that diagram. About the elements rather than about any
   // calculation, so it survives everything except a change of element.
   const [freeAtomLevels, setFreeAtomLevels] = useState<number[][] | null>(null);
-  // Which pair the distance scan is set to walk, and what has come back from
-  // the one that was run. `scanPair` is the pair as it was asked for, so the
-  // axis of the figure does not move when the molecule on screen does.
-  // Null until someone picks one: the section then starts on whichever pair the
-  // molecule on screen is, which is the one with a measured range behind it.
-  const [scanId, setScanId] = useState<string | null>(null);
-  const [scanPair, setScanPair] = useState<ScanPreset | null>(null);
+  // What has come back from the distance scan that was run, which only ever
+  // walks the two atoms on screen. `scanPair` is the pair as it was asked for,
+  // so the axis of the figure does not move when the marker moves the atoms.
+  const [scanPair, setScanPair] = useState<ScanPair | null>(null);
   const [scanPoints, setScanPoints] = useState<ScanPoint[]>([]);
   const [scanMarker, setScanMarker] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -403,6 +442,7 @@ export default function App() {
   const chooseMode = useCallback(
     (next: ViewerMode) => {
       restoreModeRef.current = null;
+      setNarrowRecords(false);
       switchMode(next);
     },
     [switchMode],
@@ -411,6 +451,7 @@ export default function App() {
   /** A calculation is starting. */
   const observeWhileRunning = useCallback(() => {
     restoreModeRef.current = mode;
+    setNarrowRecords(false);
     switchMode('observe');
   }, [mode, switchMode]);
 
@@ -518,6 +559,8 @@ export default function App() {
    * the same render.
    */
   const invalidateResult = useCallback(() => {
+    carryRef.current = null;
+    window.clearTimeout(markerTimerRef.current);
     setResult(null);
     setStopped(null);
     setError(null);
@@ -539,9 +582,9 @@ export default function App() {
     // surface, which will not be wanted now either.
     setJob(null);
     cancelCalculation();
-    // A scan is not about the molecule on screen - it walks a pair of its own -
-    // but it is holding the one worker, and whatever replaces these atoms wants
-    // it back. The points already received stay on screen.
+    // A scan is of the two atoms on screen, and it is holding the one worker,
+    // which whatever replaces these atoms wants back. The points already
+    // received stay, and are drawn for as long as the same pair is on screen.
     stopScan();
   }, [cancelCalculation, stopAnimation, stopScan, setHasDensity]);
 
@@ -979,19 +1022,31 @@ export default function App() {
    * point of fetching it from a calculation rather than from a render.
    *
    * The orbital picked goes with it, because the rung it named belonged to that
-   * calculation. Closing the section drops it too: an orbital left on screen
-   * with nothing to change it by would be a surface the user cannot leave.
+   * calculation.
+   *
+   * Two sections want it: this one, and "近づけてみる" for the middle column of
+   * its correlation diagram. They go in as one value, so that opening or
+   * closing the second while the first is open neither fetches the ladder
+   * again nor drops the orbital picked in it.
    */
+  const wantLevels = orbitalsOpen || scanOpen;
   useEffect(() => {
     forgetOrbital();
     setOrbitalLevels(null);
     const client = clientRef.current;
-    if (!orbitalsOpen || !client || !hasDensityRef.current || resultLevel !== 'shape') return;
+    if (!wantLevels || !client || !hasDensityRef.current || resultLevel !== 'shape') return;
     let live = true;
     client
       .orbitals()
       .then((ladder) => {
-        if (live) setOrbitalLevels(ladder);
+        if (!live) return;
+        setOrbitalLevels(ladder);
+        // The marker moved the atoms with an orbital on screen: the same
+        // orbital at the new separation, if there is one.
+        const carried = carryRef.current;
+        carryRef.current = null;
+        const pick = carried && carryPick(carried.pick, carried.levels, ladder);
+        if (pick) selectOrbital(pick);
       })
       .catch((e: Error) => {
         // The worker was replaced, or it is holding nothing. The section says
@@ -1001,7 +1056,16 @@ export default function App() {
     return () => {
       live = false;
     };
-  }, [orbitalsOpen, density, resultLevel, forgetOrbital]);
+  }, [wantLevels, density, resultLevel, forgetOrbital, selectOrbital]);
+
+  // Closing the orbital section drops the orbital picked in it, whether or not
+  // the ladder stays for the other section: an orbital left on screen with
+  // nothing to change it by would be a surface the user cannot leave.
+  useEffect(() => {
+    if (orbitalsOpen) return;
+    carryRef.current = null;
+    forgetOrbital();
+  }, [orbitalsOpen, forgetOrbital]);
 
   /**
    * What the orbital on screen is like, in the words under it.
@@ -1083,7 +1147,7 @@ export default function App() {
   useEffect(() => {
     setFreeAtomLevels(null);
     const client = clientRef.current;
-    if (!orbitalsOpen || !client || scanPairKey === null) return;
+    if (!scanOpen || !client || scanPairKey === null) return;
     let live = true;
     client
       .atomLevels(new Uint8Array(scanPairKey.split(',').map(Number)))
@@ -1098,7 +1162,7 @@ export default function App() {
     return () => {
       live = false;
     };
-  }, [orbitalsOpen, scanPairKey]);
+  }, [scanOpen, scanPairKey]);
 
   /**
    * How much of each rung sits on each nucleus, which is what the lines between
@@ -1141,27 +1205,33 @@ export default function App() {
     };
   }, [orbitalLevels, atomCount]);
 
-  /** The pairs the section offers: the written-down ones, then the two on screen. */
-  const scanPairs = useMemo(() => {
-    if (atoms.length !== 2) return SCAN_PRESETS;
+  /**
+   * The pair a scan would walk: the two atoms on screen, and nothing else
+   * (V5-11: offering other pairs put them in the viewer as the marker moved).
+   */
+  const screenPair = useMemo(() => {
+    if (atoms.length !== 2) return null;
     const [a, b] = atoms;
     const distance = Math.hypot(
       b.pos[0] - a.pos[0],
       b.pos[1] - a.pos[1],
       b.pos[2] - a.pos[2],
     );
-    const current: ScanPreset = {
-      id: SCAN_CURRENT_ID,
-      label: SCAN_CURRENT_LABEL,
-      z: [a.z, b.z],
-      ...rangeAround(distance),
-    };
-    return [...SCAN_PRESETS, current];
+    return scanPairFor([a.z, b.z], distance);
   }, [atoms]);
 
-  /** The pair a scan would walk: the user's choice, or the one on screen. */
-  const chosenScan =
-    scanId ?? presetFor(atoms.map((atom) => atom.z))?.id ?? SCAN_CURRENT_ID;
+  /**
+   * Whether the scan that was run is of the atoms on screen. Moving the marker
+   * keeps them the same elements in the same order; any other edit that leaves
+   * two atoms (another preset, a record, an element changed) makes the figure
+   * about a molecule that is not there, so it is not drawn and its marker cannot
+   * put that other pair back.
+   */
+  const scanOnScreen =
+    scanPair !== null &&
+    screenPair !== null &&
+    scanPair.z[0] === screenPair.z[0] &&
+    scanPair.z[1] === screenPair.z[1];
 
   /**
    * Walks the chosen pair from one separation to the next, drawing as it goes.
@@ -1174,7 +1244,7 @@ export default function App() {
    */
   const startScan = useCallback(() => {
     const client = clientRef.current;
-    const pair = scanPairs.find((each) => each.id === chosenScan) ?? null;
+    const pair = screenPair;
     if (!client || pair === null || scanningRef.current || inFlightRef.current) return;
     const token = ++scanTokenRef.current;
     scanningRef.current = true;
@@ -1200,7 +1270,7 @@ export default function App() {
         setScanning(false);
         reportFailure(e);
       });
-  }, [chosenScan, scanPairs, reportFailure]);
+  }, [screenPair, reportFailure]);
 
   /**
    * Puts the two atoms at the separation the marker was moved to.
@@ -1215,21 +1285,25 @@ export default function App() {
     (index: number): SceneAtom[] | null => {
       setScanMarker(index);
       const point = scanPoints[index];
-      if (point === undefined || scanPair === null) return null;
+      if (point === undefined || scanPair === null || !scanOnScreen) return null;
+      // Still waiting from a move a moment ago, or the orbital on screen now.
+      const carry =
+        carryRef.current ??
+        (pickRef.current !== null && orbitalLevels !== null
+          ? { pick: pickRef.current, levels: orbitalLevels }
+          : null);
       const placed = alongTheAxis(atoms, scanPair.z, point.distance);
-      const sameAtoms =
-        atoms.length === 2 && atoms[0].z === scanPair.z[0] && atoms[1].z === scanPair.z[1];
       setAtoms(placed);
       setPresetId(null);
       // A shape this app placed, along the axis the pair is already on: not the
       // flat, hand-built one the nudge before a relaxation is for.
       setHandBuilt(false);
       setSelected(null);
-      if (!sameAtoms) setMeasured([]);
       invalidateResult();
+      carryRef.current = carry;
       return placed;
     },
-    [atoms, scanPoints, scanPair, invalidateResult],
+    [atoms, scanPoints, scanPair, scanOnScreen, orbitalLevels, invalidateResult],
   );
 
   /**
@@ -1327,18 +1401,21 @@ export default function App() {
   ]);
 
   /**
-   * Solves the electrons at the separation the marker stands at.
-   *
-   * It places the pair first, and passes what it placed to the calculation
-   * rather than letting it read the atoms back: the button is there to answer
-   * "what are the orbitals *here*", and before the marker has been dragged the
-   * molecule on screen may not be this pair at all - the figure is free to be
-   * about a pair nobody has put on screen yet.
+   * The marker moved: the atoms go there at once, and once it has been still
+   * for {@link MARKER_SETTLE_MS} they are calculated, so the cloud or the
+   * orbital that was on screen comes back at the new separation without a
+   * button (V5-11: it used to wait for a 「この距離で計算」 button, now gone,
+   * and read as the surface simply vanishing). A drag goes through many separations and only
+   * the last is solved; a move while that is running cancels it, as any edit
+   * does. Nothing is started over a calculation someone else began meanwhile.
    */
-  const calculateAtMarker = useCallback(
+  const moveMarker = useCallback(
     (index: number) => {
       const placed = placeScanPoint(index);
-      if (placed !== null) calculate(placed);
+      if (placed === null) return;
+      markerTimerRef.current = window.setTimeout(() => {
+        if (!inFlightRef.current && !scanningRef.current) calculate(placed);
+      }, MARKER_SETTLE_MS);
     },
     [placeScanPoint, calculate],
   );
@@ -1874,33 +1951,45 @@ export default function App() {
     );
   }, [records, currentFormula]);
 
-  /** The log entry a candidate's record became, once it has one. */
-  const entryOfCandidate = useCallback(
-    (candidateId: string) => entryFor(recordGroups, candidateId)?.entry ?? null,
-    [recordGroups],
-  );
-
-  /** How many records of that candidate's molecule settled, for the comparison. */
-  const settledOfCandidate = useCallback(
-    (candidateId: string) => {
-      const found = entryFor(recordGroups, candidateId);
-      return found ? settledCount(found.group) : 0;
-    },
-    [recordGroups],
-  );
   const relaxation = result?.optimization ?? null;
   const solved = result !== null && result.converged;
   const settled = solved && (relaxation === null || relaxation.converged);
-  const selectedAtom = selected === null ? null : atoms[selected];
-  const selectedSymbol = selectedAtom ? symbolOf(selectedAtom.z) : null;
   const measuredSymbols = measured
     .filter((i) => i < atoms.length)
     .map((i) => symbolOf(atoms[i].z));
   const measuredBefore =
     relaxedFrom !== null && measured.length >= 2 ? measureAtoms(relaxedFrom, measured) : null;
 
+  // Drawn in one place only: the left column, or the narrow screen's sheet.
+  const explorer = (
+    <RecordExplorer
+      groups={recordGroups}
+      openId={openRecordId}
+      kept={recordsKept}
+      canImport={elementsReady}
+      currentFormula={currentFormula}
+      onOpen={openRecord}
+      onReplay={replayRecord}
+      canReplay={openedRecord !== null && openedRecord.trajectory.length > 1}
+      onRename={renameRecord}
+      onDelete={deleteRecord}
+      onClear={clearRecords}
+      onExport={exportRecords}
+      onImport={(file) => void importRecords(file)}
+      notice={recordNotice}
+      candidates={candidates}
+      symbolOf={symbolOf}
+      onOpenCandidate={openCandidate}
+      onCancel={(candidate) => poolRef.current?.cancel(candidate.id)}
+      onCancelAll={() => poolRef.current?.cancelAll()}
+      onClearFinished={() => poolRef.current?.clearFinished()}
+      foldable={!narrow}
+    />
+  );
+
   return (
     <div className="app">
+      {!narrow && explorer}
       <div className="viewport" ref={containerRef}>
         {unavailable && (
           <div className="engine-unavailable" role="alert">
@@ -1921,6 +2010,23 @@ export default function App() {
             </p>
           </div>
         )}
+        {/* What the pointer does here, for the tab that is showing. Only over
+            a working view: with no engine or no WebGL the notice above says
+            why there is nothing to point at. */}
+        {!unavailable && webgl?.ok && (
+          <p className="viewport-hint">{viewportHint(mode, atoms.length)}</p>
+        )}
+        {!unavailable && (
+          <div className="viewport-tools">
+            <IconButton
+              label="全体表示"
+              onClick={() => viewerRef.current?.frameAll()}
+              disabled={atoms.length === 0}
+            >
+              <FrameIcon />
+            </IconButton>
+          </div>
+        )}
         <ProgressOverlay
           job={job}
           // A surface cut on its own, not as the end of a calculation: the
@@ -1933,314 +2039,250 @@ export default function App() {
       </div>
 
       <aside className="panel">
-        <h1>分子シミュレータ</h1>
-        <p className="phase">原子を置くと、落ち着く形と電子の雲を計算します</p>
-
-        <div className="row mode-switch" role="group" aria-label="モード">
-          <button
-            type="button"
-            className={mode === 'edit' ? 'active' : ''}
-            aria-pressed={mode === 'edit'}
-            onClick={() => chooseMode('edit')}
-          >
-            編集
-          </button>
-          <button
-            type="button"
-            className={mode === 'observe' ? 'active' : ''}
-            aria-pressed={mode === 'observe'}
-            onClick={() => chooseMode('observe')}
-          >
-            観測
-          </button>
-        </div>
-
-        {mode === 'edit' ? (
-          <>
-            <h2>配置する元素</h2>
-            <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
-
-            <p className="hint">
-              何もない場所をクリックで配置 · 原子をドラッグで移動 · 原子を Shift+クリックで
-              結合距離に隣接配置 · 背景をドラッグで回転
-            </p>
-
-            <h2>編集</h2>
-            <div className="row">
-              <button type="button" onClick={deleteSelected} disabled={selected === null}>
-                削除{selectedSymbol ? `（${selectedSymbol}）` : ''}
-              </button>
-              <button type="button" onClick={clearAll} disabled={atoms.length === 0}>
-                全消去
-              </button>
-              <button
-                type="button"
-                onClick={() => viewerRef.current?.frameAll()}
-                disabled={atoms.length === 0}
-              >
-                全体表示
-              </button>
-            </div>
-          </>
-        ) : (
-          <ObservePanel
-            live={liveMeasurement}
-            before={measuredBefore}
-            symbols={measuredSymbols}
-            showBondLengths={showBondLengths}
-            onShowBondLengths={setShowBondLengths}
-            onClear={() => setMeasured([])}
-            onFrame={() => viewerRef.current?.frameAll()}
-            canFrame={atoms.length > 0}
-          />
-        )}
-
-        <h2>プリセット</h2>
-        <div className="row">
-          {PRESETS.map((preset) => (
-            <button
-              key={preset.id}
-              type="button"
-              className={preset.id === presetId ? 'active' : ''}
-              onClick={() => {
-                setPresetId(preset.id);
-                setAtoms(preset.atoms);
-                setHandBuilt(false);
-                setSelected(null);
-                setMeasured([]);
-                invalidateResult();
-              }}
-            >
-              {preset.label}
-            </button>
-          ))}
-        </div>
-
-        <h2>計算</h2>
-        {/* Fixed while a calculation runs: the answer on its way belongs to
-            the choice it was started with. */}
-        <div className="row level-switch" role="group" aria-label={LEVEL_GROUP_LABEL}>
-          {LEVEL_ORDER.map((each) => (
-            <button
-              key={each}
-              type="button"
-              className={level === each ? 'active' : ''}
-              aria-pressed={level === each}
-              disabled={unavailable !== null || computing}
-              onClick={() => setLevel(each)}
-            >
-              {levelLabel(each)}
-            </button>
-          ))}
-        </div>
-        <p className="hint level-hint">{levelHint(level)}</p>
-        {/* Advice, not a warning: what is about to be pressed still works, and
-            is not held back (`components/level.ts`). */}
-        {advice !== null && <p className="hint level-hint">{advice}</p>}
-        <div className="row">
-          <button
-            type="button"
-            className={computing ? '' : 'active'}
-            onClick={computing ? stopCalculation : relax}
-            disabled={unavailable !== null || atoms.length === 0}
-          >
-            {computing ? (job?.stopping ? 'すぐ止める' : '中止') : '安定な形にする'}
-          </button>
-          <button
-            type="button"
-            onClick={() => calculate()}
-            disabled={unavailable !== null || computing || atoms.length === 0}
-          >
-            この形のまま計算
-          </button>
-        </div>
-        <p className="hint">
-          {computing && job?.stopping
-            ? 'いまの一歩が終わったところで止まり、そこまでの形と数値が残ります。' +
-              '待たずに止めるときは「すぐ止める」を押してください（形だけが残ります）。'
-            : (relaxation !== null && solved && relaxation.reason !== 'converged') ||
-                stopped !== null
-              ? 'いまの形は途中までのものです。もう一度「安定な形にする」を押すと、' +
-                'ここから続きを計算します。'
-              : '「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
-                '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
-        </p>
-
-        <SearchPanel
-          candidates={candidates}
-          entryOf={entryOfCandidate}
-          settledOf={settledOfCandidate}
-          openId={openRecordId}
-          atomCount={atoms.length}
+        <StatusHeader
           unavailable={unavailable !== null}
-          onTryCurrent={() => startSearch(0)}
-          onTryNudged={() => startSearch(NUDGED_COUNT)}
-          onOpen={openCandidate}
-          onCancel={(candidate) => poolRef.current?.cancel(candidate.id)}
-          onCancelAll={() => poolRef.current?.cancelAll()}
-          onClearFinished={() => poolRef.current?.clearFinished()}
-        />
-
-        <RecordsPanel
-          groups={recordGroups}
-          openId={openRecordId}
-          kept={recordsKept}
-          canImport={elementsReady}
-          currentFormula={currentFormula}
-          onOpen={openRecord}
-          onReplay={replayRecord}
-          canReplay={openedRecord !== null && openedRecord.trajectory.length > 1}
-          onRename={renameRecord}
-          onDelete={deleteRecord}
-          onClear={clearRecords}
-          onExport={exportRecords}
-          onImport={(file) => void importRecords(file)}
-          notice={recordNotice}
-        />
-
-        <h2>電子密度</h2>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={showDensity}
-            onChange={(event) => setShowDensity(event.target.checked)}
-          />
-          電子の雲を表示する
-        </label>
-        {/* None of them is active while an orbital is on screen: only one
-            surface is ever drawn, and pressing one of these is how the user
-            comes back to a density. */}
-        <div className="row">
-          {offered.map((request) => (
-            <button
-              key={request}
-              type="button"
-              className={channel === request ? 'active' : ''}
-              disabled={!showDensity}
-              onClick={() => selectChannel(request)}
-            >
-              {channelLabel(request)}
-            </button>
-          ))}
-        </div>
-        {/* The density's own threshold, which keeps its place while an orbital
-            is up - and is not slid then, because it would move nothing. */}
-        <IsoLevelSlider
-          value={densityLevel}
-          range={ISO_RANGES[densityRequest]}
-          onChange={(level) => setLevels((prev) => ({ ...prev, [densityRequest]: level }))}
-          disabled={!showDensity || !solved || orbitalPick !== null}
-        />
-        <p className="hint">{explainChannel(densityRequest, orbitalPick === null ? mesh : null)}</p>
-
-        <OrbitalPanel
-          open={orbitalsOpen}
-          onOpenChange={setOrbitalsOpen}
-          levels={orbitalLevels}
-          // A ladder is on its way whenever the worker is holding a calculation
-          // this section can read one from.
-          loading={orbitalLevels === null && density.held && resultLevel === 'shape'}
-          otherLevel={solved && resultLevel !== 'shape'}
-          picked={orbitalPick}
-          onPick={selectOrbital}
-          isoLevel={levels.orbital}
-          onIsoLevel={(level) => setLevels((prev) => ({ ...prev, orbital: level }))}
-          character={orbitalCharacter}
-          bonds={orbitalBonds}
-          symbols={orbitalSymbols}
-          // The blobs of the surface that is up now, and only while that
-          // surface is the orbital's: a density's are a different picture.
-          lobes={mesh !== null && mesh.channel === 'orbital' ? mesh.lobes : null}
-          // Two atoms approaching, which only two atoms can do. It sits inside
-          // the same section and outside everything the ladder is gated on: a
-          // scan solves its own geometries, so it needs no calculation to have
-          // been run first.
-          scan={
-            atoms.length === 2 ? (
-              <DistanceScan
-                presets={scanPairs}
-                chosenId={chosenScan}
-                onChoose={setScanId}
-                running={scanning}
-                disabled={unavailable !== null || computing}
-                points={scanPoints}
-                range={scanPair}
-                markerIndex={scanMarker}
-                onMarker={placeScanPoint}
-                onStart={startScan}
-                onStop={stopScan}
-                onCalculate={calculateAtMarker}
-                atomLevels={freeAtomLevels}
-                levels={orbitalLevels}
-                weights={orbitalWeights}
-                symbols={atoms.map((atom) => symbolOf(atom.z))}
-              />
-            ) : null
+          error={error}
+          computing={computing}
+          job={job}
+          relaxing={animation === 'optimization'}
+          outcome={describeOutcome({ solved, settled, stopped, resultLevel })}
+          relaxation={describeRelaxation(relaxation, solved, stopped)}
+          energy={solved ? result.energy : null}
+          partWay={isPartWay(relaxation, solved, stopped)}
+          slots={actionSlots({
+            computing,
+            stopping: job?.stopping ?? false,
+            unavailable: unavailable !== null,
+            atomCount: atoms.length,
+          })}
+          onAction={(action) =>
+            action === 'relax' ? relax() : action === 'calculate' ? calculate() : stopCalculation()
           }
         />
 
-        <dl>
-          <dt>原子数</dt>
-          <dd>{atoms.length}</dd>
-          <dt>状態</dt>
-          <dd>
-            {unavailable ? (
-              <span className="error">このブラウザでは計算できません</span>
-            ) : error ? (
-              <span className="error">{error}</span>
-            ) : computing ? (
-              job ? (
-                <>
-                  {headline(job)} · <Elapsed since={job.startedAt} />
-                </>
-              ) : animation === 'optimization' ? (
-                '形を調整中…'
-              ) : (
-                '計算中…'
-              )
-            ) : solved ? (
-              // Which of the two the numbers are from, since the choice in the
-              // panel is free to differ once the calculation is over.
-              (settled ? '完了' : stopped !== null ? '途中で止めました' : '途中で終了') +
-              (resultLevel === null ? '' : `（${levelLabel(resultLevel)}）`)
-            ) : stopped !== null ? (
-              // A structure without numbers, which is not the blank below: it
-              // was solved at every step, and only the stop lost the last one.
-              `途中で止めました（${levelLabel(stopped.level)}）`
-            ) : (
-              // A calculation that did not converge is deliberately blank rather
-              // than described: the molecule flying apart on screen is what says
-              // it (requirement F5), and a line of text here would be the error
-              // message that requirement rules out.
-              '—'
-            )}
-          </dd>
-          <dt>形の調整</dt>
-          <dd>{describeRelaxation(relaxation, solved, stopped)}</dd>
-          <dt>全エネルギー</dt>
-          {/* The energy of the structure on screen, which is a real number
-              about a real structure even when the optimiser ran out of time
-              before reaching the bottom. What is never shown is the last
-              iterate of a diverging SCF: that is a number about the iteration,
-              not about the molecule. */}
-          <dd>{solved ? `${result.energy.toFixed(6)} Ha` : '—'}</dd>
-          <dt>反復</dt>
-          <dd>{solved ? `${result.iterations} 回` : '—'}</dd>
-          <dt>計算時間</dt>
-          <dd>{result ? `${(result.elapsedMs / 1000).toFixed(2)} 秒` : '—'}</dd>
-          <dt>等値面</dt>
-          <dd>{describeMesh(result, mesh, meshing)}</dd>
-          <dt>WebGL</dt>
-          <dd>
-            {webgl === null
-              ? '確認中…'
-              : webgl.ok
-                ? `${webgl.context} · ${webgl.renderer ?? 'renderer 不明'}`
-                : webgl.disabled
-                  ? '利用不可（GPU 無効）'
-                  : '非対応'}
-          </dd>
-        </dl>
+        <Tabs
+          mode={mode}
+          onChoose={chooseMode}
+          records={
+            narrow
+              ? {
+                  chosen: narrowRecords,
+                  onChoose: () => setNarrowRecords(true),
+                  busy: candidates.some(canCancel),
+                  busyLabel: EXPLORER_WORDS.running,
+                }
+              : undefined
+          }
+        />
+
+        <div className={showRecords ? 'panel-body records' : 'panel-body'}>
+          {!showRecords && (
+            <p className="phase">原子を置くと、落ち着く形と電子の雲を計算します</p>
+          )}
+
+          {showRecords ? (
+            <TabPanel tab="records">{explorer}</TabPanel>
+          ) : mode === 'edit' ? (
+            <TabPanel tab="edit">
+              <h2>プリセット</h2>
+              <ActionGrid columns={5}>
+                {PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={preset.id === presetId ? 'btn active' : 'btn'}
+                    onClick={() => {
+                      setPresetId(preset.id);
+                      setAtoms(preset.atoms);
+                      setHandBuilt(false);
+                      setSelected(null);
+                      setMeasured([]);
+                      invalidateResult();
+                    }}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </ActionGrid>
+
+              <h2>配置する元素</h2>
+              <PeriodicPicker elements={elements} value={activeZ} onChange={setActiveZ} />
+
+              {/* 削除 names no element: which atom goes is the one selected in
+                  the view, and a name in the label would widen it. */}
+              <ActionGrid columns={2}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={deleteSelected}
+                  disabled={selected === null}
+                >
+                  削除
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={clearAll}
+                  disabled={atoms.length === 0}
+                >
+                  全消去
+                </button>
+              </ActionGrid>
+
+              <h2>次の計算</h2>
+              {/* Fixed while a calculation runs: the answer on its way belongs to
+                  the choice it was started with. */}
+              <Segmented
+                label={LEVEL_GROUP_LABEL}
+                options={LEVEL_OPTIONS}
+                value={level}
+                onChange={setLevel}
+                disabled={unavailable !== null || computing}
+              />
+              <p className="hint level-hint">{levelHint(level)}</p>
+              {/* Advice, not a warning: what is about to be pressed still works, and
+                  is not held back (`components/level.ts`). */}
+              {advice !== null && <p className="hint level-hint">{advice}</p>}
+              {/* The buttons themselves are at the top of the panel (StatusHeader),
+                  and so is the line for a structure that is part way. */}
+              <p className="hint">
+                {'「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
+                  '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
+              </p>
+
+              <SearchPanel
+                candidates={candidates}
+                atomCount={atoms.length}
+                unavailable={unavailable !== null}
+                onTryCurrent={() => startSearch(0)}
+                onTryNudged={() => startSearch(NUDGED_COUNT)}
+              />
+            </TabPanel>
+          ) : (
+            <TabPanel tab="observe">
+              <ObservePanel
+                live={liveMeasurement}
+                before={measuredBefore}
+                symbols={measuredSymbols}
+                showBondLengths={showBondLengths}
+                onShowBondLengths={setShowBondLengths}
+                onClear={() => setMeasured([])}
+              />
+
+              <div className="section-head">
+                <h2>電子の雲</h2>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={showDensity}
+                    onChange={(event) => setShowDensity(event.target.checked)}
+                    aria-label="電子の雲を表示する"
+                  />
+                  表示する
+                </label>
+              </div>
+              {/* None of them is chosen while an orbital is on screen: only one
+                  surface is ever drawn, and pressing one of these is how the user
+                  comes back to a density. Stacked, so the bonding row appearing
+                  second moves nothing above it. */}
+              <Choices
+                label="電子の雲"
+                options={offered.map((request) => ({
+                  value: request,
+                  label: channelLabel(request),
+                  description: channelNote(request),
+                }))}
+                value={orbitalPick === null ? densityRequest : null}
+                onChange={selectChannel}
+                disabled={!showDensity}
+              />
+              {/* The density's own threshold, which keeps its place while an orbital
+                  is up - and is not slid then, because it would move nothing. */}
+              <IsoLevelSlider
+                value={densityLevel}
+                range={ISO_RANGES[densityRequest]}
+                onChange={(level) => setLevels((prev) => ({ ...prev, [densityRequest]: level }))}
+                disabled={!showDensity || !solved || orbitalPick !== null}
+              />
+              <p className="hint">
+                {explainChannel(densityRequest, orbitalPick === null ? mesh : null)}
+              </p>
+
+              <OrbitalPanel
+                open={orbitalsOpen}
+                onOpenChange={setOrbitalsOpen}
+                levels={orbitalLevels}
+                // A ladder is on its way whenever the worker is holding a calculation
+                // this section can read one from.
+                loading={orbitalLevels === null && density.held && resultLevel === 'shape'}
+                otherLevel={solved && resultLevel !== 'shape'}
+                picked={orbitalPick}
+                onPick={selectOrbital}
+                isoLevel={levels.orbital}
+                onIsoLevel={(level) => setLevels((prev) => ({ ...prev, orbital: level }))}
+                character={orbitalCharacter}
+                bonds={orbitalBonds}
+                symbols={orbitalSymbols}
+                // The blobs of the surface that is up now, and only while that
+                // surface is the orbital's: a density's are a different picture.
+                lobes={mesh !== null && mesh.channel === 'orbital' ? mesh.lobes : null}
+              />
+
+              {/* Two atoms approaching, which only two atoms can do, so the section
+                  is not there otherwise. Outside everything the ladder is gated on:
+                  a scan solves its own geometries, so it needs no calculation to
+                  have been run first (the correlation diagram in it does). */}
+              {atoms.length === 2 && (
+                <Fold
+                  heading={SCAN_HEADING}
+                  teaser={SCAN_TEASER}
+                  open={scanOpen}
+                  onOpenChange={setScanOpen}
+                >
+                  <DistanceScan
+                    running={scanning}
+                    disabled={unavailable !== null || computing}
+                    points={scanOnScreen ? scanPoints : []}
+                    range={scanOnScreen ? scanPair : null}
+                    markerIndex={scanMarker}
+                    markerDisabled={unavailable !== null || (computing && job?.kind !== 'single')}
+                    onMarker={moveMarker}
+                    onStart={startScan}
+                    onStop={stopScan}
+                    atomLevels={freeAtomLevels}
+                    levels={orbitalLevels}
+                    weights={orbitalWeights}
+                    symbols={atoms.map((atom) => symbolOf(atom.z))}
+                  />
+                </Fold>
+              )}
+
+              {/* What is left of the list that used to end the panel: numbers for
+                  the curious, closed until asked for. The state and the energy are
+                  at the top (StatusHeader). */}
+              <Fold heading="詳細" teaser="反復・計算時間・等値面" className="details">
+                <dl>
+                  <dt>反復</dt>
+                  <dd>{solved ? `${result.iterations} 回` : '—'}</dd>
+                  <dt>計算時間</dt>
+                  <dd>{result ? `${(result.elapsedMs / 1000).toFixed(2)} 秒` : '—'}</dd>
+                  <dt>等値面</dt>
+                  <dd>{describeMesh(result, mesh, meshing)}</dd>
+                  <dt>WebGL</dt>
+                  <dd>
+                    {webgl === null
+                      ? '確認中…'
+                      : webgl.ok
+                        ? `${webgl.context} · ${webgl.renderer ?? 'renderer 不明'}`
+                        : webgl.disabled
+                          ? '利用不可（GPU 無効）'
+                          : '非対応'}
+                  </dd>
+                </dl>
+              </Fold>
+            </TabPanel>
+          )}
+        </div>
       </aside>
     </div>
   );
@@ -2261,13 +2303,20 @@ function levelOfRecord(record: StructureRecord): ModelLevel | null {
 }
 
 /**
+ * How long the marker of "近づけてみる" must be still before the separation it
+ * is at is calculated. Long enough that a drag, which moves it every few
+ * milliseconds, starts nothing until it stops; short next to the second or two
+ * the calculation itself takes for a diatomic.
+ */
+const MARKER_SETTLE_MS = 400;
+
+/**
  * The two atoms of a scan, placed at one of its separations.
  *
  * Along the axis the pair on screen is already on, about the middle of it, so
  * that dragging the marker stretches the molecule the user is looking at rather
- * than swinging it into some other orientation. A pair of different elements -
- * one preset chosen while another is on screen - is laid on that same axis,
- * which is as good a direction as any and is the one the camera is framing.
+ * than swinging it into some other orientation. The pair is always the one on
+ * screen (V5-11), so the elements are the ones already there.
  */
 function alongTheAxis(
   atoms: readonly SceneAtom[],
@@ -2302,65 +2351,6 @@ function withPositions(atoms: SceneAtom[], xyz: number[]): SceneAtom[] {
     z: atom.z,
     pos: [xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]] as [number, number, number],
   }));
-}
-
-/**
- * How far the structure got, and what stopped it.
- *
- * Only reached when the electrons were solved, so `'scf'` cannot appear here -
- * that case is the molecule coming apart on screen and gets no words at all
- * (requirement F5). The other two do get words, and they are about the
- * relaxation rather than about chemistry: hiding them would leave a
- * half-relaxed structure looking like a finished one.
- *
- * `'interrupted'` is said without saying why, because a record cannot tell: the
- * engine's budget and the user's 中止 end a relaxation the same way. Only the
- * relaxation that has just been stopped is known to be the user's (`stopped`),
- * and it is also the one exception to "only when solved": stopped by replacing
- * the worker, its structure is kept without the numbers, and how far it got is
- * still true.
- */
-function describeRelaxation(
-  relaxation: OptimizationOutcome | null,
-  solved: boolean,
-  stopped: { steps: number } | null,
-): string {
-  if (stopped !== null) return `中止 · ${stopped.steps} 回動いたところまで`;
-  if (relaxation === null || !solved) return '—';
-  const moved = `${relaxation.steps} 回動いたところまで`;
-  switch (relaxation.reason) {
-    case 'converged':
-      return relaxation.steps === 0
-        ? 'すでに安定な形でした'
-        : `${relaxation.steps} 回動いて落ち着きました`;
-    case 'interrupted':
-      return `途中で止まりました · ${moved}`;
-    case 'maxSteps':
-      return `回数の上限 · ${moved}`;
-    case 'scf':
-      return '—';
-  }
-}
-
-/**
- * What the isosurface readout says, in the states it can be in.
- *
- * An empty mesh is one of them: a threshold above the densest point of the
- * molecule has no surface to draw, which is an answer rather than a failure.
- */
-function describeMesh(
-  result: ScfOutcome | null,
-  mesh: IsoMesh | null,
-  meshing: boolean,
-): string {
-  if (result === null || !result.converged) return '—';
-  if (meshing && mesh === null) return '生成中…';
-  if (mesh === null) return '—';
-  const faces = [mesh.positive, mesh.negative]
-    .filter((surface) => surface.indices.length > 0)
-    .map((surface) => (surface.indices.length / 3).toLocaleString());
-  if (faces.length === 0) return 'しきい値が高すぎます';
-  return `${faces.join(' + ')} 面 · ${Math.round(mesh.elapsedMs)} ms`;
 }
 
 /**

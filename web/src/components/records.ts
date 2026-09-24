@@ -11,7 +11,9 @@
 import type { LogEntry, LogGroup } from '../records/log';
 import { SAME_VALLEY_KJ_PER_MOL } from '../records/log';
 import type { ImportProblem } from '../records/file';
+import type { FormulaNode, ValleyNode } from '../records/tree';
 import { levelLabel } from './level';
+import type { ModelLevel } from '../worker/protocol';
 
 export const NO_RECORDS =
   'まだ記録がありません。「安定な形にする」を押すと、落ち着いた形がここに残ります。';
@@ -36,6 +38,32 @@ export const ISOMER_CAVEAT =
 
 export const NOT_KEPT_NOTICE =
   'このブラウザには記録が残りません（タブを閉じると消えます）。必要ならファイルに書き出してください。';
+
+/**
+ * The records column's own words (V5-8): its heading and what each button does.
+ * The icon buttons carry theirs as `aria-label` and `title`.
+ */
+export const EXPLORER_WORDS = {
+  heading: '記録',
+  fold: '記録の欄をたたむ',
+  unfold: '記録の欄をひらく',
+  exportAll: '書き出す',
+  importFile: '読み込む',
+  more: 'ほかの操作',
+  clear: '全部消す',
+  moleculeMore: 'この分子の操作',
+  exportMolecule: 'この分子だけ書き出す',
+  foldValley: '同じ形をたたむ',
+  unfoldValley: '同じ形をひらく',
+  open: 'この形を開く',
+  replay: '緩和を再生',
+  rename: '名前を変える',
+  remove: '削除',
+  cancelCandidate: '中止',
+  cancelAll: 'すべて中止',
+  clearFinished: '終わった候補を消す',
+  running: '計算中の候補があります',
+} as const;
 
 /** The bar is this wide at its shortest, so that a row is never a blank line. */
 const MINIMUM_BAR = 0.08;
@@ -86,17 +114,32 @@ export function spreadOf(group: LogGroup): number {
   return group.entries.reduce((most, entry) => Math.max(most, entry.relative ?? 0), 0);
 }
 
+/** What a group with an unknown level is filed under, in place of a level. */
+export const OTHER_LEVEL = 'ほかの計算';
+
 /**
- * `H₂O · 形を探す · 3 件（2 種類の形）`, without the shapes when there is one.
- *
- * The level is always there, because the same molecule can have a group at
- * each and they must not read as one. A group whose level is not known says
- * none rather than a guess.
+ * The tree's words (`records/tree.ts`). A molecule node is its formula with the
+ * count beside it, small; a level node is the name of the level with
+ * `8 · 2 種類の形` beside it; a valley is its first record's name and
+ * difference (`relativeText`) with how many found it, `×5`.
  */
-export function groupHeading(group: LogGroup): string {
-  const level = group.level === null ? '' : ` · ${levelLabel(group.level)}`;
-  const shapes = group.valleys >= 2 ? `（${group.valleys} 種類の形）` : '';
-  return `${group.formula}${level} · ${group.entries.length} 件${shapes}`;
+export function formulaMeta(node: FormulaNode): string {
+  return String(node.count);
+}
+
+export function levelHeading(level: ModelLevel | null): string {
+  return level === null ? OTHER_LEVEL : levelLabel(level);
+}
+
+/** Nothing for a level that holds only the search's candidates so far. */
+export function levelMeta(group: LogGroup | null): string {
+  if (group === null) return '';
+  const shapes = group.valleys >= 2 ? ` · ${group.valleys} 種類の形` : '';
+  return `${group.entries.length}${shapes}`;
+}
+
+export function valleySizeText(node: ValleyNode): string {
+  return `×${1 + node.rest.length}`;
 }
 
 /** `14:32` for a record made today, `9/20 14:32` for an older one. */
