@@ -2,14 +2,16 @@
 
 ブラウザ上で本物の DFT（Rust → WebAssembly）を回し、化学を知らない人が原子を置くだけで
 (1) 安定な形へ緩和するアニメーションと (2) 電子密度の等値面を見られるアプリ。
-**v1（P0〜P7）・v2（P8〜P10）・v3（V3-1〜V3-9）・v4（V4-1〜V4-10）・v5（V5-1〜V5-11）完了、
-Vercel にデプロイ済み。** 次の版は未計画（候補は「状態と今後」）。v3〜v5 と同じく、計画したら
-板（`docs/vN/README.md`）とチケットに分け、1 チケット = 1 セッションで進める。
+**v1（P0〜P7）・v2（P8〜P10）・v3（V3-1〜V3-9）・v4（V4-1〜V4-10）・v5（V5-1〜V5-11）・
+v6（V6-1〜V6-11）完了、Vercel にデプロイ済み。**
+v3〜v6 と同じく、板（`docs/vN/README.md`）とチケットに分け、1 チケット = 1 セッションで進める。
 
 **このファイルは毎回読み込まれるので、規約と現状だけを短く置く。** 各ファイルの先頭コメントが
 設計と理由を書いているので、細部はそこを読む。経緯・実測・却下した案・数字の出どころは
 [docs/dev-notes.md](docs/dev-notes.md)（自動では読まれない。触る領域の節だけ読む）。
 
+- v6 のチケット（完了）: [docs/v6/README.md](docs/v6/README.md)（板）。
+  **なぜこの形か**だけ: [docs/plan-v6.md](docs/plan-v6.md)
 - v5 のチケット（完了）: [docs/v5/README.md](docs/v5/README.md)（板）。
   **なぜこの形か**だけ: [docs/plan-v5.md](docs/plan-v5.md)
 - v4 のチケット: [docs/v4/README.md](docs/v4/README.md)（板）。
@@ -130,10 +132,13 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
 - **編集 / 観測モード。** ポインタとキーの解釈は `gestures.ts` だけ（観測モードは構造を変える
   動作を返さない）。計算の開始時に観測モードへ、発散・エラー・中止なら開始前のモードへ戻す
   （計算中にユーザーが選んだモードは戻さない）。計測は原子の並びが変わる操作で消す。
+  **選んだ原子にワールド XYZ の矢印**（編集モードだけ、viewer の `#handles`）。矢印のドラッグは軸の上だけ
+  （`axisDrag.ts`）、原子のドラッグは画面の面内（V6-10）。
 - **パネルのタブ＝モード**（v5）: 「計算」＝編集、「観察」＝観測（`components/Tabs.tsx`）。選ばれた
   タブは `mode` そのもので、タブ用の状態を持たない（押すと `chooseMode`、描くのは 1 枚だけ）。
-  例外は 720px 以下の「記録」タブだけ（App の `narrowRecords`、`panelTabs.ts`）。状態・全エネルギー・
-  主ボタン 2 枠は `StatusHeader`（スクロールしない。2 枠の表は `actions.ts`）。
+  例外は 720px 以下の「記録」タブだけ（App の `narrowRecords`、`panelTabs.ts`）。状態・全エネルギーと、
+  **計算中だけ止める 2 枠**は `StatusHeader`。**走らせる 2 つは計算タブの「次の計算」の下**
+  （表は `actions.ts`）。
 - **ボタンは 4 つの型だけ**（`components/controls.tsx`: `Segmented`・`Choices`・`ActionGrid`・
   `IconButton`、見た目は `.btn` の 1 クラス、アイコンは `icons.tsx` のインライン SVG）。**使えないときは
   消さずに無効**（規約で「出さない」もの ＝ π の選択肢・2 原子の「近づけてみる」は縦に積む場所に）。
@@ -141,7 +146,8 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
 - **記録は左の欄のツリー**（`RecordExplorer`、分子 › 段 › 記録、同じ谷は代表の下に畳む、探索の候補も
   「形を探す」の先頭に入る。木は `records/tree.ts`、開閉は `localStorage` の `mol.explorer` で
   **押したノードだけ**覚える。**谷の開閉の鍵は谷の最古の記録**、候補の時計は欄の中だけ `useNow`）。
-  **狭い画面では記録タブの中**で、欄は 1 か所にだけ描く（`foldable={!narrow}`）。
+  **分子の順は最初の記録の新しい順で、選んでも動かない**（`tree.ts` が決め、App は並べ替えない。
+  画面の分子は行の `current` で示す）。**狭い画面では記録タブの中**で、欄は 1 か所にだけ描く（`foldable={!narrow}`）。
 - **近づけてみるは画面の 2 原子だけ**（組の選択肢は無い。`scanPairFor`）。マーカーは編集として
   原子を置き、**止まって 400 ms で一点計算**、見ていた軌道は `carryPick`（添字ではなく対称性と順位）で
   選び直す。はしごは `orbitalsOpen || scanOpen`（1 つの値）で取り、選んだ段を捨てるのは分子軌道を
@@ -195,7 +201,8 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   （実測 176 秒。1 歩 17 秒 ＝ 中止の待ち、Worker は 420〜625 MiB。dev-notes「v3 の実測」）。
   **「精度 低/中/高」とは呼ばない**（実測で上が常に良いわけではない）。
   B3LYP の一点計算は**保留**。実測は dev-notes「v3-0 の実測」、理由は plan-v3.md。
-  **現状のまま使う間の注意書きは `ISOMER_CAVEAT`。**
+  **現状のまま使う間の注意書きは `isomerCaveats`（段ごと。ツリーにある段だけ出す: 「形を探す」は
+  異性体の順が逆に出うる、「形を測る」は順は合うが差が小さく出うる）。**
   **V3-9 で Firefox と講義 PC の確認まで済み**（2026-09-23。角度は 3 環境で一致、手直し無し）。
 - そのほかの候補（dev-notes「P6 以降に残したもの」）: XC グリッド重み微分、マルチスレッド化
   （nightly 依存）。**WebGPU は採らないと決めた**。**予算（`OPTIMIZE_BUDGET_SECONDS` 1800 秒と
@@ -213,11 +220,14 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   割れる）。理由は plan-v4.md、実測は dev-notes「v4-0 の実測」。
   **エンジン側は `dft-core/src/orbital.rs`**（一覧・縮退の組・符号・重なり占有数・面の上の振幅）。
   **軌道の格子は `density::evaluate_orbital`（線形）で取る**: rank-1 の `c cᵀ` を `evaluate` に
-  流すと ψ² になって位相が消える。**符号を決めるのは `orbital::signed_column` だけ**
-  （`ScfResult` は書き換えない）。
+  流すと ψ² になって位相が消える。**符号を決めるのは `orbital::signed_column` と、向きを
+  渡されたときの `orbital::oriented`（縮退の組を方向 `d` の p 関数に原子ごとに合わせて回す）**
+  （`ScfResult` は書き換えない）。**原子の軌道は自由原子の係数を分子の基底の区画に埋める**
+  （`atomic_column`。列の順は `atomic_levels` の並び）。
   **境界は `orbitals()` と 4 つめの要求 `'orbital'`**（V4-3。密度のボタンではない）。**段の
   `first` はスピンの組の中での軌道の添字で、`levels` 配列の添字は `partner` だけ**。軌道の格子は
-  **最後の 1 本だけ**を `(添字, スピン)` の鍵で持ち、**`spin` 省略＝`'both'` は開殻ではエラー**。
+  **最後の 1 本だけ**を `(分子/原子, 添字, スピン, 向き)` の鍵で持ち、**`spin` 省略＝`'both'` は開殻ではエラー**。
+  **`atom` を付けると自由原子の軌道（`orbital` は `atomLevels` の並び）、`along` は縮退の組を回す向き**（V6-6）。
   **節は `components/OrbitalPanel.tsx` と `orbital.ts`**（V4-4。既定で閉じた `<details>`）。
   **描くのは常に 1 つだけ**で、`channel` は状態ではなく `orbitalPick` からの導出、密度のボタンは
   `'orbital'` を取らない型（`DensitySurface`）。**軌道の一覧は節が開いている間、計算 1 回につき
@@ -241,8 +251,11 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   境界は `scan()` / `atomLevels()` と `scanPoint`（中間）・`scanDone`（終端、中身なし）で、
   **点の上限 `MAX_SCAN_POINTS` は 60、Worker が拒否する**。**スキャンは保持中の `Calculation` を
   触らない**ので等値面は生き残る。**収束しない点も届く**（曲線の穴。HF は 1.89 Å から先で落ちる）。
-  **図は `components/scan.ts`（純粋）＋ `DistanceScan.tsx`（SVG 2 枚）**（V4-8。節の中、
-  **原子がちょうど 2 個のときだけ**）。**文字はすべて `scan.ts` が組み立てる**ので
+  **図は `components/scan.ts`（純粋）。距離スキャンは `DistanceScan.tsx`、相関図は
+  `CorrelationDiagram.tsx` で二原子の分子軌道の節のはしごの代わり**（V4-8・V6-4。どちらも
+  **原子がちょうど 2 個のときだけ**。相関図の分子の線は `picks` で軌道を選ぶ）。
+  **縮退した組は向きで選ぶ**（`Along`、**押したときの画面で固める**＝ App の `orbitalDirection`。しきい値・
+  回転・マーカーでは向きを変えず、押し直すと決め直す。原子の線は `atom` 付きの pick、V6-8）。**文字はすべて `scan.ts` が組み立てる**ので
   「数字が横軸の距離だけ」は `scan.test.ts` が絵を歩いて見る。**線は `count`（対称種）ごとに
   「下から n 番目」で辿り**、**縦のスケールは収束した点だけで決めて非収束は線の穴**にする。
   **谷を名指しするのは `MIN_WELL`（記録の 1 kJ/mol）より深く、かつ最低点が左端でないとき**
@@ -267,6 +280,10 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   ツリーへ。エンジン・Worker の契約・`.wasm` は触っていない。1366×768 で H₂O の観察タブは
   スクロールなし（v5 の前はパネル 2,168px の最下部に状態）。規約は上の「UI」、理由は plan-v5.md、
   実測は dev-notes「v5-0 の実測」「v5 の実測」、各チケットの細部は dev-notes の「V5-n の実装メモ」。
+- **v6 は「使っていて気になった細部 5 点」**（2026-09-25〜26、V6-1〜V6-11 完了、Firefox と講義 PC で確認済み）:
+  走らせるボタンを計算タブへ、二原子は相関図だけ（原子の線も押せて、縮退の組は押したときの画面の向きで
+  選ぶ）、記録ツリーの並びの固定と「…」から消す、段ごとの注意書き、座標軸のハンドル。**「…」のリストは
+  `position: fixed`**（`menuPlacement.ts`。ツリーの箱に切り取られない）。細部は dev-notes の「V6-n の実装メモ」。
 - **記録の置き場所**: 経緯・実測・却下した案は dev-notes の「フェーズの記録」に足し、この
   CLAUDE.md には規約と現状だけを 1〜2 行で足す。
 

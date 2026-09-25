@@ -3192,6 +3192,273 @@ O₂・分子軌道を開いた状態の節ごとの高さ（px）: 見出しと
 **V5-11 で v5 は完了（2026-09-24）: Firefox・講義 PC とも確認済み、1366×768 で H₂O の観察タブは
 スクロールせずに収まり、状態と全エネルギーはいつも上に見えている。**
 
+### V6-1 の実装メモ（記録ツリーの並びと、段ごとの注意書き、2026-09-25）
+
+- **並べ替えは App から `tree.ts` へ移した。** App の `recordGroups` は `groupRecords(records)` そのまま
+  （画面の分子を先頭に出す安定ソートを消した）。`recordsOnly` が分子を「その分子のすべての記録の中で
+  最も古い `savedAt`」の新しい順（同じなら `formula` の文字列順）に並べる。候補だけの分子（`fresh`）は
+  今どおり先頭。`log.ts`（群の `latest` 順）は変えていない。
+- 却下: 群の `latest`（最も新しい記録）で並べる案。記録を 1 件足すたびに分子が先頭へ跳ぶので、
+  「開いたら動く」と同じ不具合が「計算したら動く」に移るだけ。古い分子に新しい記録を足しても
+  順が変わらないことは `tree.test.ts` で、`groupRecords` の先頭がその分子になる入力（＝`latest`
+  順なら先頭に来る）で見ている。
+- 画面の分子の行は `.tree-row.current`（名前が `#3f8cff`）。`RecordTree` の props に
+  `currentFormula`、`RecordExplorer` がそのまま渡す。
+- 注意書きは `ISOMER_CAVEATS: Record<ModelLevel, string>` と `isomerCaveats(levels)`
+  （`LEVEL_ORDER` の順、`null` と重複は無視、空なら出さない）。段の名前は `levelLabel` から組む。
+  2 つ目の `.explorer-caveat` は上の線と上の余白を消した（`+` の隣接セレクタ）。
+- 確かめたこと（Claude のブラウザ、既存の記録 CH₄・H₂O・O₂・C₃H₆ に `C₃H₆-記録-20260920-1859.json`
+  を読み込み）: 並びは `CH₄ / H₂O / O₂ / C₃H₆` で、H₂O を「安定な形にする」で 1 件足しても、
+  C₃H₆ の記録を開いても変わらない。`current` は開いた分子の行へ移る。「形を探す」だけの間は
+  注意書き 1 つ、H₂O を「形を測る」で 1 件足すと 2 つ（「形を探す」が先）。`npm test` 534 件。
+
+### V6-2 の実装メモ（分子・段ごとに記録を消す、2026-09-25）
+
+- **消す id は `tree.ts` の `recordIdsUnder(node)`** が木から取る（分子 → 全段の `group.entries`、
+  段 → その群だけ、候補だけの段 → 空）。段は群 1 つなので、電荷だけ違う同じ見出しの段は別々に消える。
+  候補は記録ではないので入れない（走っている候補は後で記録になる。「全部消す」と同じ扱い）。
+- **`RecordStore.removeMany(ids)`**: Memory は `Set` で filter、IndexedDB は `putAll` と同じく
+  1 つのトランザクションに `delete` を並べる（途中で失敗すれば全部戻る）。空なら何もしない。
+- 文言は `EXPLORER_WORDS` の `deleteMolecule` / `levelMore` / `deleteLevel` と、`deleteWhat(molecule,
+  level?)`（`C₃H₆ ` / `C₃H₆ の「形を探す」`、段の名前は `levelHeading` 経由で `levelLabel`）・
+  `deleteConfirm(what, count)`。確認文も `records.test.ts` の F4 の検査に入れた。電荷だけ違う 2 段は
+  確認文でも同じ名前になる（件数だけが違う）。
+- `RecordTree` の `levelRow(molecule, level)` に `MoreMenu`（`tree-toggle` の後ろ、分子の行と同じ並び）。
+  記録が 0 件なら項目を `disabled`（候補だけの段）。App の `deleteRecords(ids, what)` は `deleteRecord`
+  の隣で、`window.confirm` が偽なら何もしない。開いていた記録が入っていれば `setOpenRecordId(null)`。
+- 確かめたこと（Claude のブラウザ、既存の CH₄・H₂O・O₂ に `C₃H₆-記録-20260920-1859.json` を
+  `/@fs/` から fetch して file input に `DataTransfer` で渡した）: `confirm = () => false` では確認文
+  「C₃H₆ の「形を探す」の記録を 3 件消します。よろしいですか？」が出て何も消えない。`true` で C₃H₆ の
+  行が消え、再読み込み後も同じ（IndexedDB に C₃H₆ が 0 件、全 19 件）。分子の「…」→「この分子の
+  記録を消す」も同様（「C₃H₆ の記録を 3 件…」）。`npm test` 539 件。
+
+### V6-3 の実装メモ（走らせるボタンを計算タブへ、止めるボタンは計算中だけ上に、2026-09-25）
+
+- **`actions.ts` は `runSlots` と `stopSlots` の 2 表**（`actionSlots` は消した）。`runSlots` は
+  `stopping` を取らず（`Omit<ActionState, 'stopping'>`）、`disabled = unavailable || atomCount === 0 ||
+  computing`。`stopSlots` は計算していなければ `null`、計算中は `[中止, すぐ止める（無効）]`、
+  止めている間は `[止めています…（無効）, すぐ止める]`。**「すぐ止める」は最初から右に無効で出す**
+  （v5 は右が「この形のまま計算（無効）」で、「中止」を押すと右の枠の仕事が変わっていた。今は右の
+  枠はずっと「すぐ止める」で、押せるかどうかだけが変わる）。
+- **`StatusHeader` は `stops` / `onStop` だけ**（`slots` / `onAction` / `partWay` を外した）。止める
+  枠は `action` がどれも `'stop'` なので、振り分けは要らず `onStop={stopCalculation}`。
+  「もう一度「安定な形にする」を押すと…続き」の行は計算タブの走らせる 2 つの下へ移した
+  （押すボタンの隣にある方が読める。条件は同じ `!computing && isPartWay(...)`）。
+- 計算タブの 2 つは `RunButton` を直接並べる。**`onClick={calculate}` と書かない**: `calculate` は
+  `(structure = atoms)` を取るので、クリックのイベントが構造として渡る。`() => calculate()` で包む。
+  CSS は足していない（`ActionGrid` と `.hint` の既存のもの）。
+- 確かめたこと（Claude のブラウザ、1366×768）: 何もしていないとき `.panel-head` にボタン 0 個。
+  計算タブの並びは プリセット → 配置する元素 → 次の計算 → 安定な形にする / この形のまま計算 →
+  いろいろな形を試す で、H₂O で走らせる 2 つは 691〜723 px（スクロールなしで見える）。H₂O で
+  「安定な形にする」→ 観察タブへ移り上に「中止」「すぐ止める（無効）」、計算タブの 2 つは無効 →
+  「1 回目の移動」で「中止」→「止めています…（無効）」「すぐ止める」→ 終わると上のボタンが消え、
+  状態は「途中で止めました（形を探す）」、計算タブに続きの行。「この形のまま計算」でも上に「中止」。
+  全消去（原子 0 個）で走らせる 2 つが無効。**最初の一歩の前に「中止」を押すと、止める段を踏まず
+  すぐ消える**（`canStopInPlace()` が偽で `cancelCalculation()` になる。前からの動き）。
+  `npm test` 541 件。
+
+### V6-4 の実装メモ（二原子は相関図だけ、分子の側の線から軌道を描く、2026-09-25）
+
+- **相関図は `CorrelationDiagram.tsx` に移し、二原子の分子軌道の節ではしごの代わりに置いた。**
+  「近づけてみる」は距離スキャンだけ（`CORRELATION_HEADING` は使い道が無くなったので消した）。
+  節の文は `ORBITAL_INTRO`（●/○/HOMO/LUMO の読み方で図にもそのまま当てはまる）→
+  `CORRELATION_HINT` の 2 つ。チケットの文面は「はしごの代わりに HINT と図」だが、INTRO は
+  はしご専用ではないので両方に残した。原子の線が押せないことが分かるよう、HINT の末尾に
+  「まん中の線を押すと、その部屋の形を描きます。」を足した。
+- **段の `<g role="img">` はボタンを持たない段だけ。** img の子は読み上げの木から消える
+  （プレゼンテーション扱い）ので、分子の段に `role="img"` を残すと当たり判定のボタンが
+  `read_page` にも出ない。ボタンの `aria-label`（`lineLabels`）が段の `label` を含むので、分子の段は
+  役割なしで失うものは無い。
+- ホバーは線ごとの `<g className="correlation-orbital">` で取る（当たり判定の `rect` は線の後ろに
+  あるので `rect:hover + line` では届かない。`:has()` は Firefox 121 からで下限 114 に足りない）。
+- はしごにある矢印キーでの移動（ロービング tabindex）は入れていない。線ごとに `tabIndex={0}` で
+  Tab で順に回る。O₂ で 16 個。
+- `freeAtomLevels` は `orbitalsOpen` で取るようにした（図が分子軌道の節へ移ったため）。
+  `orbitalWeights` の effect は元から節の開閉に依らない。App の `correlation` の `useMemo` の
+  記号は `scanPairKey` の原子番号から引く（`freeAtomLevels` を頼んだのと同じ組なので食い違わない）。
+- 確かめたこと（Claude のブラウザ）: O₂ プリセット →「この形のまま計算」→ 観察タブで
+  「分子軌道」を開く → `.orbital-ladder` なし、`.correlation-hit` が 16 個（上向き 8・下向き 8、
+  π と π* は「1 つめ」「2 つめ」）。「上向きのスピン、π*、電子が 1 つ、HOMO、1 つめ」をクリック →
+  `aria-pressed="true"` が 1 つ、`.correlation-line.picked` が 1 本、しきい値のスライダー、
+  「O–O 反結合性。」「かたまりが 4 つ」、詳細の等値面の行が「3,520 + 3,520 面」。Enter でも選べる
+  （下向きの σ）。「近づけてみる」の中は見出し「距離を変える」と「スキャンする」だけ。H₂O は
+  はしごのまま（相関図なし、近づけてみるの節なし）。`npm test` 542 件。
+
+### V6-5 の実装メモ（原子軌道の列と、縮退の組を向きで回す、2026-09-25）
+
+- **`atom_functions` は足さなかった。** 同じ意味の `BasisSet::atom_range(atom)` が既にある（SAD と
+  `overlap_population` が使っている）。H₂O で O 0..5・H 5..6・6..7、和が `n_functions()` のテストだけ
+  足した（`each_atom_owns_one_contiguous_block_in_atom_order`）。
+- **`atomic_levels` の並びと係数の列は対応している。** `run_restricted` は最後の Fock を
+  `fill(&fock)`（エネルギー）と `orbitals_of(&fock, &x)`（係数）の 2 回対角化するが、どちらも同じ
+  行列を同じ決定的な Jacobi（`symmetric_eigen_sorted`、昇順）に通すので列は揃う。検査は
+  エネルギーではなく**偶奇**で取った（`atomic_orbital_columns_follow_the_levels`、H–Ar × 2 基底）:
+  単独の準位は p 殻に、3 重の準位は s 殻に係数を持たない（< 1e-6）＋ `CᵀSC = I`。
+  非公開の `atomic_scf` は `atomic_orbitals(z, kind) -> (System, OrbitalSet)` に置き換えた。
+- **目標は p 殻ごと**（6-31G\* の重原子は p 殻が 2 つで、それぞれが別の目標）。符号は
+  `|uᵀ S t|` が最大の目標で決める。和の目標にすると π* が打ち消し合って `M ≈ 0` になり、
+  最初の列が返る（テストの π* の検査はこれで落ちる）。
+- **`M` の最大固有値 < `NO_P_ALONG`（1e-8）なら組の最初の列を `signed_column` の規則で返す。**
+  `along` の長さが 0 のときも同じ（エラーにしない。0 を弾くのは V6-6 の境界）。
+- `molecular_oriented` は組を `list` ではなくエネルギーだけから探す（非公開の `level_of`。
+  `list` は鏡映・反転のパリティまで計算するので無駄）。規則は同じ `degenerate_groups`。
+- **実測**（N₂ を軸 (1,2,2)/3 に置き、Medium グリッド、STO-3G）: 回した π の p の向きの
+  ずれ（向きに垂直な成分 / 長さ）は最大 9e-7（π）・1.8e-8（π*）、2 本の重なり `u1ᵀSu2` は 1e-12。
+  グリッドが軸対称を少し崩す分で、テストの許容は 1e-5。自由原子の 2p は Coarse で 1e-8 未満。
+- `atomic_column` は呼ぶたびに自由原子を解く（数 ms。`atomic_levels` と同じ計算）。キャッシュは
+  しない（V6-6 は格子を 1 本持つので、しきい値の変更では呼ばれない）。
+
+### V6-6 の実装メモ（原子軌道と向きを Worker 越しに、2026-09-25）
+
+- **鍵は enum `OrbitalKey`**（`dft-wasm`）: `Molecular { index, spin, along }` /
+  `Atomic { atom, orbital, along }`。`Calculation::orbital` は `Option<(OrbitalKey, DensityGrid)>` の
+  1 本のまま。`along` は `[f64; 3]` なので `PartialEq` だけ（`Eq` は付かない）。
+- **`along` は境界で正規化する**（`direction()`）。エンジンは中で割るので答えは同じだが、長さだけ
+  違う要求が鍵で外れて格子を作り直すのを避けるため（テスト: `[3,3,3]` と `[1,1,1]` で同じ面）。
+  拒否するのは長さ 3 でない・非有限・長さ < 1e-12。ゼロをエンジンに渡すと組の最初の列が黙って
+  返るので、ここで止める。
+- **`Molecular` は先に `locate` で範囲を見る**（`molecular_oriented` は範囲外で panic）。
+  `Atomic` は `OrbitalError` を境界で文言にする（`missing()`。`Display` はエンジンに足さない）。
+  `atom` のとき `spin` は読まない＝閉殻の計算に `'up'` を付けてもエラーにならない（テストで確認）。
+- **`Vec<f64>` は wasm-bindgen で `Float64Array | null` になる**。契約は `[number, number, number]`
+  のままにして、Worker が `Float64Array.from` で渡す（素の配列でも `TypedArray.set` で通るが、
+  `.d.ts` と型を合わせる）。
+- `protocol.ts` の `isosurface` の説明コメントが `scan`・`atomLevels` の前に離れていた（V4-7 で間に
+  挟まった）ので、要求の型の直前に戻した。
+- **検査は向きを絵から読む**（`engine.test.ts`）: 正の頂点の重心 − 負の頂点の重心 と `along` の
+  cos > 0.9。N₂ を (1,1,1) の軸に置き、原子の 2p を軸・垂直 2 方向で、分子の結合性 π を垂直 2 方向で。
+  組のどの添字（2 と 4）でも同じ向きなら同じ面。
+- **実測**（Node、release の `.wasm`、N₂ STO-3G、3 回）: 原子の 2p を新しく 74〜134 ms、しきい値
+  だけ 4〜22 ms。分子の π を向きで 62〜80 ms、しきい値だけ 3〜10 ms。テストは「しきい値だけ <
+  作り直し」の比較だけにした（約 10 倍の余裕）。
+
+### V6-7 の実装メモ（相関図の原子の側と向き、純粋な部分、2026-09-25）
+
+- **原子の p の組は短い線 3 本**（`CORR_SET_LINE` 12・`CORR_SET_GAP` 2 ＝ 幅 40）。分子と同じ 20・5 で
+  並べると 70 で、原子の列（`CORR_ATOM_SPAN` 50）に入らない。列を広げると開殻の 2 列（今 80 ずつ）が
+  削られ、図ごと広げると文字が 3/4 に縮む。**名前（2p）は外側ではなく組のまん中の上**（`nameAnchor:
+  'middle'`。外側には場所が無い）。● / ○ と同じ高さで、自分の線の上に乗る。
+- そのため段に **`lineLength`** を足し、`CorrelationDiagram.tsx` の `CORR_LINE` 3 か所をそれに替えた
+  （チケットは .tsx を触らない前提だが、替えないと 3 本が重なって描かれる）。`CORR_LINE` は export を外した。
+- 原子の段は `atomSets`（名前の付いた組は 1 段、名前が付かなければ 1 軌道 1 段で `along` なし）。
+  **リンクは今までどおり 1 軌道 1 枠で数え**、`owners[side][slot]`（枠 → 段）で段に引く。O₂ で
+  2s に 4 本・2p に 8 本（片側）＝ 24 本で、V6-7 の前に 2p の 3 段へ分かれていた線が 1 段に集まっただけ。
+  縦の並べ方（`layout`）は原子の段ごとに 1 つ（3 本ぶんの高さを取らない）ので、高さは前と変わる。
+- 分子の π の `lineLabels` も「1 つめ / 2 つめ」から向きの言葉に替えた（`along` があれば向きの言葉、
+  無い 2 本以上の段だけ「n つめ」が残る。二原子では出ない）。
+- `directionOf` の「真正面から見た結合」の境は `|axis × forward| < 0.1`（約 6°）。`toward` が画面と
+  平行になる（結合が視線に沿う）ときは画面の右で符号を決める。
+- **途中の状態**: 原子の線は V6-4 の .tsx のままで押せる（`picks` が null でない）が、App はまだ
+  `atom` を読まないので、押すと分子の軌道 `index`・スピン `'both'` を頼んでしまう（O₂ ではエラー）。
+  つなぐのは V6-8。
+- 確かめたこと（Claude のブラウザ、O₂ →「この形のまま計算」→ 分子軌道）: `.correlation-hit` 24 個
+  （分子 16・原子 8、原子は 2s と 2p の 3 方向）、`getBBox` で文字と他の段の線・文字の重なりなし。
+  `npm test` 557 件。
+
+### V6-8 の実装メモ（原子の線と向きをつなぐ、2026-09-25）
+
+- **向きは App の状態 `orbitalDirection`（`Vec3 | null`）で、pick と同じ場所で立てて捨てる**
+  （`selectOrbital(pick, direction)`・`selectChannel`・`forgetOrbital`。同期で読む `directionRef` も並走）。
+  等値面の effect はそれを依存に持ち、しきい値を変えても固めた向きで頼む。**向きを計算するのは節の
+  `onPick` に渡す `pressOrbital` だけ**（`pickDirection(pick.along, atoms, viewer.cameraAxes())`）。
+  `selectOrbital` に `atoms` を持たせると、軌道の一覧の effect（`selectOrbital` を依存に持つ）が
+  原子が動くたびに走り直して選択を落とすので、分けた。
+- **同じ線をもう一度押すと、向きが変わっていれば描き直す**（`samePick && sameDirection` のときだけ
+  何もしない）。「向きは押したときの画面」なので、回してから押し直すのが向きを合わせ直す手段になる。
+  pick のオブジェクトは図の memo のもので同じ参照なので、向きを別の状態にしないと effect が走らない。
+- マーカー（`carryRef`）は `{ pick, levels, direction }`。選び直しは `selectOrbital(pick, carried.direction)`
+  で、動かした後のカメラを読まない（原子は同じ軸の上を動く）。
+- 要求は `atom` があれば `{ orbital: index, atom, along? }`（`spin` は送らない）、分子の軌道は今までどおり
+  `{ orbital, spin, along? }`。**`orbitalCharacter` は原子の pick では頼まない**（分子の軌道の添字として
+  読まれてしまう）。節の言葉は `atomPickWords(figure, pick, symbols)`（`scan.ts`。記号は列の `heading`、
+  名前は段の `name`、図が無ければ記号だけ）＋ `describeLobes`。
+- viewer が無いとき（WebGL 無し）のカメラは `STANDARD_CAMERA`（`orient.ts` に移した。`+x` 右・`+y` 上・
+  `-z` を見る）。`cameraAxes()` は `matrixWorld.extractBasis` の右・上と `getWorldDirection`。
+- `CORRELATION_HINT` は「線を押すと、その部屋の形を描きます。縮退した部屋は、向き（結合の軸・軸に垂直）を
+  選んで描きます。向きは押したときの画面で決まります。」（「まん中の」を外した）。
+- 確かめたこと（Claude のブラウザ、WebGL 無し、O₂ →「この形のまま計算」→ 分子軌道）: 原子の 2p の 3 本・
+  右の原子の軸の向き・分子の π* の 2 本を順に押し、`aria-pressed` が押した 1 本だけ、節の言葉が
+  「O の原子の 2p（…）。結合する前の、原子ひとつの部屋です。」／「O–O 反結合性。」に替わり、「詳細」の
+  等値面の行が毎回更新（左の原子の軸 2,412 + 2,444 面、右の原子の軸 2,444 + 2,412 面 ＝ 正の塊が同じ
+  `from → to` の側、π* 3,520 + 3,520 面）。エラーは出ない（コンソールに残っていたのは前のセッションの
+  HMR の古い行だけ）。`npm test` 563 件。
+
+### V6-9 の実装メモ（座標軸のハンドル、純粋な部分、2026-09-25）
+
+- **`pressAction` / `clickAction` の 4 つめの引数 `handle: HandleHit | null = null`**（`{ axis, index }`）。
+  既定値を `null` にしたので **viewer は触っていない**（呼び出しは 3 引数のまま通る。つなぐのは V6-10）。
+  ハンドルは原子より先に見る: 編集なら原子に当たっていても Shift でも `axisDrag`、観測は `orbit`。
+  `clickAction` はモードより先に `handle` を見て `none`（観測でもハンドルは描かないが、来たら何もしない）。
+  テストの `HANDLE` は `ATOM` と違う添字（5）にして、添字を原子の側から取る取り違えが落ちるようにした。
+- **`axisDrag.ts`**: `axisParameter` は光線を**直線として**扱う（`t < 0` も許す。長さは見ないので
+  `rayDir` は単位でなくてよい）。`s` は `axis` の単位（ワールド軸は単位ベクトルなので距離）。
+  最近点は 2 本の直線の距離の 2 乗を `s`・`t` で微分して 0 ＝ `(ad·dw − dd·aw)/(aa·dd − ad²)`。
+  平行のしきい値は `EDGE_ON_COSINE = 0.995`、長さ 0 のベクトルも null。`HANDLE_PIXELS = 60`。
+- テストは参照値を独立に作った: 交わる光線（軸 y・対角の軸 3√2）、ねじれ（(2,1,5) から −z → 2）、
+  **斜めの光線は「結ぶ線分が両方の直線に直交する」を光線の側から検算**、光線の長さを 7 倍しても同じ、
+  しきい値の両側（cos ≈ 0.9988 は null、≈ 0.9940 は値）、「先端をつかんで 1 動かすと原子も 1 だけ」。
+  `npm test` 576 件。
+
+### V6-10 の実装メモ（座標軸のハンドルを描いてつなぐ、2026-09-25）
+
+- **viewer だけ**（App は触っていない。動かした位置は今のドラッグと同じ `onMove` → `moveAtom`）。
+  `#handles`（`THREE.Group`、矢印 3 本）は**コンストラクタで作る**ので、WebGL の無いブラウザ
+  （App が `probeWebGl()` で viewer を作らない）ではハンドルも作られない。
+- **形**: +Y 向き・長さ 1 の矢印を 1 組（円柱 `#handleShaft` + 円錐 `#handleTip` + 当たり用の太い円柱
+  `#handleHit`）だけ作り、3 本はそれを共有して `Group` の回転で向ける（X は z 軸まわりに −90°、Z は
+  x 軸まわりに +90°）。**矢印は中心から長さの 25% 先から始める**（`HANDLE_START`）: 中心まで伸ばすと
+  3 本が原子の真ん中で重なり、原子の自由なドラッグがつかめなくなる（60 px の 25% ＝ 15 px）。
+  色は `MeshBasicMaterial`、`depthTest: false`・`depthWrite: false`・`renderOrder` 10（面の 1・破線より上）。
+  当たり用は **`MeshBasicMaterial({ visible: false })`**: 描かれないが、three の `Mesh.raycast` は
+  マテリアルの有無しか見ないので当たる（`Object3D.visible` は raycaster が見ないので、「見えている
+  ときだけ」は `#pickHandle` が `#handles.visible` で自分で見る）。半径は軸 2.5%・当たり 9%（≈ 5 px）。
+- **見える条件**は `#updateHandles()`（`mode === 'edit'` かつ選んだ原子が今の `#atoms` にある）。呼ぶのは
+  `#updateHighlight` の隣 2 か所（`setSelected`・`#syncAll`）と `setMode`。**長さは `tick()` の中の
+  `#scaleHandles()`** で毎フレーム `handleLength(奥行き, fov, #viewportHeight)`。距離は**視線方向の
+  奥行き**（透視の割り算がそれ）で、ユークリッド距離ではない。`#viewportHeight` は `#resize` で覚える
+  （毎フレーム `clientHeight` を読まない）。ベクトルは使い回し（`#scratch`・`#forward`）。
+- **押す**: 先に `#pickHandle`、次に `#pick`、`pressAction(mode, hit, shift, handle)`。`axisDrag` なら
+  `#axisDrag = { index, axis（Vec3）, start, s0 }`。**`s0` が null（軸がほぼ視線）なら何もしない ＝
+  OrbitControls が生きたまま**なので、その押しは視点の回転になる（矢印は点に見えているので、回せば
+  つかめるようになる）。動かす: 光線から `s`、`axisDragPosition` を `onMove`。**クリックのしきい値
+  `CLICK_SLOP_PX` は自由なドラッグと同じく効かせる**（押しただけで原子が数 px ずれない）。離す:
+  押したときの `#downHandle` を `clickAction` に渡す（押しただけなら `none`）。
+- **カーソル**は `#syncCursor()` の 1 か所（ドラッグ中 `grabbing`、上にいれば `grab`、ほかは空）。
+  ホバーの判定はボタンを押していない `pointermove` だけで、ハンドルが見えていなければ raycast しない。
+- 説明 `EDIT_HINT` は節を増やさず「ドラッグで移動（矢印なら軸の向きだけ）」（60 字。前は 48 字）。
+  狭い画面では既存の 2 行の `line-clamp`、広い画面は省略記号で切れる。
+- 確かめたのは「落ちない」まで（Claude のブラウザは WebGL が無い）: 再読み込み後のコンソールに
+  エラー無し、canvas 0。`npm test` 577 件・lint・build。見た目とドラッグは V6-11。
+
+### V6-11 の確認（Firefox・講義 PC と、そこで出た 1 つの直し、2026-09-26）
+
+- **確認**: V6-11.md の「確認してもらうこと」1〜4（ボタンの並び・相関図と軌道の向き・記録ツリー・
+  座標軸のハンドル）を番号付きの手順にして渡し、講義 PC はハンドルのつかみやすさと相関図の線の
+  押しやすさを重点に。**すべて良好**との報告。向き（「画面の中」「手前」、`結合の軸の向き` の正の側）と
+  3D を回してから押し直す振る舞い、矢印が原子に隠れないことも Firefox で合っていた。
+- **指摘（v6 の範囲外）: 記録ツリーの「…」のリストが下の注意書きに隠れる。** V6-2 で「消す」が
+  増えてリストが長くなったのが目立った原因だが、**z-index の問題ではない**: リストは `.more-menu` の
+  下に `position: absolute` で吊られていて、`.explorer-tree`（`overflow-y: auto`）の箱に切り取られ、
+  はみ出した分が箱の下の `.explorer-caveat` の位置で消えていた。**直し: `.menu` を `position: fixed`
+  にし、置き場所を `components/menuPlacement.ts` の `placeMenu(ボタンの矩形, リストの大きさ,
+  窓)` で決める**（ボタンの下で右端をそろえる。下に入らず上のほうが広いなら上に開く。窓の端から
+  8 px は空ける）。`MoreMenu` は `useLayoutEffect` で測って置き（置くまでは `visibility: hidden`）、
+  **固定なのでスクロールに付いて行かない → どこかのスクロール（capture）と resize で閉じる**。
+  開き直すたびに置き直す（リセットは effect ではなくボタンの押下で。effect で `setState` すると
+  lint の `set-state-in-effect` が出る）。見出しの「…」（全部書き出す等）も同じ部品なので同じ扱い。
+  祖先に `transform` は無い（`fixed` が効く）ことは `App.css` で確かめた。
+- 却下: `.menu` の z-index を上げる（箱の切り取りは z-index では越えられない）、`.explorer-tree` の
+  `overflow` を外す（ツリーが欄の中でスクロールしなくなる）、React のポータルで `body` へ出す
+  （`fixed` で足り、`pointerdown` の「外で押したら閉じる」判定が DOM の親子のまま使える）。
+- 確かめたこと（Claude のブラウザ、1366×768、記録 21 件）: ツリーを下端までスクロールして一番下の
+  「この段の操作」を開くと、リスト（596〜638 px）が注意書きの帯（596 px から下）に重なり、
+  `elementFromPoint` でリストの項目に当たる。ツリーをスクロールするとリストは閉じる。
+  `menuPlacement.test.ts` 5 件（下・上・下に収まる境目・上のほうが狭いとき・窓の端）。
+  `npm test` 582 件・lint（既存の警告だけ）・build 通過。
+
+**2026-09-26、ユーザーの Firefox と講義 PC の確認が完了し、V6-11 完了となった。手直しは範囲外の
+1 つ（「…」のリストを `position: fixed` にして注意書きに隠れないように）だけで、v6 はこれで完了。**
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は
