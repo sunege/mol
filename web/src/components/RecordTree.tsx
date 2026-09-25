@@ -12,23 +12,26 @@
  *
  * The record on screen is the one row with actions under it, so a long list
  * does not carry three icons on every line: replay, rename (typed in place,
- * Enter to keep and Escape to drop) and delete.
+ * Enter to keep and Escape to drop) and delete. A molecule's and a level's
+ * "…" delete every record under it at once (V6-2); candidates stay.
  */
 import { useState, type CSSProperties } from 'react';
 import type { LogEntry, LogGroup } from '../records/log';
 import type { StructureRecord } from '../records/record';
-import type {
-  CandidateNode,
-  FormulaNode,
-  LevelNode,
-  RecordTree as Tree,
-  ValleyNode,
+import {
+  recordIdsUnder,
+  type CandidateNode,
+  type FormulaNode,
+  type LevelNode,
+  type RecordTree as Tree,
+  type ValleyNode,
 } from '../records/tree';
 import { IconButton } from './controls';
 import { ChevronIcon, DeleteIcon, PlayIcon, RenameIcon, StopIcon } from './icons';
 import { MoreMenu } from './MoreMenu';
 import {
   EXPLORER_WORDS as WORDS,
+  deleteWhat,
   depthBar,
   formulaMeta,
   levelHeading,
@@ -49,6 +52,8 @@ interface Props {
   onToggle: (id: string, open: boolean) => void;
   /** The record currently on screen. */
   openId: string | null;
+  /** The molecule on screen, whose row is marked (it stays where it is in the tree). */
+  currentFormula: string | null;
   onOpen: (record: StructureRecord) => void;
   onReplay: (record: StructureRecord) => void;
   canReplay: boolean;
@@ -56,6 +61,11 @@ interface Props {
   onDelete: (record: StructureRecord) => void;
   /** The records of one molecule only. */
   onExport: (formula: string) => void;
+  /**
+   * The records under a molecule or a level, all at once (V6-2). `what` names
+   * them for the confirmation (`deleteWhat`).
+   */
+  onDeleteMany: (ids: string[], what: string) => void;
   /** A candidate the engine could not solve: shows it coming apart. */
   onOpenCandidate: (candidateId: string) => void;
   onCancelCandidate: (candidateId: string) => void;
@@ -213,8 +223,9 @@ export function RecordTree(props: Props) {
     );
   };
 
-  const levelRow = (level: LevelNode) => {
+  const levelRow = (molecule: FormulaNode, level: LevelNode) => {
     const open = expanded.has(level.id);
+    const ids = recordIdsUnder(level);
     return (
       <li key={level.id} className="tree-item">
         <div className="tree-row" style={indent(1)}>
@@ -230,6 +241,16 @@ export function RecordTree(props: Props) {
             <span className="tree-name">{levelHeading(level.level)}</span>
             <span className="tree-meta">{levelMeta(level.group)}</span>
           </button>
+          <MoreMenu
+            label={WORDS.levelMore}
+            items={[
+              {
+                label: WORDS.deleteLevel,
+                disabled: ids.length === 0,
+                onSelect: () => props.onDeleteMany(ids, deleteWhat(molecule, level)),
+              },
+            ]}
+          />
         </div>
         {open && (
           <ul role="group">
@@ -249,9 +270,10 @@ export function RecordTree(props: Props) {
 
   const formulaRow = (molecule: FormulaNode) => {
     const open = expanded.has(molecule.id);
+    const ids = recordIdsUnder(molecule);
     return (
       <li key={molecule.id} className="tree-item">
-        <div className="tree-row">
+        <div className={molecule.formula === props.currentFormula ? 'tree-row current' : 'tree-row'}>
           <button
             type="button"
             className="tree-toggle formula"
@@ -268,10 +290,15 @@ export function RecordTree(props: Props) {
             label={WORDS.moleculeMore}
             items={[
               { label: WORDS.exportMolecule, onSelect: () => props.onExport(molecule.formula) },
+              {
+                label: WORDS.deleteMolecule,
+                disabled: ids.length === 0,
+                onSelect: () => props.onDeleteMany(ids, deleteWhat(molecule)),
+              },
             ]}
           />
         </div>
-        {open && <ul role="group">{molecule.children.map(levelRow)}</ul>}
+        {open && <ul role="group">{molecule.children.map((level) => levelRow(molecule, level))}</ul>}
       </li>
     );
   };

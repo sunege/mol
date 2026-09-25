@@ -4,12 +4,13 @@
  *
  * `groupRecords` already decides everything about comparison - which records
  * belong together, which valley each is in, how they are ordered - and this file
- * only gives that a shape to open and close. So it takes the groups as they
- * come (the App puts the molecule on screen first) and changes nothing inside
- * them: a molecule appears where its first group does, a group becomes one level
- * node even when two share a level (they differ by the charge, which is not
- * shown - requirement F4 - so their headings read the same, as they always
- * have), and a valley of one record is just that record.
+ * only gives that a shape to open and close. It changes nothing inside the
+ * groups: a group becomes one level node even when two share a level (they
+ * differ by the charge, which is not shown - requirement F4 - so their headings
+ * read the same, as they always have), and a valley of one record is just that
+ * record. The one order it decides is the molecules' (V6-1): newest first by the
+ * molecule's oldest record, so a molecule stays where it is when a record of it
+ * is opened or added, rather than jumping to the top with the newest group.
  *
  * Every node has an `id` for remembering whether it is open. It must survive the
  * log growing and being re-sorted, so it is built from things that do not move:
@@ -149,6 +150,18 @@ function inTree(status: CandidateStatus): boolean {
   return status !== 'settled' && status !== 'partial';
 }
 
+/**
+ * The ids of the records under a molecule or a level, for deleting them
+ * together (V6-2). A level is its one group, so of two levels that read the
+ * same (they differ by the charge) only its own. Candidates are not records and
+ * are left out: one still running becomes a record later, as it would after the
+ * whole log is cleared.
+ */
+export function recordIdsUnder(node: FormulaNode | LevelNode): string[] {
+  if (node.kind === 'formula') return node.children.flatMap(recordIdsUnder);
+  return node.group?.entries.map((entry) => entry.record.id) ?? [];
+}
+
 /** Whether a candidate still has work ahead of it. */
 function isPending(status: CandidateStatus): boolean {
   return status === 'waiting' || status === 'running';
@@ -162,7 +175,15 @@ function recordsOnly(groups: readonly LogGroup[]): RecordTree {
     else byFormula.set(group.formula, [group]);
   }
 
-  return [...byFormula].map(([formula, members]) => {
+  const first = new Map(
+    [...byFormula].map(([formula, members]) => [formula, oldestSavedAt(members)]),
+  );
+  const molecules = [...byFormula].sort(([a], [b]) => {
+    const [fa, fb] = [first.get(a)!, first.get(b)!];
+    return fa > fb ? -1 : fa < fb ? 1 : a < b ? -1 : a > b ? 1 : 0;
+  });
+
+  return molecules.map(([formula, members]) => {
     // A stable sort, so two groups at one level stay in the order they came.
     const levels = [...members].sort(
       (a, b) => LEVEL_ORDER.indexOf(a.level) - LEVEL_ORDER.indexOf(b.level),
@@ -175,6 +196,18 @@ function recordsOnly(groups: readonly LogGroup[]): RecordTree {
       children: levels.map(levelNode),
     };
   });
+}
+
+/** When the molecule was first recorded: the oldest `savedAt` of all its records. */
+function oldestSavedAt(groups: readonly LogGroup[]): string {
+  let oldest: string | null = null;
+  for (const group of groups) {
+    for (const entry of group.entries) {
+      const at = entry.record.savedAt;
+      if (oldest === null || at < oldest) oldest = at;
+    }
+  }
+  return oldest ?? '';
 }
 
 function levelNode(group: LogGroup): LevelNode {

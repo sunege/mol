@@ -5,6 +5,7 @@ import {
   defaultExpanded,
   type CandidateNode,
   type PendingCandidate,
+  recordIdsUnder,
   type RecordTree,
   type ValleyNode,
 } from './tree';
@@ -95,19 +96,28 @@ describe('the shape of the tree', () => {
     expect(neutral.id).not.toBe(ion.id);
   });
 
-  it('orders the molecules as their first groups come', () => {
-    // The App puts the molecule on screen first; the tree keeps that.
-    const groups = groupRecords([at(0), at(0, { z: AMMONIA }), at(0, { level: 'measure' })]);
-    const water = groups.filter((group) => group.formula === 'H₂O');
-    const ammonia = groups.filter((group) => group.formula !== 'H₂O');
-    expect(buildRecordTree([...ammonia, ...water]).map((m) => m.formula)).toEqual([
-      ammonia[0].formula,
-      'H₂O',
-    ]);
-    expect(buildRecordTree([water[0], ...ammonia, water[1]]).map((m) => m.formula)).toEqual([
-      'H₂O',
-      ammonia[0].formula,
-    ]);
+  it('orders the molecules newest first by their oldest record', () => {
+    const [water, ammonia] = [at(0), at(0, { z: AMMONIA })];
+    expect(treeOf([water, ammonia]).map((m) => m.formula)).toEqual(['H₃N', 'H₂O']);
+    // However the groups come: the order is the tree's own, not the App's.
+    const groups = groupRecords([water, ammonia]);
+    expect(buildRecordTree([...groups].reverse()).map((m) => m.formula)).toEqual(['H₃N', 'H₂O']);
+  });
+
+  it('does not move a molecule when a newer record of it is added (V6-1)', () => {
+    const records = [at(0), at(0, { z: AMMONIA })];
+    const before = treeOf(records).map((m) => m.formula);
+    // Water now has the newest record and the newest group, at another level
+    // too, so ordering by the groups' `latest` would put it first.
+    const more = [...records, at(5), at(0, { level: 'measure' })];
+    expect(groupRecords(more)[0].formula).toBe('H₂O');
+    expect(treeOf(more).map((m) => m.formula)).toEqual(before);
+  });
+
+  it('breaks a tie of first records by the formula', () => {
+    const savedAt = new Date(Date.UTC(2026, 8, 20, 12)).toISOString();
+    const tree = treeOf([at(0, { savedAt, z: AMMONIA }), at(0, { savedAt })]);
+    expect(tree.map((m) => m.formula)).toEqual(['H₂O', 'H₃N']);
   });
 });
 
@@ -268,6 +278,35 @@ describe('the candidates of the search', () => {
     const over = buildRecordTree(groupRecords(records), [pending('a', 'failed', 'H₃N')]);
     const closed = defaultExpanded(over, { currentFormula: 'H₂O', openId: null });
     expect(closed.has(ammonia.id)).toBe(false);
+  });
+});
+
+describe('the records under a node, for deleting them together (V6-2)', () => {
+  it('are every record of every level under a molecule', () => {
+    const records = [at(0), at(0.2), at(20), at(0, { level: 'measure' }), at(0, { charge: 1 })];
+    const other = at(0, { z: AMMONIA });
+    const water = treeOf([...records, other]).find((m) => m.formula === 'H₂O')!;
+    expect(recordIdsUnder(water).sort()).toEqual(records.map((r) => r.id).sort());
+  });
+
+  it('are only its own group under a level, of two that read the same', () => {
+    const [neutral, ion] = [at(0), at(0, { charge: 1 })];
+    const [first, second] = treeOf([neutral, at(0.1), ion])[0].children;
+    expect(first.level).toBe(second.level);
+    const ids = [recordIdsUnder(first), recordIdsUnder(second)];
+    expect(ids.find((each) => each.includes(ion.id))).toEqual([ion.id]);
+    expect(ids.find((each) => each.includes(neutral.id))).toHaveLength(2);
+  });
+
+  it('are none under a level that holds only candidates, and leave candidates out', () => {
+    const tree = buildRecordTree(groupRecords([at(0, { level: 'measure' })]), [
+      { id: 'a', formula: 'H₂O', name: 'a', status: 'running', text: 'running a' },
+    ]);
+    const [shape, measure] = tree[0].children;
+    expect(shape.group).toBeNull();
+    expect(recordIdsUnder(shape)).toEqual([]);
+    expect(recordIdsUnder(tree[0])).toEqual(recordIdsUnder(measure));
+    expect(recordIdsUnder(tree[0])).toHaveLength(1);
   });
 });
 

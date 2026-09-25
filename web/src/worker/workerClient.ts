@@ -421,12 +421,18 @@ export class DftWorkerClient {
    * others: which orbital of which spin's ladder to draw, named as an
    * {@link OrbitalLevel} names its own. Only the orbital asked for last stays
    * sampled, so going back to an earlier one costs what the first one did.
+   * `atom` draws that atom's free-atom orbital instead (`orbital` counting along
+   * its `atomLevels`, `spin` ignored), and `along` turns a degenerate set to face
+   * a direction; both are spelled out on the `isosurface` request in
+   * `protocol.ts`.
    */
   async isosurface(
     channel: DensityRequest,
     isoLevel: number,
     orbital?: number,
     spin?: SpinChannel,
+    atom?: number,
+    along?: [number, number, number],
   ): Promise<IsoMesh> {
     const response = await this.#send<Extract<WorkerResponse, { type: 'mesh' }>>((id) => ({
       id,
@@ -435,6 +441,8 @@ export class DftWorkerClient {
       isoLevel,
       orbital,
       spin,
+      atom,
+      along,
     }));
     return response.mesh;
   }

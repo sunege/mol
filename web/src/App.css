@@ -969,6 +969,40 @@ circle.scan-total {
   stroke-linecap: round;
 }
 
+/* The molecule's lines are the ladder of two atoms since V6-4, and are pressed
+   as its lines were: a transparent box over each (an unfilled one catches no
+   clicks), the line lit on hover, blue once it is the orbital on screen. A
+   free atom's lines are buttons too since V6-7. */
+.correlation-orbital {
+  cursor: pointer;
+}
+
+.correlation-hit {
+  fill: transparent;
+  stroke: none;
+}
+
+.correlation-orbital:hover .correlation-line {
+  stroke: #8fc0ff;
+}
+
+.correlation-line.picked,
+.correlation-orbital:hover .correlation-line.picked {
+  stroke: #3f8cff;
+  stroke-width: 3;
+}
+
+/* The ring on the box itself, as on the ladder: a focused SVG element's
+   default outline is drawn around something else in some browsers. */
+.correlation-hit:focus {
+  outline: none;
+}
+
+.correlation-hit:focus-visible {
+  stroke: #3f8cff;
+  stroke-width: 1;
+}
+
 /* Which atomic level a rung was made out of: faint, because the pairing is
    background to the three columns rather than a rung of any of them. */
 .correlation-link {
@@ -1083,6 +1117,12 @@ circle.scan-total {
   color: #6b7686;
 }
 
+/* One per level in the tree (V6-1): the second reads as the same note. */
+.explorer-caveat + .explorer-caveat {
+  padding-top: 0;
+  border-top: none;
+}
+
 /* A file input, dressed as the button it sits in: the input is kept in the
    page (not `display: none`) so Tab still reaches it. */
 .btn.file-label {
@@ -1118,13 +1158,14 @@ circle.scan-total {
   display: inline-flex;
 }
 
+/* Fixed, placed by `MoreMenu` (`placeMenu`): under its button the records
+   tree's scrolling box clipped it, behind the caveats (V6-11). */
 .menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
+  position: fixed;
+  top: 0;
+  left: 0;
   z-index: 5;
   min-width: 170px;
-  margin-top: 4px;
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -1223,6 +1264,11 @@ ul.tree,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The molecule on screen (V6-1): the tree no longer moves it to the top. */
+.tree-row.current .tree-name {
+  color: #3f8cff;
 }
 
 .tree-meta {

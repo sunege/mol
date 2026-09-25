@@ -9,6 +9,7 @@ import {
   ORBITAL_SCALE,
   ORBITAL_SURFACE_HINT,
   ORBITAL_TEASER,
+  atomOrbitalWords,
   carryPick,
   coreText,
   countNodes,
@@ -22,6 +23,7 @@ import {
   occupationText,
   orbitalColumns,
   rungOf,
+  samePick,
   spinHeading,
   verdictBySymmetry,
   type Bond,
@@ -540,5 +542,63 @@ describe('carrying the picked orbital to another separation', () => {
   it('gives up where the new ladder has no such level', () => {
     expect(carryPick({ index: 4, spin: 'both' }, NEAR, FAR.slice(0, 3))).toBeNull();
     expect(carryPick({ index: 9, spin: 'both' }, NEAR, FAR)).toBeNull();
+  });
+
+  it('keeps the way a member of a pair points, as well as which member it is', () => {
+    expect(carryPick({ index: 2, spin: 'both', along: 'toward' }, NEAR, FAR)).toEqual({
+      index: 3,
+      spin: 'both',
+      along: 'toward',
+    });
+  });
+
+  it('gives a free atom’s orbital back as it was, whatever the molecule did', () => {
+    // V6-7: the atom's own levels do not move with the separation.
+    const pick = { index: 3, spin: 'both' as const, atom: 1, along: 'across' as const };
+    expect(carryPick(pick, NEAR, FAR)).toBe(pick);
+    expect(carryPick(pick, NEAR, [])).toBe(pick);
+  });
+});
+
+describe('picks of a free atom’s orbital and of a direction (V6-7)', () => {
+  it('tells an atom’s orbital from the molecule’s with the same number', () => {
+    const molecule = { index: 2, spin: 'both' as const };
+    expect(samePick(molecule, { index: 2, spin: 'both' })).toBe(true);
+    expect(samePick(molecule, { index: 2, spin: 'both', atom: 0 })).toBe(false);
+    expect(samePick({ index: 2, spin: 'both', atom: 0 }, { index: 2, spin: 'both', atom: 1 })).toBe(
+      false,
+    );
+    expect(samePick({ index: 2, spin: 'both', atom: 1 }, { index: 2, spin: 'both', atom: 1 })).toBe(
+      true,
+    );
+  });
+
+  it('tells the members of a set apart by the way they point', () => {
+    const across = { index: 3, spin: 'both' as const, atom: 0, along: 'across' as const };
+    expect(samePick(across, { ...across })).toBe(true);
+    expect(samePick(across, { ...across, along: 'toward' })).toBe(false);
+    expect(samePick(across, { index: 3, spin: 'both', atom: 0 })).toBe(false);
+    expect(samePick({ index: 1, spin: 'up', along: 'across' }, { index: 1, spin: 'up' })).toBe(
+      false,
+    );
+  });
+
+  it('puts an atom’s orbital on no rung of the molecule’s', () => {
+    expect(rungOf(WATER, { index: 0, spin: 'both', atom: 0 })).toBeNull();
+    expect(rungOf(WATER, { index: 0, spin: 'both' })).not.toBeNull();
+  });
+
+  it('says what an atom’s orbital is, and which way, without a number', () => {
+    expect(atomOrbitalWords('N', '2p', 'axis')).toBe(
+      'N の原子の 2p（結合の軸の向き）。結合する前の、原子ひとつの部屋です。',
+    );
+    expect(atomOrbitalWords('O', '2p', 'toward')).toContain('（軸に垂直・手前）');
+    expect(atomOrbitalWords('H', '1s', null)).toBe(
+      'H の原子の 1s。結合する前の、原子ひとつの部屋です。',
+    );
+    for (const along of ['axis', 'across', 'toward', null] as const) {
+      const words = atomOrbitalWords('Cl', '3p', along);
+      expect(words.replace('3p', '')).not.toMatch(/\d/);
+    }
   });
 });

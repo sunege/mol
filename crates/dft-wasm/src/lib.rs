@@ -285,8 +285,27 @@ pub struct Calculation {
     /// that walks up a ladder of thirty-six orbitals would keep all thirty-six.
     /// The spin is part of the key because it has to be - in an open-shell
     /// molecule the fifth alpha orbital and the fifth beta orbital are different
-    /// orbitals, and an index alone would answer one with the other.
-    orbital: Option<(usize, SpinChannel, DensityGrid)>,
+    /// orbitals, and an index alone would answer one with the other. So is the
+    /// direction a degenerate set was turned to, and whether the orbital was the
+    /// molecule's or one of its free atoms': see [`OrbitalKey`].
+    orbital: Option<(OrbitalKey, DensityGrid)>,
+}
+
+/// Which orbital the one kept lattice was sampled from.
+///
+/// A free atom's orbitals share the one slot with the molecule's rather than
+/// getting their own: they are drawn one at a time like any other, and a second
+/// lattice would be held for the life of the worker for the same reason a
+/// second molecular one would be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OrbitalKey {
+    /// The `index`-th orbital of the ladder of `spin`, a degenerate set turned
+    /// to face `along` when there is one (`orbital::molecular_oriented`).
+    Molecular { index: usize, spin: SpinChannel, along: Option<[f64; 3]> },
+    /// The `orbital`-th orbital of atom `atom` on its own, counted along its
+    /// `atomLevels`, turned the same way (`orbital::atomic_column`). A free atom
+    /// is solved with both spins together, so there is no spin to key it by.
+    Atomic { atom: usize, orbital: usize, along: Option<[f64; 3]> },
 }
 
 #[wasm_bindgen]
@@ -432,6 +451,16 @@ impl Calculation {
     /// shown for is not decided here: that is a rule about the interface, and the
     /// interface keeps it.
     ///
+    /// Two more arguments belong to `"orbital"` alone. `atom` draws one of that
+    /// atom's orbitals as a free atom instead of one of the molecule's - the left
+    /// and right ends of a correlation diagram - with `index` counting along its
+    /// `atomLevels` and `spin` ignored, since a free atom is solved with both
+    /// spins together. `along` is a direction: inside a degenerate set the
+    /// members are an arbitrary rotation of one another, and this turns the set
+    /// so that the member drawn faces it. Only its direction is read, so it has
+    /// no unit, but it has to be three numbers that are not all zero; an orbital
+    /// that is not degenerate is drawn the same with or without it.
+    ///
     /// The first call for a channel also samples its density, which is why it is
     /// slower than the ones that follow. The same holds for an orbital, except
     /// that only the last one asked for is kept.
@@ -442,13 +471,22 @@ impl Calculation {
         iso_level: f64,
         index: Option<usize>,
         spin: Option<String>,
+        atom: Option<usize>,
+        along: Option<Vec<f64>>,
     ) -> Result<IsoMesh, JsValue> {
         if channel == "orbital" {
             let index = index.ok_or_else(|| {
                 JsValue::from_str("an orbital surface needs the index of an orbital")
             })?;
-            let spin = SpinChannel::parse(spin.as_deref())?;
-            let grid = self.orbital_grid(index, spin)?;
+            let along = direction(along.as_deref())?;
+            let key = match atom {
+                Some(atom) => OrbitalKey::Atomic { atom, orbital: index, along },
+                None => {
+                    let spin = SpinChannel::parse(spin.as_deref())?;
+                    OrbitalKey::Molecular { index, spin, along }
+                }
+            };
+            let grid = self.orbital_grid(key)?;
             return Ok(cut("orbital", grid, iso_level));
         }
         let wanted = match channel {
@@ -501,19 +539,68 @@ impl Calculation {
     /// held.
     ///
     /// Changing the threshold of the orbital on screen finds it here and costs
-    /// nothing; moving to another orbital replaces it, because only one is kept
-    /// (see [`Calculation::orbital`]). An index past the end of the ladder is an
-    /// error: there is no such orbital to draw.
-    fn orbital_grid(&mut self, index: usize, spin: SpinChannel) -> Result<&DensityGrid, JsValue> {
-        let orbital = self.locate(index, spin)?;
-        let held = matches!(&self.orbital, Some((at, of, _)) if *at == index && *of == spin);
+    /// nothing; moving to another orbital, or turning a degenerate one to face
+    /// another way, replaces it, because only one is kept (see
+    /// [`Calculation::orbital`]). An index past the end of the ladder, or an atom
+    /// or free-atom orbital that is not there, is an error: there is no such
+    /// orbital to draw.
+    fn orbital_grid(&mut self, key: OrbitalKey) -> Result<&DensityGrid, JsValue> {
+        let held = matches!(&self.orbital, Some((at, _)) if *at == key);
         if !held {
-            let column = orbital::signed_column(&self.result, orbital);
+            let column = match key {
+                OrbitalKey::Molecular { index, spin, along } => {
+                    // Checked first: the engine panics on an orbital that is
+                    // not there, and this is the place that says why instead.
+                    let orbital = self.locate(index, spin)?;
+                    orbital::molecular_oriented(&self.system, &self.result, orbital, along)
+                }
+                OrbitalKey::Atomic { atom, orbital, along } => {
+                    orbital::atomic_column(&self.system, atom, orbital, along)
+                        .map_err(|error| JsValue::from_str(&missing(error)))?
+                }
+            };
             let spec = GridSpec::for_molecule(&self.system.molecule);
             let grid = density::evaluate_orbital(&self.system.basis, column.as_slice(), &spec);
-            self.orbital = Some((index, spin, grid));
+            self.orbital = Some((key, grid));
         }
-        Ok(&self.orbital.as_ref().expect("just held or just built").2)
+        Ok(&self.orbital.as_ref().expect("just held or just built").1)
+    }
+}
+
+/// The direction a request turns a degenerate set to, as a unit vector, or why
+/// what it sent is not one.
+///
+/// Only the direction means anything, so it is normalised here; the engine
+/// would divide by the length anyway, but a key that differs only in length
+/// would then miss the lattice already held. No unit conversion is needed for
+/// the same reason. What is refused is what has no direction: anything but
+/// three numbers, a number that is not finite, or all three zero - which the
+/// engine would quietly answer with whichever member came first.
+fn direction(along: Option<&[f64]>) -> Result<Option<[f64; 3]>, JsValue> {
+    let Some(along) = along else { return Ok(None) };
+    let &[x, y, z] = along else {
+        return Err(JsValue::from_str(&format!(
+            "a direction is three numbers, not {}",
+            along.len()
+        )));
+    };
+    let length = (x * x + y * y + z * z).sqrt();
+    if !length.is_finite() || length < 1e-12 {
+        return Err(JsValue::from_str("a direction cannot be zero or infinite"));
+    }
+    Ok(Some([x / length, y / length, z / length]))
+}
+
+/// Why a free atom's orbital could not be drawn, in the words of the other
+/// refusals here.
+fn missing(error: orbital::OrbitalError) -> String {
+    match error {
+        orbital::OrbitalError::NoSuchAtom { atom, atoms } => {
+            format!("atom {atom} is past the {atoms} this molecule has")
+        }
+        orbital::OrbitalError::NoSuchOrbital { orbital, orbitals } => {
+            format!("orbital {orbital} is past the {orbitals} this atom has")
+        }
     }
 }
 

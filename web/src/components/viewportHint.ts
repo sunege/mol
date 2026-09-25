@@ -17,7 +17,12 @@ export const START_HINT = '何もない場所をクリックすると原子を�
 /** An empty view in the observe tab: nothing to pick, so say where atoms come from. */
 export const EMPTY_OBSERVE_HINT = '原子がありません · 「計算」タブで置けます';
 
-export const EDIT_HINT = 'クリックで配置 · ドラッグで移動 · Shift+クリックで隣に結合 · 背景のドラッグで回転';
+/**
+ * The arrows (V6-10) share the "drag to move" clause rather than taking one of
+ * their own, so the line stays about as long as it was.
+ */
+export const EDIT_HINT =
+  'クリックで配置 · ドラッグで移動（矢印なら軸の向きだけ） · Shift+クリックで隣に結合 · 背景のドラッグで回転';
 
 export const OBSERVE_HINT = 'クリックで選ぶ · もう一度で外す · ドラッグで回転 · Esc で解除';
 

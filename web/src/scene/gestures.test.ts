@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { clickAction, keyAction, pressAction } from './gestures';
+import { clickAction, keyAction, pressAction, type HandleHit } from './gestures';
 
 // Every combination the viewer can report, so a change to one rule cannot
 // quietly change another.
 const ATOM = 3;
+// The selected atom's handle: a different atom from ATOM, so a result that
+// took the index from the wrong one shows.
+const HANDLE: HandleHit = { axis: 'y', index: 5 };
 
 describe('edit mode (building a molecule)', () => {
   // These pin the behaviour the app had before there were modes at all.
@@ -30,11 +33,41 @@ describe('edit mode (building a molecule)', () => {
   });
 });
 
+describe('axis handles (edit mode)', () => {
+  it('drags along the axis, even over an atom and with Shift', () => {
+    for (const hit of [ATOM, null]) {
+      for (const shift of [false, true]) {
+        expect(pressAction('edit', hit, shift, HANDLE)).toEqual({ kind: 'axisDrag', index: 5, axis: 'y' });
+      }
+    }
+  });
+
+  it('does nothing when a handle is clicked without moving', () => {
+    // Not a placement: the click was on the handle, not on empty space.
+    for (const hit of [ATOM, null]) {
+      for (const shift of [false, true]) {
+        expect(clickAction('edit', hit, shift, HANDLE)).toEqual({ kind: 'none' });
+      }
+    }
+  });
+
+  it('leaves everything else as it was when no handle is hit', () => {
+    for (const hit of [ATOM, null]) {
+      for (const shift of [false, true]) {
+        expect(pressAction('edit', hit, shift, null)).toEqual(pressAction('edit', hit, shift));
+        expect(clickAction('edit', hit, shift, null)).toEqual(clickAction('edit', hit, shift));
+      }
+    }
+  });
+});
+
 describe('observe mode (showing a molecule)', () => {
   it('orbits whatever the drag starts on, so no atom can be moved', () => {
     for (const hit of [ATOM, null]) {
       for (const shift of [false, true]) {
         expect(pressAction('observe', hit, shift)).toEqual({ kind: 'orbit' });
+        // No handles are drawn here; one reported anyway still moves nothing.
+        expect(pressAction('observe', hit, shift, HANDLE)).toEqual({ kind: 'orbit' });
       }
     }
   });
@@ -56,11 +89,13 @@ describe('observe mode (showing a molecule)', () => {
   });
 
   it('never produces an action that changes the molecule', () => {
-    const edits = new Set(['drag', 'place', 'attach']);
+    const edits = new Set(['drag', 'axisDrag', 'place', 'attach']);
     for (const hit of [ATOM, null]) {
       for (const shift of [false, true]) {
-        expect(edits.has(pressAction('observe', hit, shift).kind)).toBe(false);
-        expect(edits.has(clickAction('observe', hit, shift).kind)).toBe(false);
+        for (const handle of [null, HANDLE]) {
+          expect(edits.has(pressAction('observe', hit, shift, handle).kind)).toBe(false);
+          expect(edits.has(clickAction('observe', hit, shift, handle).kind)).toBe(false);
+        }
       }
     }
     expect(keyAction('observe', 'Delete')).not.toBe('delete');

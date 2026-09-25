@@ -4,17 +4,20 @@
  * "Is it done, and what is the energy" and "stop" used to sit at the far ends
  * of the panel - the state list at the very bottom, 3,000px down once an open
  * molecule's orbitals were showing. Here they are one block above the part
- * that scrolls: the state, how far the shape got, the total energy, and the
- * two main buttons as fixed slots (`actions.ts`).
+ * that scrolls: the state, how far the shape got, the total energy, and -
+ * only while something is computing - the two stops as fixed slots
+ * (`actions.ts`). The buttons that start a calculation are in the calculate
+ * tab, under 次の計算 (V6-3): starting one moves the panel to the observe tab,
+ * so the stops stay up here, where either tab can reach them.
  *
  * The state line keeps every branch it had (requirement F5): a calculation
  * that did not converge is `—`, "solved" is not "settled", and a stopped
  * relaxation says so. Its words are `status.ts`; this only lays them out.
  */
-import { ActionGrid, RunButton } from './controls';
+import { ActionGrid } from './controls';
 import { Elapsed } from './ProgressOverlay';
 import { headline, type JobState } from './progress';
-import type { ActionSlot, MainAction } from './actions';
+import type { ActionSlot } from './actions';
 
 export interface StatusHeaderProps {
   unavailable: boolean;
@@ -29,10 +32,9 @@ export interface StatusHeaderProps {
   relaxation: string;
   /** Hartree, or null when there is no number to show (F5). */
   energy: number | null;
-  /** The structure is part way, so relaxing again carries on from it. */
-  partWay: boolean;
-  slots: readonly [ActionSlot, ActionSlot];
-  onAction: (action: MainAction) => void;
+  /** The two stops (`stopSlots`), or null when nothing is computing. */
+  stops: readonly [ActionSlot, ActionSlot] | null;
+  onStop: () => void;
 }
 
 export function StatusHeader({
@@ -44,9 +46,8 @@ export function StatusHeader({
   outcome,
   relaxation,
   energy,
-  partWay,
-  slots,
-  onAction,
+  stops,
+  onStop,
 }: StatusHeaderProps) {
   return (
     <div className="panel-head">
@@ -54,26 +55,22 @@ export function StatusHeader({
       {/* Above the three lines rather than under them: those wrap as the
           engine reports ("12 回目の移動 · …"), and a slot under them would
           move away from the pointer that pressed it. */}
-      <ActionGrid columns={2}>
-        {slots.map((slot, i) => (
-          // By position, not by action: the slot stays, its job changes.
-          slot.runs ? (
-            <RunButton key={i} onClick={() => onAction(slot.action)} disabled={slot.disabled}>
-              {slot.label}
-            </RunButton>
-          ) : (
+      {stops !== null && (
+        <ActionGrid columns={2}>
+          {stops.map((slot, i) => (
+            // By position, not by action: the slot stays, its job changes.
             <button
               key={i}
               type="button"
               className="btn"
-              onClick={() => onAction(slot.action)}
+              onClick={onStop}
               disabled={slot.disabled}
             >
               {slot.label}
             </button>
-          )
-        ))}
-      </ActionGrid>
+          ))}
+        </ActionGrid>
+      )}
       <dl className="status">
         <dt>状態</dt>
         <dd>
@@ -105,9 +102,6 @@ export function StatusHeader({
             not about the molecule. */}
         <dd>{energy === null ? '—' : `${energy.toFixed(6)} Ha`}</dd>
       </dl>
-      {!computing && partWay && (
-        <p className="hint">もう一度「安定な形にする」を押すと、ここから続きを計算します。</p>
-      )}
     </div>
   );
 }

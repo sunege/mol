@@ -35,11 +35,21 @@ export class Calculation {
      * shown for is not decided here: that is a rule about the interface, and the
      * interface keeps it.
      *
+     * Two more arguments belong to `"orbital"` alone. `atom` draws one of that
+     * atom's orbitals as a free atom instead of one of the molecule's - the left
+     * and right ends of a correlation diagram - with `index` counting along its
+     * `atomLevels` and `spin` ignored, since a free atom is solved with both
+     * spins together. `along` is a direction: inside a degenerate set the
+     * members are an arbitrary rotation of one another, and this turns the set
+     * so that the member drawn faces it. Only its direction is read, so it has
+     * no unit, but it has to be three numbers that are not all zero; an orbital
+     * that is not degenerate is drawn the same with or without it.
+     *
      * The first call for a channel also samples its density, which is why it is
      * slower than the ones that follow. The same holds for an orbital, except
      * that only the last one asked for is kept.
      */
-    isosurface(channel: string, iso_level: number, index?: number | null, spin?: string | null): IsoMesh;
+    isosurface(channel: string, iso_level: number, index?: number | null, spin?: string | null, atom?: number | null, along?: Float64Array | null): IsoMesh;
     /**
      * What orbital `index` of the ladder of `spin` does to each pair of nuclei,
      * and where its sign changes along them (`OrbitalCharacter` in
@@ -270,7 +280,7 @@ export interface InitOutput {
     readonly __wbg_isomesh_free: (a: number, b: number) => void;
     readonly __wbg_orbitalcharacter_free: (a: number, b: number) => void;
     readonly atomLevels: (a: number, b: number) => [number, number, number];
-    readonly calculation_isosurface: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly calculation_isosurface: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly calculation_orbitalCharacter: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly calculation_orbitals: (a: number) => [number, number, number];
     readonly calculation_summary: (a: number) => [number, number, number];

@@ -250,14 +250,18 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       case 'isosurface': {
         if (!current) throw new Error('no calculation to draw a surface from');
         const started = performance.now();
-        // `orbital` and `spin` are read only for the orbital channel; a density
-        // ignores them, and the engine refuses a spin the calculation has no
-        // orbitals for rather than drawing the other one.
+        // `orbital`, `spin`, `atom` and `along` are read only for the orbital
+        // channel; a density ignores them, and the engine refuses a spin the
+        // calculation has no orbitals for rather than drawing the other one.
+        // The direction crosses as a typed array, which is how wasm-bindgen
+        // takes a `Vec<f64>`; the engine checks it is three numbers.
         const iso = current.isosurface(
           request.channel,
           request.isoLevel,
           request.orbital,
           request.spin,
+          request.atom,
+          request.along ? Float64Array.from(request.along) : undefined,
         );
         // Each getter copies its buffer out of WASM memory into a plain
         // ArrayBuffer, so the meshes can be transferred rather than cloned.

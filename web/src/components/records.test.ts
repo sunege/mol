@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   EXPLORER_WORDS,
-  ISOMER_CAVEAT,
+  ISOMER_CAVEATS,
   RECORDS_HINT,
+  deleteConfirm,
+  deleteWhat,
   depthBar,
   exportFileName,
   formulaMeta,
   importProblemText,
   importedText,
+  isomerCaveats,
   levelHeading,
   levelMeta,
   relativeText,
@@ -126,6 +129,16 @@ describe('the words of the tree', () => {
     expect(valleySizeText(valley)).toBe('×3');
   });
 
+  it('asks before deleting a molecule or a level, naming it and counting (V6-2)', () => {
+    expect(deleteConfirm(deleteWhat(water), 8)).toBe('H₂O の記録を 8 件消します。よろしいですか？');
+    expect(deleteConfirm(deleteWhat(water, shape), 5)).toBe(
+      'H₂O の「形を探す」の記録を 5 件消します。よろしいですか？',
+    );
+    expect(deleteWhat(water, other)).toBe('H₂O の「ほかの計算」');
+    // The two groups that differ by the charge are named alike.
+    expect(deleteWhat(water, ion)).toBe(deleteWhat(water, measure));
+  });
+
   it('names no DFT parameter and no group key, even with two charges (requirement F4)', () => {
     // Two groups at one level that differ by the charge read the same.
     expect(levelHeading(ion.level)).toBe(levelHeading(measure.level));
@@ -148,6 +161,8 @@ describe('the words of the tree', () => {
       }
     }
     words.push(...Object.values(EXPLORER_WORDS));
+    words.push(deleteConfirm(deleteWhat(water), 8));
+    for (const level of water.children) words.push(deleteConfirm(deleteWhat(water, level), 1));
     const text = words.join('\n').toLowerCase();
     for (const word of [...FORBIDDEN, 'STO', '6-31']) expect(text).not.toContain(word.toLowerCase());
     for (const level of water.children) expect(text).not.toContain(level.group!.key.toLowerCase());
@@ -193,16 +208,30 @@ describe('the file written out', () => {
 });
 
 describe('what the section says the comparison is for', () => {
-  it('says which comparisons hold and which do not', () => {
-    // Both pairs of isomers measured came out the wrong way round, while the
-    // same molecule in different shapes came out right (dev-notes, "異性体の
-    // エネルギー順序も最小基底で逆になる"), so the hint has to say so.
+  it('says which comparisons hold and which do not, level by level', () => {
+    // "形を探す" put two of five isomer pairs the wrong way round, "形を測る" none
+    // of them but with the gaps too small (dev-notes, "v3-0 の実測").
     expect(RECORDS_HINT).toContain('いちばん低い形からの差');
-    expect(ISOMER_CAVEAT).toContain('異性体');
-    expect(ISOMER_CAVEAT).toContain('当てになりません');
+    for (const caveat of Object.values(ISOMER_CAVEATS)) expect(caveat).toContain('異性体');
+    expect(ISOMER_CAVEATS.shape).toContain('逆に');
+    expect(ISOMER_CAVEATS.shape).toContain('「形を探す」');
+    expect(ISOMER_CAVEATS.shape).toContain('「形を測る」で計算');
+    expect(ISOMER_CAVEATS.measure).toContain('合って');
+    expect(ISOMER_CAVEATS.measure.startsWith('「形を測る」')).toBe(true);
+  });
+
+  it('says it for the levels the tree holds only, shape first', () => {
+    expect(isomerCaveats([])).toEqual([]);
+    expect(isomerCaveats([null])).toEqual([]);
+    expect(isomerCaveats(['shape'])).toEqual([ISOMER_CAVEATS.shape]);
+    expect(isomerCaveats(['measure', null, 'shape', 'measure'])).toEqual([
+      ISOMER_CAVEATS.shape,
+      ISOMER_CAVEATS.measure,
+    ]);
   });
 
   it('says it without naming a single DFT parameter (requirement F4)', () => {
-    for (const word of FORBIDDEN) expect(`${RECORDS_HINT}${ISOMER_CAVEAT}`).not.toContain(word);
+    const text = `${RECORDS_HINT}${Object.values(ISOMER_CAVEATS).join('')}`;
+    for (const word of FORBIDDEN) expect(text).not.toContain(word);
   });
 });

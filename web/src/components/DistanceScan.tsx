@@ -1,29 +1,30 @@
 /**
- * "近づけてみる": the distance scan and the correlation diagram, drawn (V4-8).
+ * "近づけてみる": the distance scan, drawn (V4-8).
  *
  * A closed section of its own in the observe tab, after the molecular-orbital
  * one (V5-6; it used to sit at the bottom of that section, which made it about
  * 1,300px long when open). App draws it only for a molecule of exactly two
- * atoms - which is the only shape either figure can be drawn for. This is the
- * inside of that fold: its heading and the line beside it are App's.
+ * atoms - which is the only shape the scan can be drawn for. This is the inside
+ * of that fold: its heading and the line beside it are App's.
  *
- * The correlation diagram comes first, because it reads as the ladder above it
- * continued outwards to the free atoms. The scan is below it: a calculation per
- * separation, so it is started deliberately, reports how far along it is, and
- * can be given up on. Its figure grows as the points arrive.
+ * The correlation diagram used to open this section as well. Since V6-4 it is
+ * in the molecular-orbital section instead, in place of the ladder of a
+ * molecule of two atoms (`CorrelationDiagram.tsx`), so what is left here is the
+ * scan: a calculation per separation, so it is started deliberately, reports
+ * how far along it is, and can be given up on. Its figure grows as the points
+ * arrive.
  *
- * Both are about the two atoms on screen and nothing else. The section used to
+ * It is about the two atoms on screen and nothing else. The section used to
  * offer five other pairs to scan as well (H₂, He₂, N₂, O₂, HF), and moving the
  * marker of one of those replaced the molecule in the viewer with that pair -
  * which, in a user's hands (V5-11), read as the section taking the atoms away.
  * App hands in the pair (`scanPairFor`) and draws a scan only while it is still
  * the pair on screen.
  *
- * Two SVGs, both plain: the page is cross-origin isolated, so no chart library
- * can be loaded from anywhere (`docs/plan-v4.md`, decision 8). Every string
- * either of them draws is worked out in `components/scan.ts`, which is what
- * lets `scan.test.ts` walk the pictures and check that the only numbers in them
- * are separations.
+ * Plain SVG: the page is cross-origin isolated, so no chart library can be
+ * loaded from anywhere (`docs/plan-v4.md`, decision 8). Every string it draws
+ * is worked out in `components/scan.ts`, which is what lets `scan.test.ts` walk
+ * the picture and check that the only numbers in it are separations.
  *
  * The marker is the one control here that reaches outside the section: moving
  * it puts the two atoms at that separation in the viewer, which makes the
@@ -35,10 +36,6 @@
 import { useMemo } from 'react';
 import { ActionGrid, RunButton } from './controls';
 import {
-  CORRELATION_HEADING,
-  CORRELATION_HINT,
-  CORRELATION_LABEL,
-  CORR_LINE,
   SCAN_EMPTY,
   SCAN_ENERGY_HINT,
   SCAN_FIGURE_LABEL,
@@ -49,15 +46,13 @@ import {
   SCAN_START,
   SCAN_STOP,
   SCAN_STOP_HINT,
-  buildCorrelation,
   buildScan,
   markerLabel,
   scanProgress,
-  type RungMakeup,
   type ScanRange,
   type ScanXY,
 } from './scan';
-import type { OrbitalLevel, ScanPoint } from '../worker/protocol';
+import type { ScanPoint } from '../worker/protocol';
 
 interface Props {
   /** A scan is in flight: the worker is busy and the marker must hold still. */
@@ -78,14 +73,6 @@ interface Props {
   onMarker: (index: number) => void;
   onStart: () => void;
   onStop: () => void;
-  /** One list of a free atom's orbital energies per nucleus, or null. */
-  atomLevels: number[][] | null;
-  /** The molecule's own ladder, or null while there is none. */
-  levels: readonly OrbitalLevel[] | null;
-  /** What each rung of `levels` is made of: its share of each atom, and bonding or not. */
-  weights: readonly RungMakeup[];
-  /** One symbol per atom, in the order the engine was given them. */
-  symbols: readonly string[];
 }
 
 export function DistanceScan({
@@ -98,122 +85,14 @@ export function DistanceScan({
   onMarker,
   onStart,
   onStop,
-  atomLevels,
-  levels,
-  weights,
-  symbols,
 }: Props) {
   const figure = useMemo(
     () => (range === null || points.length === 0 ? null : buildScan(points, range, markerIndex)),
     [points, range, markerIndex],
   );
-  // The static companion, which needs no scan: a ladder of the molecule on
-  // screen and the levels of the two free atoms are the whole of it.
-  const correlation = useMemo(
-    () =>
-      atomLevels === null || atomLevels.length < 2 || levels === null || levels.length === 0
-        ? null
-        : buildCorrelation(atomLevels, symbols, levels, weights),
-    [atomLevels, levels, weights, symbols],
-  );
-
   return (
     <section className="scan">
       <p className="hint">{SCAN_INTRO}</p>
-      {correlation !== null && (
-        <>
-          <h3>{CORRELATION_HEADING}</h3>
-          <p className="hint">{CORRELATION_HINT}</p>
-          <svg
-            className="correlation"
-            viewBox={`0 0 ${correlation.width} ${correlation.height}`}
-            role="group"
-            aria-label={CORRELATION_LABEL}
-          >
-            {correlation.links.map((link, index) => (
-              <line
-                key={index}
-                className="correlation-link"
-                x1={link.x1}
-                y1={link.y1}
-                x2={link.x2}
-                y2={link.y2}
-              />
-            ))}
-            {correlation.columns.map((column) => (
-              <g key={column.key}>
-                <text
-                  className="correlation-heading"
-                  x={column.x}
-                  y={column.headingY}
-                  textAnchor="middle"
-                >
-                  {column.heading}
-                </text>
-                {column.rungs.map((rung) => (
-                  <g key={rung.key} role="img" aria-label={rung.label}>
-                    {rung.tag !== '' && (
-                      <text
-                        className="correlation-tag"
-                        x={rung.tagX}
-                        y={rung.y - 2.5}
-                        textAnchor={rung.tagAnchor}
-                      >
-                        {rung.tag}
-                      </text>
-                    )}
-                    {rung.name !== '' && (
-                      <text
-                        className="correlation-name"
-                        x={rung.nameX}
-                        y={rung.y - 2.5}
-                        textAnchor={rung.nameAnchor}
-                      >
-                        {rung.name}
-                      </text>
-                    )}
-                    {rung.lines.map((x) => (
-                      <g key={x}>
-                        {rung.mark !== '' && (
-                          <text
-                            className="correlation-mark"
-                            x={x}
-                            y={rung.y - 2.5}
-                            textAnchor="middle"
-                          >
-                            {rung.mark}
-                          </text>
-                        )}
-                        <line
-                          className="correlation-line"
-                          x1={x - CORR_LINE / 2}
-                          y1={rung.y}
-                          x2={x + CORR_LINE / 2}
-                          y2={rung.y}
-                        />
-                      </g>
-                    ))}
-                  </g>
-                ))}
-              </g>
-            ))}
-            {correlation.core !== null && (
-              <>
-                <line
-                  className="scan-cut"
-                  x1={0}
-                  y1={correlation.core.y}
-                  x2={correlation.width}
-                  y2={correlation.core.y}
-                />
-                <text className="scan-core" x={0} y={correlation.core.textY}>
-                  {correlation.core.text}
-                </text>
-              </>
-            )}
-          </svg>
-        </>
-      )}
 
       <h3>{SCAN_PART_HEADING}</h3>
       <ActionGrid columns={1}>

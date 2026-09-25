@@ -14,7 +14,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { findBonds } from './bonds';
 import { dashLayout } from './dashes';
-import { clickAction, pressAction, type ViewerMode } from './gestures';
+import { axisDragPosition, axisParameter, handleLength, type Vec3 } from './axisDrag';
+import { clickAction, pressAction, type Axis, type HandleHit, type ViewerMode } from './gestures';
 import {
   distance,
   formatMeasurement,
@@ -23,6 +24,7 @@ import {
   measurementAnchor,
   type Measurement,
 } from './measure';
+import type { CameraAxes } from '../components/orient';
 import type { ElementInfo, IsoMesh, SurfaceGeometry } from '../worker/protocol';
 
 export interface SceneAtom {
@@ -58,6 +60,23 @@ const SELECTED_HALO = 1.45;
  * editing selection (blue) and from both density surfaces (blue and red).
  */
 const MEASURE_COLOR = 0xffb84d;
+
+/** The axis handles' colours: X red, Y green, Z blue, as in most 3D editors. */
+const AXIS_COLORS: Record<Axis, number> = { x: 0xe5534b, y: 0x57ab5a, z: 0x539bf5 };
+const AXIS_VECTORS: Record<Axis, Vec3> = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+/**
+ * The handles' proportions, as fractions of their length on screen
+ * (`handleLength`). Each arrow starts a little way out from the atom's centre,
+ * so the middle of the selected atom can still be grabbed to drag it freely.
+ */
+const HANDLE_START = 0.25;
+const HANDLE_SHAFT_RADIUS = 0.025;
+const HANDLE_TIP_LENGTH = 0.22;
+const HANDLE_TIP_RADIUS = 0.07;
+/** The invisible, fatter cylinder the pointer is tested against: a few pixels are hard to hit. */
+const HANDLE_HIT_RADIUS = 0.09;
+/** Over the atoms, bonds, surfaces and measurement dashes. */
+const HANDLE_RENDER_ORDER = 10;
 /**
  * A thin rim around a measured atom rather than a ball around it: anything
  * bigger crowds the density surface the atoms sit inside. Different from
@@ -120,6 +139,11 @@ export class MoleculeViewer {
   #positiveSurface: THREE.Mesh;
   #negativeSurface: THREE.Mesh;
   #highlight: THREE.Mesh;
+  /**
+   * The selected atom's X / Y / Z arrows, in edit mode only (V6-10). One
+   * length on screen: scaled every frame, in `#scaleHandles`.
+   */
+  #handles = new THREE.Group();
   #elements = new Map<number, ElementInfo>();
   #atoms: SceneAtom[] = [];
   #activeZ = 6;
@@ -152,6 +176,30 @@ export class MoleculeViewer {
     depthTest: false,
     depthWrite: false,
   });
+  // One arrow along +Y of unit length; each axis turns its own copy.
+  #handleShaft = new THREE.CylinderGeometry(
+    HANDLE_SHAFT_RADIUS,
+    HANDLE_SHAFT_RADIUS,
+    1 - HANDLE_START - HANDLE_TIP_LENGTH,
+    8,
+  ).translate(0, (1 + HANDLE_START - HANDLE_TIP_LENGTH) / 2, 0);
+  #handleTip = new THREE.ConeGeometry(HANDLE_TIP_RADIUS, HANDLE_TIP_LENGTH, 12).translate(
+    0,
+    1 - HANDLE_TIP_LENGTH / 2,
+    0,
+  );
+  #handleHit = new THREE.CylinderGeometry(
+    HANDLE_HIT_RADIUS,
+    HANDLE_HIT_RADIUS,
+    1 - HANDLE_START,
+    8,
+  ).translate(0, (1 + HANDLE_START) / 2, 0);
+  #handleMaterials = new Map<Axis, THREE.MeshBasicMaterial>();
+  // Never drawn, but the raycaster still tests it (it only skips a mesh with no material).
+  #handleHitMaterial = new THREE.MeshBasicMaterial({ visible: false });
+  #viewportHeight = 1;
+  #scratch = new THREE.Vector3();
+  #forward = new THREE.Vector3();
 
   // Pointer gesture state.
   #raycaster = new THREE.Raycaster();
@@ -159,6 +207,15 @@ export class MoleculeViewer {
   #downIndex: number | null = null;
   #dragIndex: number | null = null;
   #dragPlane = new THREE.Plane();
+  /** The handle under the pointer when the button went down. */
+  #downHandle: HandleHit | null = null;
+  /**
+   * An atom being moved along one world axis: where it was at the press, and
+   * where on that axis's line the press landed (`axisDrag.ts`).
+   */
+  #axisDrag: { index: number; axis: Vec3; start: Vec3; s0: number } | null = null;
+  /** Whether the pointer is over a handle now, for the cursor. */
+  #overHandle = false;
 
   /** Called when the user clicks empty space with a placement element active. */
   onPlace: PlaceHandler | null = null;
@@ -207,6 +264,7 @@ export class MoleculeViewer {
       }),
     );
     this.#highlight.visible = false;
+    this.#buildHandles();
 
     this.#positiveSurface = new THREE.Mesh(new THREE.BufferGeometry(), this.#positiveMaterial);
     this.#negativeSurface = new THREE.Mesh(new THREE.BufferGeometry(), this.#negativeMaterial);
@@ -226,6 +284,7 @@ export class MoleculeViewer {
       this.#positiveSurface,
       this.#negativeSurface,
       this.#highlight,
+      this.#handles,
       this.#measuredGroup,
       this.#dashGroup,
       this.#bondLabelGroup,
@@ -254,6 +313,7 @@ export class MoleculeViewer {
     const tick = () => {
       this.#frame = requestAnimationFrame(tick);
       this.#controls.update();
+      this.#scaleHandles();
       this.#renderer.render(this.#scene, this.#camera);
       this.#labelRenderer.render(this.#scene, this.#camera);
     };
@@ -277,12 +337,16 @@ export class MoleculeViewer {
   setMode(mode: ViewerMode) {
     this.#mode = mode;
     this.#dragIndex = null;
+    this.#axisDrag = null;
     this.#controls.enabled = true;
+    this.#updateHandles();
+    this.#syncCursor();
   }
 
   setSelected(index: number | null) {
     this.#selected = index;
     this.#updateHighlight();
+    this.#updateHandles();
   }
 
   /**
@@ -343,6 +407,7 @@ export class MoleculeViewer {
     this.#syncAtomMeshes();
     this.#syncBondMeshes();
     this.#updateHighlight();
+    this.#updateHandles();
     this.#syncMeasurement();
     this.#syncBondLabels();
   }
@@ -463,6 +528,57 @@ export class MoleculeViewer {
     this.#highlight.visible = true;
     this.#highlight.position.set(...atom.pos);
     this.#highlight.scale.setScalar(this.#atomRadius(atom.z) * SELECTED_HALO);
+  }
+
+  /** Three arrows along +X, +Y and +Z, each tagged with its axis for the raycaster. */
+  #buildHandles() {
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const material = new THREE.MeshBasicMaterial({
+        color: AXIS_COLORS[axis],
+        // Never hidden inside its own atom, or behind another.
+        depthTest: false,
+        depthWrite: false,
+      });
+      this.#handleMaterials.set(axis, material);
+      const arrow = new THREE.Group();
+      for (const geometry of [this.#handleShaft, this.#handleTip]) {
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.renderOrder = HANDLE_RENDER_ORDER;
+        mesh.userData.axis = axis;
+        arrow.add(mesh);
+      }
+      const hit = new THREE.Mesh(this.#handleHit, this.#handleHitMaterial);
+      hit.userData.axis = axis;
+      arrow.add(hit);
+      // The geometry points along +Y.
+      if (axis === 'x') arrow.rotation.z = -Math.PI / 2;
+      if (axis === 'z') arrow.rotation.x = Math.PI / 2;
+      this.#handles.add(arrow);
+    }
+    this.#handles.visible = false;
+  }
+
+  /** The handles sit on the selected atom, and only while atoms can be edited. */
+  #updateHandles() {
+    const index = this.#selected;
+    const atom = index === null ? undefined : this.#atoms[index];
+    const shown = this.#mode === 'edit' && atom !== undefined;
+    this.#handles.visible = shown;
+    if (atom) this.#handles.position.set(...atom.pos);
+    if (!shown) this.#setOverHandle(false);
+  }
+
+  /** The same length on screen however far the camera is, every frame. */
+  #scaleHandles() {
+    if (!this.#handles.visible) return;
+    // Depth along the view, which is what the perspective divides by.
+    this.#camera.getWorldDirection(this.#forward);
+    const depth = this.#scratch
+      .copy(this.#handles.position)
+      .sub(this.#camera.position)
+      .dot(this.#forward);
+    if (depth <= 0) return;
+    this.#handles.scale.setScalar(handleLength(depth, this.#camera.fov, this.#viewportHeight));
   }
 
   /** The picked atoms, or none if one of them is gone. */
@@ -598,6 +714,38 @@ export class MoleculeViewer {
     return { index: hits[0].object.userData.index as number, point: hits[0].point };
   }
 
+  /** The axis handle under the pointer, while the handles are shown. */
+  #pickHandle(event: PointerEvent): HandleHit | null {
+    const index = this.#selected;
+    if (!this.#handles.visible || index === null) return null;
+    this.#raycaster.setFromCamera(this.#ndc(event), this.#camera);
+    const hits = this.#raycaster.intersectObjects(this.#handles.children, true);
+    if (hits.length === 0) return null;
+    return { axis: hits[0].object.userData.axis as Axis, index };
+  }
+
+  /**
+   * Where on the line through `point` along `axis` the pointer's ray comes
+   * nearest (`axisDrag.ts`), or `null` while the axis points along the view.
+   */
+  #axisParameter(event: PointerEvent, point: Vec3, axis: Vec3): number | null {
+    this.#raycaster.setFromCamera(this.#ndc(event), this.#camera);
+    const { origin, direction } = this.#raycaster.ray;
+    return axisParameter(origin.toArray(), direction.toArray(), point, axis);
+  }
+
+  #setOverHandle(over: boolean) {
+    this.#overHandle = over;
+    this.#syncCursor();
+  }
+
+  /** `grabbing` while a handle is dragged, `grab` over one, else the page's own. */
+  #syncCursor() {
+    const cursor = this.#axisDrag ? 'grabbing' : this.#overHandle ? 'grab' : '';
+    const style = this.#renderer.domElement.style;
+    if (style.cursor !== cursor) style.cursor = cursor;
+  }
+
   /** Where the pointer ray crosses a camera-facing plane through `through`. */
   #planePoint(event: PointerEvent, through: THREE.Vector3): THREE.Vector3 | null {
     const normal = this.#camera.getWorldDirection(new THREE.Vector3());
@@ -617,19 +765,46 @@ export class MoleculeViewer {
   #handlePointerDown = (event: PointerEvent) => {
     if (event.button !== 0) return;
     this.#pointerStart = { x: event.clientX, y: event.clientY };
+    // The handles first: they are drawn over their own atom.
+    this.#downHandle = this.#pickHandle(event);
     this.#downIndex = this.#pick(event)?.index ?? null;
 
-    const press = pressAction(this.#mode, this.#downIndex, event.shiftKey);
+    const press = pressAction(this.#mode, this.#downIndex, event.shiftKey, this.#downHandle);
     if (press.kind === 'drag') {
       // Dragging an atom must not also orbit the camera.
       this.#controls.enabled = false;
       this.#dragIndex = press.index;
       this.#renderer.domElement.setPointerCapture(event.pointerId);
+    } else if (press.kind === 'axisDrag') {
+      const atom = this.#atoms[press.index];
+      if (!atom) return;
+      const axis = AXIS_VECTORS[press.axis];
+      const s0 = this.#axisParameter(event, atom.pos, axis);
+      // Edge-on: the arrow is a dot, and the view turns instead.
+      if (s0 === null) return;
+      this.#controls.enabled = false;
+      this.#axisDrag = { index: press.index, axis, start: [...atom.pos], s0 };
+      this.#renderer.domElement.setPointerCapture(event.pointerId);
+      this.#syncCursor();
     }
   };
 
   #handlePointerMove = (event: PointerEvent) => {
-    if (this.#dragIndex === null || !this.#pointerStart) return;
+    const drag = this.#axisDrag;
+    if (drag) {
+      if (!this.#movedBeyondSlop(event)) return;
+      const s = this.#axisParameter(event, drag.start, drag.axis);
+      // The axis has turned edge-on mid-drag: hold still until it turns back.
+      if (s === null) return;
+      this.onMove?.(drag.index, axisDragPosition(drag.start, drag.axis, drag.s0, s));
+      return;
+    }
+    // Only hovering (no button down) asks about the handles: one small raycast.
+    if (!this.#pointerStart) {
+      this.#setOverHandle(event.buttons === 0 && this.#pickHandle(event) !== null);
+      return;
+    }
+    if (this.#dragIndex === null) return;
     if (!this.#movedBeyondSlop(event)) return;
     const atom = this.#atoms[this.#dragIndex];
     if (!atom) return;
@@ -640,18 +815,23 @@ export class MoleculeViewer {
   #handlePointerUp = (event: PointerEvent) => {
     const wasClick = this.#pointerStart !== null && !this.#movedBeyondSlop(event);
     const downIndex = this.#downIndex;
+    const downHandle = this.#downHandle;
 
-    if (this.#dragIndex !== null) {
+    if (this.#dragIndex !== null || this.#axisDrag !== null) {
       this.#renderer.domElement.releasePointerCapture?.(event.pointerId);
     }
     this.#dragIndex = null;
+    this.#axisDrag = null;
+    // Back to `grab` if it was over the handle; the next move says otherwise.
+    this.#syncCursor();
     this.#downIndex = null;
+    this.#downHandle = null;
     this.#pointerStart = null;
     this.#controls.enabled = true;
 
     if (!wasClick) return;
 
-    const click = clickAction(this.#mode, downIndex, event.shiftKey);
+    const click = clickAction(this.#mode, downIndex, event.shiftKey, downHandle);
     switch (click.kind) {
       case 'attach':
         this.#attachTo(click.index, event);
@@ -710,6 +890,22 @@ export class MoleculeViewer {
     this.#controls.update();
   }
 
+  /**
+   * The camera's own axes in the world, as they are now: across the screen to
+   * the right and up, and the way it looks (V6-8). Read once, when a line of
+   * the correlation diagram is pressed, to turn a degenerate orbital to the
+   * screen (`components/orient.ts`); nothing follows the camera afterwards.
+   */
+  cameraAxes(): CameraAxes {
+    const right = new THREE.Vector3();
+    const up = new THREE.Vector3();
+    const back = new THREE.Vector3();
+    this.#camera.updateMatrixWorld();
+    this.#camera.matrixWorld.extractBasis(right, up, back);
+    const forward = this.#camera.getWorldDirection(new THREE.Vector3());
+    return { right: right.toArray(), up: up.toArray(), forward: forward.toArray() };
+  }
+
   #resize() {
     const { clientWidth, clientHeight } = this.#container;
     if (clientWidth === 0 || clientHeight === 0) return;
@@ -720,6 +916,8 @@ export class MoleculeViewer {
     this.#renderer.setSize(clientWidth, clientHeight);
     // The labels are placed in CSS pixels, the same units as the layout box.
     this.#labelRenderer.setSize(clientWidth, clientHeight);
+    // `handleLength` works in CSS pixels, like the layout box.
+    this.#viewportHeight = clientHeight;
     this.#camera.aspect = clientWidth / clientHeight;
     this.#camera.updateProjectionMatrix();
   }
@@ -753,6 +951,12 @@ export class MoleculeViewer {
     this.#measuredMaterial.dispose();
     this.#dashMaterial.dispose();
     (this.#highlight.material as THREE.Material).dispose();
+    this.#handles.clear();
+    this.#handleShaft.dispose();
+    this.#handleTip.dispose();
+    this.#handleHit.dispose();
+    for (const material of this.#handleMaterials.values()) material.dispose();
+    this.#handleHitMaterial.dispose();
     this.#controls.dispose();
     this.#renderer.dispose();
     dom.remove();

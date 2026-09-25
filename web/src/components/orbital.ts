@@ -97,12 +97,58 @@ export const ORBITAL_SCALE = { low: 'ふくらみ全体', high: '強いところ
 export interface OrbitalPick {
   index: number;
   spin: SpinChannel;
+  /**
+   * Set for a free atom's orbital, pressed on the correlation diagram (V6-7):
+   * which of the two atoms on screen, and `index` is then the place in that
+   * element's `atomLevels` rather than in the molecule's ladder. A free atom
+   * has no spin columns, so `spin` is `'both'` and is not read.
+   */
+  atom?: number;
+  /**
+   * Which way a member of a degenerate set points, for the sets that are
+   * drawn as a line per direction: an atom's 2p or 3p, a diatomic's pi. The
+   * name only - the vector comes from the screen at the moment it is pressed
+   * (`components/orient.ts`).
+   */
+  along?: Along;
+}
+
+/**
+ * The three ways a p orbital of two atoms can point: along the bond, across it
+ * in the plane of the screen, and across it towards the viewer (V6-7).
+ *
+ * What the engine returns inside a degenerate set is an arbitrary rotation of
+ * it (`OrbitalLevel`), so "the first of the three" is not a direction and is
+ * not what the user pressed. The direction is: a set is drawn as a line per
+ * direction, in this order, and the one drawn is turned to point that way.
+ */
+export type Along = 'axis' | 'across' | 'toward';
+
+/** Left to right, the lines of an atom's p set; a pi is the last two. */
+export const ALONG_ORDER: readonly Along[] = ['axis', 'across', 'toward'];
+
+/** A direction in words, which is all of it the screen shows. */
+export const ALONG_WORDS: Record<Along, string> = {
+  axis: '結合の軸の向き',
+  across: '軸に垂直・画面の中',
+  toward: '軸に垂直・手前',
+};
+
+/**
+ * What the section says of a free atom's orbital, in place of the three lines
+ * about bonds and nodes a molecule's gets: an atom's orbital has no bond to be
+ * bonding across, which is the point of it being on the diagram at all.
+ */
+export function atomOrbitalWords(symbol: string, name: string, along: Along | null): string {
+  const which = name === '' ? '部屋' : ` ${name}`;
+  const way = along === null ? '' : `（${ALONG_WORDS[along]}）`;
+  return `${symbol} の原子の${which}${way}。結合する前の、原子ひとつの部屋です。`;
 }
 
 /** Whether two picks are the same orbital, either of them possibly none. */
 export function samePick(a: OrbitalPick | null, b: OrbitalPick | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.index === b.index && a.spin === b.spin;
+  return a.index === b.index && a.spin === b.spin && a.atom === b.atom && a.along === b.along;
 }
 
 /** Which end of the occupied orbitals a rung is, when it is either. */
@@ -293,12 +339,15 @@ export const BOND_POPULATION_THRESHOLD = 0.05;
  */
 export const AMPLITUDE_FLOOR = 0.05;
 
-/** The rung the picked orbital sits on, which is what knows whether it is pi. */
+/**
+ * The rung the picked orbital sits on, which is what knows whether it is pi -
+ * or none for a free atom's, which is on no rung of the molecule's.
+ */
 export function rungOf(
   levels: readonly OrbitalLevel[] | null,
   pick: OrbitalPick | null,
 ): OrbitalLevel | null {
-  if (levels === null || pick === null) return null;
+  if (levels === null || pick === null || pick.atom !== undefined) return null;
   return (
     levels.find(
       (level) =>
@@ -317,13 +366,16 @@ export function rungOf(
  * O₂'s and N₂'s sigma and pi levels cross. The same the way the scan's lines are
  * followed (`components/scan.ts`): the same spin, the same kind of rung (how many
  * orbitals it holds, and its symmetries), and the same place from the bottom
- * among the rungs of that kind; and within a degenerate rung, the same member.
+ * among the rungs of that kind; and within a degenerate rung, the same member,
+ * pointing the same way. A free atom's orbital is the same one whatever the
+ * separation, so it comes back as it went.
  */
 export function carryPick(
   pick: OrbitalPick,
   from: readonly OrbitalLevel[],
   to: readonly OrbitalLevel[],
 ): OrbitalPick | null {
+  if (pick.atom !== undefined) return pick;
   const rung = rungOf(from, pick);
   if (rung === null) return null;
   const alike = (level: OrbitalLevel) =>
@@ -335,7 +387,10 @@ export function carryPick(
   const place = from.filter(alike).sort(byEnergy).indexOf(rung);
   const found = to.filter(alike).sort(byEnergy)[place];
   if (found === undefined) return null;
-  return { index: found.first + (pick.index - rung.first), spin: pick.spin };
+  const index = found.first + (pick.index - rung.first);
+  return pick.along === undefined
+    ? { index, spin: pick.spin }
+    : { index, spin: pick.spin, along: pick.along };
 }
 
 /** `C–H`, `O–H`, `C–C`: hydrogen last, and the rest in alphabetical order. */

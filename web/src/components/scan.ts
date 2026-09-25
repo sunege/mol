@@ -36,15 +36,20 @@
 import type { OrbitalLevel, ScanLevel, ScanPoint } from '../worker/protocol';
 import { foldCore, layout } from './ladder';
 import {
+  ALONG_ORDER,
+  ALONG_WORDS,
   BOND_POPULATION_THRESHOLD,
+  atomOrbitalWords,
   coreText,
   frontierLabel,
   occupationMark,
   occupationText,
   orbitalColumns,
+  samePick,
   spinHeading,
   verdictBySymmetry,
   type Frontier,
+  type OrbitalPick,
 } from './orbital';
 import { SAME_VALLEY_KJ_PER_MOL } from '../records/log';
 import { HARTREE_TO_KJ_PER_MOL } from '../records/units';
@@ -186,12 +191,15 @@ export const SCAN_HEADING = '近づけてみる';
  */
 export const SCAN_TEASER = '距離を変えて部屋の高さを見る';
 
-/** The first thing inside the section, about both of its figures. */
+/** The first thing inside the section, about its figure. */
 export const SCAN_INTRO =
   '2 つの原子を近づけると、電子の部屋の高さがどう変わるかを見られます。' +
   '離れていれば原子それぞれの部屋、近づけば分子の部屋です。';
 
-/** Over the scan itself, below the correlation diagram. */
+/**
+ * Over the scan itself. It was under the correlation diagram until V6-4 moved
+ * that to the molecular-orbital section, and still says what the button does.
+ */
 export const SCAN_PART_HEADING = '距離を変える';
 
 /** Under the upper panel: how to read the lines. */
@@ -843,18 +851,27 @@ const CORR_STEP = 18;
 const CORR_MIN_BAND = 140;
 const CORR_MAX_BAND = 420;
 /** One orbital, as a short horizontal line. */
-export const CORR_LINE = 20;
+const CORR_LINE = 20;
 const CORR_LINE_GAP = 5;
+/**
+ * The lines of a free atom's p set, which are three abreast in a column
+ * {@link CORR_ATOM_SPAN} wide (V6-7): at the molecule's length and spacing
+ * they would take 70 of its 50, and widening the atom's columns would take the
+ * room from the molecule's, which with two spin columns has none to spare. The
+ * set's name goes above them rather than outside, where there is no room left.
+ */
+const CORR_SET_LINE = 12;
+const CORR_SET_GAP = 2;
 /** Room between a rung's lines and the HOMO or LUMO label beside them. */
 const CORR_TAG_GAP = 3;
-
-export const CORRELATION_HEADING = '原子の部屋から分子の部屋へ';
 
 export const CORRELATION_LABEL = '原子の部屋と分子の部屋のつながり';
 
 export const CORRELATION_HINT =
   '左右がばらばらの原子の部屋、まん中がくっついてできた分子の部屋です。' +
-  '細い線は、どの原子の部屋からできた部屋かを結んでいます。';
+  '細い線は、どの原子の部屋からできた部屋かを結んでいます。' +
+  '線を押すと、その部屋の形を描きます。' +
+  '縮退した部屋は、向き（結合の軸・軸に垂直）を選んで描きます。向きは押したときの画面で決まります。';
 
 /**
  * The heading of a spin's column here, which is not the ladder's wording.
@@ -908,8 +925,25 @@ export interface CorrelationRung {
   x: number;
   y: number;
   half: number;
-  /** Centre of each of the rung's lines: one apiece, two where it is a pi. */
+  /**
+   * Centre of each of the rung's lines: one apiece, two where it is a pi, three
+   * where it is a free atom's p set.
+   */
   lines: number[];
+  /** How long each of those lines is drawn, and so how wide it is to press. */
+  lineLength: number;
+  /**
+   * The orbital each of {@link CorrelationRung.lines} draws when pressed. The
+   * molecule's are the ladder's own picks, `first` to `first + count - 1` in
+   * the rung's spin, so the section under the diagram reads them as it read
+   * the ladder's; a pi's two also say which way each points. A free atom's
+   * carry the atom and the orbital's place in that element's `atomLevels`,
+   * and a p set's three which way each points, left to right as
+   * {@link ALONG_ORDER} (V6-7). Null only where nothing could be drawn.
+   */
+  picks: (OrbitalPick | null)[];
+  /** Each line read aloud: the rung's label, and which way it points where it has a way. */
+  lineLabels: string[];
   /** The electrons in one of its orbitals, or nothing for a free atom's. */
   mark: string;
   /** `HOMO`, `LUMO`, or nothing at all. */
@@ -919,11 +953,12 @@ export interface CorrelationRung {
   label: string;
   /**
    * What the textbook calls it: `2p` for a free atom's, `σ*` or `π` for the
-   * molecule's. Written on the far side of the lines from the tag.
+   * molecule's. Written on the far side of the lines from the tag, or over the
+   * middle of a free atom's p set.
    */
   name: string;
   nameX: number;
-  nameAnchor: 'start' | 'end';
+  nameAnchor: 'start' | 'end' | 'middle';
   /** Orbitals on the rung, which is how many lines are drawn side by side. */
   count: number;
 }
@@ -1011,6 +1046,32 @@ export function atomicOrbitalNames(energies: readonly number[]): string[] {
   return at === energies.length ? names : energies.map(() => '');
 }
 
+/** One height of a free atom's orbitals: `size` of them, from `first` on. */
+interface AtomSet {
+  energy: number;
+  name: string;
+  first: number;
+  size: number;
+}
+
+/**
+ * A free atom's orbitals as the diagram draws them, lowest first: a named p set
+ * as one rung of three, and everything else an orbital apiece - including every
+ * one of them where the sets could not be named, since a set that is not the
+ * table's is not known to be three orbitals that are one another's rotations.
+ */
+function atomSets(energies: readonly number[]): AtomSet[] {
+  const names = atomicOrbitalNames(energies);
+  const named = names.some((name) => name !== '');
+  const sets: AtomSet[] = [];
+  energies.forEach((energy, at) => {
+    const last = sets[sets.length - 1];
+    if (named && names[at] === '' && last !== undefined) last.size += 1;
+    else sets.push({ energy, name: names[at], first: at, size: 1 });
+  });
+  return sets;
+}
+
 /**
  * The correlation diagram: two free atoms, the molecule they make, and the
  * lines between them.
@@ -1028,6 +1089,26 @@ export function atomicOrbitalNames(energies: readonly number[]): string[] {
  * electrons are folded off the bottom by the molecule's own gap, and the atomic
  * levels below that cut go with them: they are the same electrons.
  */
+/**
+ * What the section says of a free atom's orbital picked on the diagram (V6-8),
+ * in place of the lines about bonds and nodes: the atom's symbol from the
+ * heading of its column and the orbital's name from its rung, which are the two
+ * things the line pressed was labelled with. Without the figure (it went while
+ * the pick stayed) there is no name to give, only the atom.
+ */
+export function atomPickWords(
+  figure: CorrelationFigure | null,
+  pick: OrbitalPick,
+  symbols: readonly string[],
+): string {
+  const along = pick.along ?? null;
+  for (const column of figure?.columns ?? []) {
+    const rung = column.rungs.find((r) => r.picks.some((p) => samePick(p, pick)));
+    if (rung) return atomOrbitalWords(column.heading, rung.name, along);
+  }
+  return atomOrbitalWords(symbols[pick.atom ?? 0] ?? '', '', along);
+}
+
 export function buildCorrelation(
   atoms: readonly (readonly number[])[],
   symbols: readonly string[],
@@ -1038,28 +1119,29 @@ export function buildCorrelation(
   const cut = shown.length === 0 ? -Infinity : Math.min(...shown.map((level) => level.energy));
   // The same electrons on either side: an atomic level below the molecule's cut
   // is the shell those folded orbitals were made out of.
-  const kept = [0, 1].map((side) => {
-    const energies = atoms[side] ?? [];
-    const names = atomicOrbitalNames(energies);
-    return energies.flatMap((energy, at) => (energy >= cut ? [{ energy, name: names[at] }] : []));
-  });
-  const sides = kept.map((side) => side.map(({ energy }) => energy));
+  const kept = [0, 1].map((side) =>
+    atomSets(atoms[side] ?? []).filter(({ energy }) => energy >= cut),
+  );
+  // The links count orbitals, not rungs: an atom has as many to give as it has
+  // orbitals, and a p set is three of them on one rung (`correlationLinks`).
+  const sides = kept.map((side) => side.flatMap(({ energy, size }) => repeat(size, energy)));
+  const owners = kept.map((side) => side.flatMap(({ size }, at) => repeat(size, at)));
 
   const columns = orbitalColumns(shown);
   const stacked = [
-    ...sides[0].map((energy) => ({ energy })),
+    ...kept[0].map(({ energy }) => ({ energy })),
     ...shown.map((level) => ({ energy: level.energy })),
-    ...sides[1].map((energy) => ({ energy })),
+    ...kept[1].map(({ energy }) => ({ energy })),
   ];
   const band = Math.max(CORR_MIN_BAND, Math.min(CORR_MAX_BAND, (stacked.length - 1) * CORR_STEP));
   const ys = layout(stacked, band).map((y) => CORR_TOP + y);
   const span = (WIDTH - 2 * CORR_ATOM_SPAN) / columns.length;
   const index = new Map(levels.map((level, at) => [level, at]));
 
-  const leftYs = ys.slice(0, sides[0].length);
-  const rightYs = ys.slice(ys.length - sides[1].length);
+  const leftYs = ys.slice(0, kept[0].length);
+  const rightYs = ys.slice(ys.length - kept[1].length);
   const heights = new Map(
-    shown.map((level, index) => [rungKey(level), ys[sides[0].length + index]]),
+    shown.map((level, index) => [rungKey(level), ys[kept[0].length + index]]),
   );
 
   const atomColumn = (side: number, heightOf: readonly number[]) => {
@@ -1071,22 +1153,43 @@ export function buildCorrelation(
       heading: symbols[side] ?? '',
       headingY: CORR_HEADING_Y,
       x,
-      rungs: kept[side].map(({ name }, at) => ({
-        key: `${side}:${at}`,
-        x,
-        y: heightOf[at],
-        half: CORR_LINE / 2,
-        lines: [x],
-        mark: '',
-        tag: '',
-        tagX: x,
-        tagAnchor: 'start' as const,
-        label: [`${symbols[side] ?? ''} の原子の部屋`, ...(name === '' ? [] : [name])].join('、'),
-        name,
-        nameX: x + outward * (CORR_LINE / 2 + CORR_TAG_GAP),
-        nameAnchor: side === 0 ? ('end' as const) : ('start' as const),
-        count: 1,
-      })),
+      rungs: kept[side].map(({ name, first, size }, at): CorrelationRung => {
+        const words = [`${symbols[side] ?? ''} の原子の部屋`, ...(name === '' ? [] : [name])];
+        const label = words.join('、');
+        const offsets = Array.from({ length: size }, (_, offset) => offset);
+        // Only a named p set is three directions; `atomSets` makes no other set.
+        const ways = offsets.map((offset) => (size === 3 ? ALONG_ORDER[offset] : undefined));
+        const set = size > 1;
+        const length = set ? CORR_SET_LINE : CORR_LINE;
+        const gap = set ? CORR_SET_GAP : CORR_LINE_GAP;
+        const half = (size * length + (size - 1) * gap) / 2;
+        return {
+          key: `${side}:${at}`,
+          x,
+          y: heightOf[at],
+          half,
+          lines: offsets.map((offset) => x - half + length / 2 + offset * (length + gap)),
+          lineLength: length,
+          picks: ways.map((along, offset) => ({
+            index: first + offset,
+            spin: 'both' as const,
+            atom: side,
+            ...(along === undefined ? {} : { along }),
+          })),
+          lineLabels: ways.map((along) =>
+            along === undefined ? label : `${label}、${ALONG_WORDS[along]}`,
+          ),
+          mark: '',
+          tag: '',
+          tagX: x,
+          tagAnchor: 'start' as const,
+          label,
+          name,
+          nameX: set ? x : x + outward * (half + CORR_TAG_GAP),
+          nameAnchor: set ? 'middle' : side === 0 ? 'end' : 'start',
+          count: size,
+        };
+      }),
     };
   };
 
@@ -1112,22 +1215,38 @@ export function buildCorrelation(
           );
           const before = middle - half - CORR_TAG_GAP;
           const after = middle + half + CORR_TAG_GAP;
+          const label = rungLabel(row.level, row.frontier, column.heading, name);
+          const offsets = Array.from({ length: row.level.count }, (_, offset) => offset);
+          // A pi's two lines are the two directions across the bond; the one
+          // along it is a sigma, on a rung of its own.
+          const ways = offsets.map((offset) =>
+            row.level.count === 2 ? ALONG_ORDER[offset + 1] : undefined,
+          );
           return {
             key: rungKey(row.level),
             x: middle,
             y: heights.get(rungKey(row.level)) ?? CORR_TOP + band,
             half,
-            lines: Array.from(
-              { length: row.level.count },
-              (_, offset) => middle - half + CORR_LINE / 2 + offset * (CORR_LINE + CORR_LINE_GAP),
+            lines: offsets.map(
+              (offset) => middle - half + CORR_LINE / 2 + offset * (CORR_LINE + CORR_LINE_GAP),
             ),
+            lineLength: CORR_LINE,
+            picks: ways.map((along, offset) => ({
+              index: row.level.first + offset,
+              spin: row.level.spin,
+              ...(along === undefined ? {} : { along }),
+            })),
+            lineLabels: ways.map((along, offset) => {
+              if (along !== undefined) return `${label}、${ALONG_WORDS[along]}`;
+              return row.level.count >= 2 ? `${label}、${offset + 1} つめ` : label;
+            }),
             mark: occupationMark(row.level.occupation),
             // Above the line rather than level with it: the links come in at
             // the rung's own height, on both sides of a middle column.
             tag: row.frontier === null ? '' : frontierLabel(row.frontier),
             tagX: mirrored ? after : before,
             tagAnchor: mirrored ? ('start' as const) : ('end' as const),
-            label: rungLabel(row.level, row.frontier, column.heading, name),
+            label,
             name,
             nameX: mirrored ? before : after,
             nameAnchor: mirrored ? ('end' as const) : ('start' as const),
@@ -1143,7 +1262,7 @@ export function buildCorrelation(
     width: WIDTH,
     height: CORR_TOP + band + (core > 0 ? CORE_ROW : 0) + BOTTOM + 6,
     columns: drawn,
-    links: correlationLinks(columns, sides, makeup, levels, drawn),
+    links: correlationLinks(columns, sides, owners, makeup, levels, drawn),
     core: core > 0 ? foldedRow(core, CORR_TOP + band + 8) : null,
   };
 }
@@ -1153,7 +1272,13 @@ export function correlationTexts(figure: CorrelationFigure): string[] {
   return [
     ...figure.columns.flatMap((column) => [
       column.heading,
-      ...column.rungs.flatMap((rung) => [rung.mark, rung.tag, rung.label, rung.name]),
+      ...column.rungs.flatMap((rung) => [
+        rung.mark,
+        rung.tag,
+        rung.label,
+        rung.name,
+        ...rung.lineLabels,
+      ]),
     ]),
     figure.core?.text ?? '',
   ];
@@ -1190,10 +1315,15 @@ function rungLabel(
  *
  * The folded core needs no allowance: the orbitals cut off the bottom used up
  * exactly the atomic levels cut off with them, so both totals start at zero.
+ *
+ * The count is of orbitals, one slot each, and a slot is drawn on the rung
+ * that holds it (`owners`): a p set's three slots are one rung of three lines
+ * since V6-7, so two of the molecule's rungs can end on the same one.
  */
 function correlationLinks(
   columns: readonly { rows: readonly { level: OrbitalLevel }[] }[],
   sides: readonly (readonly number[])[],
+  owners: readonly (readonly number[])[],
   makeup: readonly RungMakeup[],
   levels: readonly OrbitalLevel[],
   drawn: readonly CorrelationColumn[],
@@ -1213,7 +1343,7 @@ function correlationLinks(
         total += share;
         if (share < LINK_FLOOR || slot === null) continue;
         const from = rungs.get(rungKey(row.level));
-        const to = atomRungs[slot];
+        const to = atomRungs[owners[side][slot]];
         if (from === undefined || to === undefined) continue;
         links.push(
           side === 0
@@ -1224,6 +1354,10 @@ function correlationLinks(
     }
   }
   return links;
+}
+
+function repeat<T>(times: number, value: T): T[] {
+  return Array.from({ length: times }, () => value);
 }
 
 /** The atomic level a stretch of the running total overlaps most of. */

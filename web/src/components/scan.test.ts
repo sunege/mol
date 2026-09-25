@@ -7,6 +7,7 @@ import {
   SCAN_PRESETS,
   SCAN_TEASER,
   atomFraction,
+  atomPickWords,
   atomicOrbitalNames,
   buildCorrelation,
   buildScan,
@@ -19,9 +20,11 @@ import {
   scanAxisLabels,
   scanPairFor,
   scanTexts,
+  type CorrelationLink,
   type ScanRange,
 } from './scan';
 import { MAX_SCAN_POINTS, type OrbitalLevel, type ScanLevel, type ScanPoint } from '../worker/protocol';
+import type { OrbitalPick } from './orbital';
 
 /** One separation, with its rungs given outright, lowest first. */
 function withLevels(
@@ -542,6 +545,25 @@ const O2_LEVELS = [
     [0.35, 1, 0],
   ]),
 ];
+/** N2, closed: sigma(2s), sigma*(2s), pi, sigma, pi*, sigma* over a folded core. */
+const N2_ATOMS = [
+  [-14.0, -0.68, -0.26, -0.26, -0.26],
+  [-14.0, -0.68, -0.26, -0.26, -0.26],
+];
+const N2_LEVELS = rungs([
+  [-14.1, 1, 2],
+  [-14.1, 1, 2],
+  [-1.0, 1, 2],
+  [-0.5, 1, 2],
+  [-0.43, 2, 2],
+  [-0.38, 1, 2],
+  [-0.05, 2, 0],
+  [0.6, 1, 0],
+]);
+const N2_MAKEUP = [0, 0, 0.3, -0.2, 0.3, 0.1, -0.3, -0.6].map((overlap) => ({
+  shares: [0.5, 0.5],
+  overlap,
+}));
 const O2_OVERLAPS = [0, 0, 0.3, -0.4, 0.2, 0.3, -0.2, -0.6];
 const O2_MAKEUP = [...O2_OVERLAPS, ...O2_OVERLAPS].map((overlap) => ({
   shares: [0.5, 0.5],
@@ -597,7 +619,8 @@ describe('the correlation diagram', () => {
     // The innermost rung, and the atomic level it was made of, are folded away
     // together: one orbital cut, and fluorine's own innermost level gone with it.
     expect(hf.core?.orbitals).toBe(1);
-    expect(hf.columns[2].rungs).toHaveLength(4);
+    // Fluorine's 2s, and its 2p as one rung of three (V6-7).
+    expect(hf.columns[2].rungs.map((rung) => rung.lines.length)).toEqual([1, 3]);
     // Hydrogen has one orbital to give, so exactly the rungs it is really in
     // reach it: the bond and the antibonding rung, not the lone pairs.
     const toHydrogen = hf.links.filter((link) => link.x1 < hf.width / 3);
@@ -652,10 +675,50 @@ describe('the correlation diagram', () => {
     expect(names).toEqual(['σ*', 'σ']);
   });
 
+  it('makes every line of the molecule a pick of the ladder', () => {
+    // V6-4: the diagram stands in for the ladder of two atoms, so pressing one
+    // of its middle lines has to draw exactly what that line of the ladder did.
+    const o2 = buildCorrelation(O2_ATOMS, ['O', 'O'], O2_LEVELS, O2_MAKEUP);
+    const [, up, down] = o2.columns;
+    const drawn = [up, down].flatMap((column) => column.rungs.flatMap((rung) => rung.picks));
+    // The ladder's orbitals above the folded core, each once.
+    const expected = O2_LEVELS.filter((level) => level.energy > -10).flatMap((level) =>
+      Array.from({ length: level.count }, (_, k) => ({ index: level.first + k, spin: level.spin })),
+    );
+    const order = (a: OrbitalPick, b: OrbitalPick) =>
+      a.spin.localeCompare(b.spin) || a.index - b.index;
+    const bare = (drawn as OrbitalPick[]).map(({ index, spin }) => ({ index, spin }));
+    expect(bare.sort(order)).toEqual([...expected].sort(order));
+    // Both spins keep their own counting, and a pi's two lines are first and
+    // first + 1, pointing the two ways across the bond (V6-7).
+    for (const column of [up, down]) {
+      const spin = column === up ? 'up' : 'down';
+      for (const rung of column.rungs) {
+        expect(rung.picks).toHaveLength(rung.lines.length);
+        expect(rung.lineLabels).toHaveLength(rung.lines.length);
+        const level = O2_LEVELS.find((l) => `${l.spin}:${l.first}` === rung.key)!;
+        const ways = rung.count === 2 ? ['across', 'toward'] : [undefined];
+        expect(rung.picks).toEqual(
+          ways.map((along, k) => ({
+            index: level.first + k,
+            spin,
+            ...(along === undefined ? {} : { along }),
+          })),
+        );
+      }
+      const pi = column.rungs.filter((rung) => rung.count === 2);
+      expect(pi).toHaveLength(2);
+      for (const rung of pi) {
+        expect(rung.lineLabels[0]).toMatch(/、軸に垂直・画面の中$/);
+        expect(rung.lineLabels[1]).toMatch(/、軸に垂直・手前$/);
+      }
+    }
+  });
+
   it('names both spins of O2, facing each other between the two columns', () => {
     const o2 = buildCorrelation(O2_ATOMS, ['O', 'O'], O2_LEVELS, O2_MAKEUP);
     // 1s is folded away with the molecule's innermost pair; 2p once per height.
-    expect(o2.columns[0].rungs.map((rung) => rung.name)).toEqual(['2s', '2p', '', '']);
+    expect(o2.columns[0].rungs.map((rung) => rung.name)).toEqual(['2s', '2p']);
     const [, up, down] = o2.columns;
     const names = (column: typeof up) => column.rungs.map((rung) => rung.name).reverse();
     expect(names(up)).toEqual(['σ', 'σ*', 'σ', 'π', 'π*', 'σ*']);
@@ -681,6 +744,111 @@ describe('the correlation diagram', () => {
       for (const rung of column.rungs) {
         expect(rung.nameX).toBeGreaterThanOrEqual(12);
         expect(rung.nameX).toBeLessThanOrEqual(o2.width - 12);
+      }
+    }
+  });
+
+  it('draws a free atom’s p set as one rung of three, each a way it points', () => {
+    // V6-7. N2's shape, closed: the innermost pair folded off, and the atoms'
+    // 1s with it - so the p set is still orbitals 2, 3 and 4 of the atom.
+    const n2 = buildCorrelation(N2_ATOMS, ['N', 'N'], N2_LEVELS, N2_MAKEUP);
+    for (const [side, column] of [
+      [0, n2.columns[0]],
+      [1, n2.columns[2]],
+    ] as const) {
+      const [s, p] = column.rungs;
+      expect(column.rungs).toHaveLength(2);
+      expect(s.picks).toEqual([{ index: 1, spin: 'both', atom: side }]);
+      expect(p.count).toBe(3);
+      expect(p.picks).toEqual([
+        { index: 2, spin: 'both', atom: side, along: 'axis' },
+        { index: 3, spin: 'both', atom: side, along: 'across' },
+        { index: 4, spin: 'both', atom: side, along: 'toward' },
+      ]);
+      expect(p.lineLabels).toEqual([
+        'N の原子の部屋、2p、結合の軸の向き',
+        'N の原子の部屋、2p、軸に垂直・画面の中',
+        'N の原子の部屋、2p、軸に垂直・手前',
+      ]);
+      // Three lines abreast, left to right, inside the rung and the atom's own
+      // column, and the name over the middle one where there is no room outside.
+      expect(p.lines).toHaveLength(3);
+      expect([...p.lines].sort((a, b) => a - b)).toEqual(p.lines);
+      expect(p.lines[0] - p.lineLength / 2).toBeCloseTo(p.x - p.half);
+      expect(p.lines[2] + p.lineLength / 2).toBeCloseTo(p.x + p.half);
+      expect(p.nameX).toBe(p.x);
+      expect(p.nameAnchor).toBe('middle');
+      for (const x of p.lines) {
+        expect(x - p.lineLength / 2).toBeGreaterThan(0);
+        expect(x + p.lineLength / 2).toBeLessThan(n2.width);
+      }
+      const middle = n2.columns[1].rungs.map((rung) => rung.x - rung.half);
+      if (side === 0) expect(p.x + p.half).toBeLessThan(Math.min(...middle));
+    }
+  });
+
+  it('names a free atom’s orbital by its column and its rung', () => {
+    // V6-8: the words under the diagram for a line of either atom's column.
+    const n2 = buildCorrelation(N2_ATOMS, ['N', 'N'], N2_LEVELS, N2_MAKEUP);
+    const symbols = ['N', 'N'];
+    expect(atomPickWords(n2, { index: 2, spin: 'both', atom: 1, along: 'axis' }, symbols)).toBe(
+      'N の原子の 2p（結合の軸の向き）。結合する前の、原子ひとつの部屋です。',
+    );
+    expect(atomPickWords(n2, { index: 1, spin: 'both', atom: 0 }, symbols)).toBe(
+      'N の原子の 2s。結合する前の、原子ひとつの部屋です。',
+    );
+    // The figure gone, the atom is still named, and nothing is made up for the rest.
+    expect(atomPickWords(null, { index: 4, spin: 'both', atom: 0, along: 'toward' }, symbols)).toBe(
+      'N の原子の部屋（軸に垂直・手前）。結合する前の、原子ひとつの部屋です。',
+    );
+  });
+
+  it('joins the molecule to the same atomic levels as before the set became one rung', () => {
+    // Each spin's column of O2 counts through the atom's orbitals from the
+    // bottom: the sigma and sigma* of 2s use up the 2s, the other four rungs
+    // the three 2p. Before V6-7 those four ended on 2p lines of their own; now
+    // they end on the one rung, at its edge.
+    const o2 = buildCorrelation(O2_ATOMS, ['O', 'O'], O2_LEVELS, O2_MAKEUP);
+    expect(o2.links).toHaveLength(24);
+    for (const [column, end] of [
+      [o2.columns[0], (link: CorrelationLink) => [link.x1, link.y1]],
+      [o2.columns[3], (link: CorrelationLink) => [link.x2, link.y2]],
+    ] as const) {
+      const [s, p] = column.rungs;
+      const edge = column === o2.columns[0] ? 1 : -1;
+      const landing = o2.links.map((link) => {
+        const [x, y] = end(link);
+        if (x === s.x + edge * s.half && y === s.y) return '2s';
+        if (x === p.x + edge * p.half && y === p.y) return '2p';
+        return 'elsewhere';
+      });
+      expect(landing.filter((at) => at === '2s')).toHaveLength(4);
+      expect(landing.filter((at) => at === '2p')).toHaveLength(8);
+    }
+  });
+
+  it('keeps an orbital apiece, with no way to point, where the sets have no names', () => {
+    const odd = buildCorrelation([[-0.5, -0.3, -0.2], [-0.24]], ['X', 'H'], H2_LEVELS, []);
+    const left = odd.columns[0].rungs;
+    expect(left.map((rung) => rung.count)).toEqual([1, 1, 1]);
+    expect(left.map((rung) => rung.picks)).toEqual([
+      [{ index: 0, spin: 'both', atom: 0 }],
+      [{ index: 1, spin: 'both', atom: 0 }],
+      [{ index: 2, spin: 'both', atom: 0 }],
+    ]);
+  });
+
+  it('writes no number in the new words either', () => {
+    for (const shown of [
+      buildCorrelation(N2_ATOMS, ['N', 'N'], N2_LEVELS, N2_MAKEUP),
+      buildCorrelation(O2_ATOMS, ['O', 'O'], O2_LEVELS, O2_MAKEUP),
+    ]) {
+      const texts = correlationTexts(shown);
+      expect(texts.some((text) => text.includes('軸に垂直・手前'))).toBe(true);
+      for (const text of texts) {
+        expect(text).not.toMatch(/\d+\.\d+/);
+        expect(text).not.toMatch(/[-−]/);
+        for (const unit of ['Ha', 'eV', 'ハートリー', 'kJ']) expect(text).not.toContain(unit);
       }
     }
   });

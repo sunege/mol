@@ -25,6 +25,8 @@ export interface RecordStore {
   /** Adds or replaces several at once, which is what reading a file does. */
   putAll(records: readonly StructureRecord[]): Promise<void>;
   remove(id: string): Promise<void>;
+  /** Removes several at once: a molecule's or a level's records (V6-2). */
+  removeMany(ids: readonly string[]): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -52,6 +54,11 @@ export class MemoryRecordStore implements RecordStore {
 
   async remove(id: string): Promise<void> {
     this.#records = this.#records.filter((record) => record.id !== id);
+  }
+
+  async removeMany(ids: readonly string[]): Promise<void> {
+    const gone = new Set(ids);
+    this.#records = this.#records.filter((record) => !gone.has(record.id));
   }
 
   async clear(): Promise<void> {
@@ -103,6 +110,15 @@ export class IndexedDbRecordStore implements RecordStore {
     await this.#run('readwrite', (store) => store.delete(id));
   }
 
+  async removeMany(ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.#run('readwrite', (store) => {
+      let last: IDBRequest | null = null;
+      for (const id of ids) last = store.delete(id);
+      return last!;
+    });
+  }
+
   async clear(): Promise<void> {
     await this.#run('readwrite', (store) => store.clear());
   }
@@ -111,7 +127,7 @@ export class IndexedDbRecordStore implements RecordStore {
    * One transaction, resolved by the last request in it.
    *
    * A transaction that fails takes every request in it with it, which is what
-   * makes `putAll` all-or-nothing.
+   * makes `putAll` and `removeMany` all-or-nothing.
    */
   #run(mode: IDBTransactionMode, work: (store: IDBObjectStore) => IDBRequest): Promise<unknown> {
     return new Promise((resolve, reject) => {

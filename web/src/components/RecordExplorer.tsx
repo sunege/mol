@@ -5,8 +5,8 @@
  * From the top: the heading with the count and the button that folds the column
  * to a 40px strip, the file buttons (all records out, a file in, and behind "…"
  * the one that clears everything), what the store and the last file said, the
- * tree - the only part that scrolls - and, always, the one thing the ranking may
- * not be read as (`ISOMER_CAVEAT`).
+ * tree - the only part that scrolls - and what the ranking may not be read as,
+ * one sentence for each level the tree holds (`isomerCaveats`).
  *
  * The handlers are the App's own, unchanged. What this column adds is memory
  * (`explorer.ts`): whether it is folded and which branches the user opened or
@@ -38,10 +38,10 @@ import {
 } from './explorer';
 import {
   EXPLORER_WORDS as WORDS,
-  ISOMER_CAVEAT,
   NO_RECORDS,
   NOT_KEPT_NOTICE,
   RECORDS_HINT,
+  isomerCaveats,
 } from './records';
 import { canCancel, candidateName, statusText } from './search';
 import { useNow } from './useNow';
@@ -62,6 +62,8 @@ interface Props {
   canReplay: boolean;
   onRename: (record: StructureRecord, name: string) => void;
   onDelete: (record: StructureRecord) => void;
+  /** A molecule's or a level's records at once; the App asks first (V6-2). */
+  onDeleteMany: (ids: string[], what: string) => void;
   onClear: () => void;
   /** All of them, or only the records of one formula. */
   onExport: (only: string | null) => void;
@@ -112,6 +114,7 @@ export function RecordExplorer(props: Props) {
   );
   const tree = useMemo(() => buildRecordTree(groups, pending), [groups, pending]);
   const total = groups.reduce((sum, group) => sum + group.entries.length, 0);
+  const caveats = isomerCaveats(groups.map((group) => group.level));
   const finished = candidates.length - candidates.filter(canCancel).length;
   const byId = (id: string) => candidates.find((candidate) => candidate.id === id);
 
@@ -213,11 +216,13 @@ export function RecordExplorer(props: Props) {
             expanded={expanded}
             onToggle={(id, open) => setMemory((current) => withChoice(current, id, open))}
             openId={openId}
+            currentFormula={currentFormula}
             onOpen={props.onOpen}
             onReplay={props.onReplay}
             canReplay={props.canReplay}
             onRename={props.onRename}
             onDelete={props.onDelete}
+            onDeleteMany={props.onDeleteMany}
             onExport={props.onExport}
             onOpenCandidate={(id) => {
               const candidate = byId(id);
@@ -230,7 +235,11 @@ export function RecordExplorer(props: Props) {
           />
         )}
       </div>
-      <p className="explorer-caveat">{ISOMER_CAVEAT}</p>
+      {caveats.map((caveat) => (
+        <p key={caveat} className="explorer-caveat">
+          {caveat}
+        </p>
+      ))}
     </aside>
   );
 }

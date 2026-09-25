@@ -574,6 +574,22 @@ mod tests {
     }
 
     #[test]
+    fn each_atom_owns_one_contiguous_block_in_atom_order() {
+        let mol = Molecule::from_angstrom(&[
+            (8, [0.0, 0.0, 0.1173]),
+            (1, [0.0, 0.7572, -0.4693]),
+            (1, [0.0, -0.7572, -0.4693]),
+        ])
+        .unwrap();
+        let basis = BasisSet::sto3g(&mol).unwrap();
+        assert_eq!(basis.atom_range(0), 0..5);
+        assert_eq!(basis.atom_range(1), 5..6);
+        assert_eq!(basis.atom_range(2), 6..7);
+        let total: usize = (0..3).map(|a| basis.atom_range(a).len()).sum();
+        assert_eq!(total, basis.n_functions());
+    }
+
+    #[test]
     fn third_row_elements_get_nine_functions() {
         let mol = Molecule::new(vec![Atom { z: 16, pos: [0.0; 3] }]).unwrap();
         let basis = BasisSet::sto3g(&mol).unwrap();

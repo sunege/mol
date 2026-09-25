@@ -1,21 +1,25 @@
 /**
- * The two main buttons at the top of the panel (V5-2), as a table.
+ * The main buttons, as two tables (V5-2, split in V6-3).
  *
- * They are two fixed slots whose labels and jobs change with the state, rather
- * than buttons that come and go: 中止 lands under the pointer that pressed
- * 安定な形にする, and nothing around the pair moves when a calculation starts
- * or ends. Which job each slot does is the same as it always was - only where
- * it sits is new:
+ * The two that start a calculation live in the calculate tab, under 次の計算:
+ * the tab reads top to bottom as "place the atoms, choose the level, run".
+ * The two that stop one sit at the top of the panel, and only while something
+ * is computing - starting a calculation moves the panel to the observe tab,
+ * so a stop in the calculate tab would be out of sight.
  *
- * | state                     | left                | right                |
- * | ------------------------- | ------------------- | -------------------- |
- * | not computing             | 安定な形にする (relax) | この形のまま計算       |
- * | computing                 | 中止 (stop)          | この形のまま計算 (off) |
- * | stopping after the step   | 止めています… (off)   | すぐ止める (stop)      |
+ * | state                     | run (calculate tab)       | stop (top of the panel) |
+ * | ------------------------- | ------------------------- | ----------------------- |
+ * | not computing             | 安定な形にする · この形のまま計算 | none                    |
+ * | computing                 | both off                  | 中止 · すぐ止める (off)   |
+ * | stopping after the step   | both off                  | 止めています… (off) · すぐ止める |
  *
- * `stop` is one handler in the App: the first press asks a relaxation to stop
- * after its step, the second stops it at once, and a single point is simply
- * cancelled. So "すぐ止める" is the same action as "中止", pressed again.
+ * The stops are two fixed slots whose labels change with the state, rather
+ * than buttons that come and go: すぐ止める is there, off, from the start, so
+ * nothing moves when 中止 is pressed (a button that cannot be used is disabled,
+ * not removed). `stop` is one handler in the App: the first press asks a
+ * relaxation to stop after its step, the second stops it at once, and a single
+ * point is simply cancelled. So すぐ止める is the same action as 中止, pressed
+ * again.
  *
  * Nothing can be pressed without an engine or without atoms, whatever else is
  * going on - the same two conditions the buttons have always had.
@@ -45,19 +49,28 @@ export interface ActionState {
   atomCount: number;
 }
 
-export function actionSlots({
+/** The two buttons under 次の計算 in the calculate tab. */
+export function runSlots({
+  computing,
+  unavailable,
+  atomCount,
+}: Omit<ActionState, 'stopping'>): [ActionSlot, ActionSlot] {
+  const disabled = unavailable || atomCount === 0 || computing;
+  return [
+    { label: '安定な形にする', action: 'relax', disabled, runs: true },
+    { label: 'この形のまま計算', action: 'calculate', disabled, runs: true },
+  ];
+}
+
+/** The two stops at the top of the panel, or null when nothing is computing. */
+export function stopSlots({
   computing,
   stopping,
   unavailable,
   atomCount,
-}: ActionState): [ActionSlot, ActionSlot] {
+}: ActionState): [ActionSlot, ActionSlot] | null {
+  if (!computing) return null;
   const blocked = unavailable || atomCount === 0;
-  if (!computing) {
-    return [
-      { label: '安定な形にする', action: 'relax', disabled: blocked, runs: true },
-      { label: 'この形のまま計算', action: 'calculate', disabled: blocked, runs: true },
-    ];
-  }
   if (stopping) {
     return [
       { label: '止めています…', action: 'stop', disabled: true, runs: false },
@@ -66,6 +79,6 @@ export function actionSlots({
   }
   return [
     { label: '中止', action: 'stop', disabled: blocked, runs: false },
-    { label: 'この形のまま計算', action: 'calculate', disabled: true, runs: true },
+    { label: 'すぐ止める', action: 'stop', disabled: true, runs: false },
   ];
 }

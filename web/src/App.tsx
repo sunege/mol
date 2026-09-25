@@ -20,10 +20,12 @@ import {
 import { OrbitalPanel } from './components/OrbitalPanel';
 import { DistanceScan } from './components/DistanceScan';
 import { carryPick, samePick, type Bond, type OrbitalPick } from './components/orbital';
+import { pickDirection, sameDirection, type Vec3 } from './components/orient';
 import {
   SCAN_HEADING,
   SCAN_TEASER,
   atomFraction,
+  buildCorrelation,
   scanPairFor,
   type RungMakeup,
   type ScanPair,
@@ -46,6 +48,7 @@ import { mergeRecords, readStructureLog, writeStructureLog } from './records/fil
 import { RecordExplorer } from './components/RecordExplorer';
 import {
   EXPLORER_WORDS,
+  deleteConfirm,
   exportFileName,
   importProblemText,
   importedText,
@@ -80,6 +83,7 @@ import {
   ActionGrid,
   Choices,
   IconButton,
+  RunButton,
   Segmented,
   type SegmentedOption,
 } from './components/controls';
@@ -89,7 +93,7 @@ import { viewportHint } from './components/viewportHint';
 import { StatusHeader } from './components/StatusHeader';
 import { TabPanel, Tabs } from './components/Tabs';
 import { useNarrow } from './components/useNarrow';
-import { actionSlots } from './components/actions';
+import { runSlots, stopSlots } from './components/actions';
 import { describeMesh, describeOutcome, describeRelaxation, isPartWay } from './components/status';
 import './App.css';
 
@@ -233,11 +237,22 @@ export default function App() {
   // The same, for the places that drop it from inside an effect, where the
   // render's copy is a frame behind.
   const pickRef = useRef<OrbitalPick | null>(null);
+  // Which way the picked orbital is turned, for a line that is one of a
+  // degenerate set (`OrbitalPick.along`), or null. Worked out from the camera
+  // when the line is pressed and kept with the pick: every threshold is cut
+  // through the same orbital, however the view has been turned since (V6-8).
+  // It is set and dropped with the pick, in the same handlers.
+  const [orbitalDirection, setOrbitalDirection] = useState<Vec3 | null>(null);
+  const directionRef = useRef<Vec3 | null>(null);
   // The orbital that was on screen when the marker of "近づけてみる" moved the
   // atoms, with the ladder it was picked from, until the ladder of the
   // calculation at the new separation arrives and it is found again in that
   // (`carryPick`). Any other edit drops it (`invalidateResult`).
-  const carryRef = useRef<{ pick: OrbitalPick; levels: OrbitalLevel[] } | null>(null);
+  const carryRef = useRef<{
+    pick: OrbitalPick;
+    levels: OrbitalLevel[];
+    direction: Vec3 | null;
+  } | null>(null);
   // The calculation the marker starts once it has been still for a moment.
   const markerTimerRef = useRef<number | undefined>(undefined);
   // Whether the orbital section is open. It is closed to begin with, and the
@@ -409,12 +424,16 @@ export default function App() {
   // the newest level waits its turn, replacing any older one that was waiting.
   //
   // `orbital` and `spin` ride along for `channel: 'orbital'`, which names one
-  // orbital of one spin's ladder rather than a set of electrons.
+  // orbital of one spin's ladder rather than a set of electrons; `atom` makes it
+  // a free atom's orbital instead, and `along` turns a degenerate set's member
+  // to point that way (V6-8).
   const wantedRef = useRef<{
     channel: DensityRequest;
     level: number;
     orbital?: number;
     spin?: SpinChannel;
+    atom?: number;
+    along?: Vec3;
   } | null>(null);
   const meshInFlightRef = useRef(false);
   const meshRequestRef = useRef(0);
@@ -802,6 +821,16 @@ export default function App() {
     void storeRef.current?.remove(record.id);
   }, []);
 
+  /** A molecule's or a level's records at once, from its "…" (V6-2). */
+  const deleteRecords = useCallback((ids: string[], what: string) => {
+    if (!window.confirm(deleteConfirm(what, ids.length))) return;
+    const gone = new Set(ids);
+    setRecords((previous) => previous.filter((existing) => !gone.has(existing.id)));
+    setOpenRecordId((open) => (open !== null && gone.has(open) ? null : open));
+    setRecordNotice(null);
+    void storeRef.current?.removeMany(ids);
+  }, []);
+
   const clearRecords = useCallback(() => {
     if (!window.confirm('記録をすべて消します。よろしいですか？')) return;
     setRecords([]);
@@ -912,6 +941,8 @@ export default function App() {
             wanted.level,
             wanted.orbital,
             wanted.spin,
+            wanted.atom,
+            wanted.along,
           );
           if (meshRequestRef.current === token) setMesh(next);
         } catch {
@@ -931,14 +962,23 @@ export default function App() {
 
   /**
    * Asks for a surface. `pick` is read only for the orbital channel, which
-   * names one orbital of one spin's ladder rather than a set of electrons.
+   * names one orbital of one spin's ladder rather than a set of electrons - or
+   * of a free atom's, which has no spin to send - and `direction` only with it.
    */
   const requestIsosurface = useCallback(
-    (wanted: DensityRequest, level: number, pick: OrbitalPick | null) => {
+    (
+      wanted: DensityRequest,
+      level: number,
+      pick: OrbitalPick | null,
+      direction: Vec3 | null = null,
+    ) => {
+      const along = direction === null ? {} : { along: direction };
       wantedRef.current =
-        wanted === 'orbital' && pick !== null
-          ? { channel: wanted, level, orbital: pick.index, spin: pick.spin }
-          : { channel: wanted, level };
+        wanted !== 'orbital' || pick === null
+          ? { channel: wanted, level }
+          : pick.atom !== undefined
+            ? { channel: wanted, level, orbital: pick.index, atom: pick.atom, ...along }
+            : { channel: wanted, level, orbital: pick.index, spin: pick.spin, ...along };
       void pumpIsosurface();
     },
     [pumpIsosurface],
@@ -948,8 +988,10 @@ export default function App() {
   // surface back on all ask for a fresh mesh. A finished calculation does the
   // same from its own handler, where the density first becomes available.
   useEffect(() => {
-    if (showDensity && hasDensityRef.current) requestIsosurface(channel, isoLevel, orbitalPick);
-  }, [channel, isoLevel, orbitalPick, showDensity, requestIsosurface]);
+    if (showDensity && hasDensityRef.current) {
+      requestIsosurface(channel, isoLevel, orbitalPick, orbitalDirection);
+    }
+  }, [channel, isoLevel, orbitalPick, orbitalDirection, showDensity, requestIsosurface]);
 
   /**
    * Drops the surface on screen rather than leaving it up while the next one is
@@ -969,33 +1011,55 @@ export default function App() {
       if (pickRef.current !== null || next !== densityRequest) dropMesh();
       pickRef.current = null;
       setOrbitalPick(null);
+      setOrbitalDirection(null);
       setDensityRequest(next);
     },
     [densityRequest, dropMesh],
   );
 
   /**
-   * A row of the orbital ladder.
+   * A row of the orbital ladder, or a line of the correlation diagram, with the
+   * way it is turned if it is one of a set.
    *
    * The cloud is switched on if it was off: the surface is the whole of the
-   * answer here, and a click that drew nothing would look like a failure.
+   * answer here, and a click that drew nothing would look like a failure. The
+   * same pick again is drawn again only if it now points another way - the
+   * same line pressed after turning the view (V6-8).
    */
   const selectOrbital = useCallback(
-    (pick: OrbitalPick) => {
-      if (samePick(pickRef.current, pick)) return;
+    (pick: OrbitalPick, direction: Vec3 | null) => {
+      if (samePick(pickRef.current, pick) && sameDirection(directionRef.current, direction)) return;
       pickRef.current = pick;
+      directionRef.current = direction;
       setOrbitalPick(pick);
+      setOrbitalDirection(direction);
       setShowDensity(true);
       dropMesh();
     },
     [dropMesh],
   );
 
+  /**
+   * A line pressed in the section: turned, if it is one of a set, to the two
+   * atoms and the camera as they are at this moment. Without a viewer (no
+   * WebGL) the camera is taken as square on to the world.
+   */
+  const pressOrbital = useCallback(
+    (pick: OrbitalPick) =>
+      selectOrbital(
+        pick,
+        pickDirection(pick.along, atoms, viewerRef.current?.cameraAxes() ?? null),
+      ),
+    [atoms, selectOrbital],
+  );
+
   /** Whatever the orbital belonged to has gone: back to the density. */
   const forgetOrbital = useCallback(() => {
     if (pickRef.current === null) return;
     pickRef.current = null;
+    directionRef.current = null;
     setOrbitalPick(null);
+    setOrbitalDirection(null);
     dropMesh();
   }, [dropMesh]);
 
@@ -1046,7 +1110,8 @@ export default function App() {
         const carried = carryRef.current;
         carryRef.current = null;
         const pick = carried && carryPick(carried.pick, carried.levels, ladder);
-        if (pick) selectOrbital(pick);
+        // Along the same axis it was turned to, not the camera's now.
+        if (pick) selectOrbital(pick, carried.direction);
       })
       .catch((e: Error) => {
         // The worker was replaced, or it is holding nothing. The section says
@@ -1081,7 +1146,10 @@ export default function App() {
   useEffect(() => {
     setOrbitalCharacter(null);
     const client = clientRef.current;
-    if (orbitalPick === null || !client || !hasDensityRef.current) return;
+    // A free atom's orbital is not one of the molecule's, and its words are
+    // not about bonds (`atomPickWords`).
+    if (orbitalPick === null || orbitalPick.atom !== undefined) return;
+    if (!client || !hasDensityRef.current) return;
     let live = true;
     client
       .orbitalCharacter(orbitalPick.index, orbitalPick.spin)
@@ -1141,13 +1209,15 @@ export default function App() {
    * About the elements rather than about any calculation - the engine answers
    * it with nothing loaded at all - so it is asked for by the pair of atomic
    * numbers and kept until those change. Only while the section that draws it
-   * is open, and only for the two atoms it can be drawn between.
+   * is open - the molecular-orbital one since V6-4, where the diagram stands in
+   * for the ladder of two atoms - and only for the two atoms it can be drawn
+   * between.
    */
   const scanPairKey = atoms.length === 2 ? `${atoms[0].z},${atoms[1].z}` : null;
   useEffect(() => {
     setFreeAtomLevels(null);
     const client = clientRef.current;
-    if (!scanOpen || !client || scanPairKey === null) return;
+    if (!orbitalsOpen || !client || scanPairKey === null) return;
     let live = true;
     client
       .atomLevels(new Uint8Array(scanPairKey.split(',').map(Number)))
@@ -1162,7 +1232,7 @@ export default function App() {
     return () => {
       live = false;
     };
-  }, [scanOpen, scanPairKey]);
+  }, [orbitalsOpen, scanPairKey]);
 
   /**
    * How much of each rung sits on each nucleus, which is what the lines between
@@ -1204,6 +1274,30 @@ export default function App() {
       live = false;
     };
   }, [orbitalLevels, atomCount]);
+
+  /**
+   * The correlation diagram of the two atoms on screen, which the orbital
+   * section draws in place of the ladder (V6-4). Only once both ends of it and
+   * the molecule between them are in: one end missing would be a different
+   * picture, not a partial one. The symbols come from the same pair of atomic
+   * numbers the free atoms were asked for, so the two cannot disagree.
+   */
+  const correlation = useMemo(
+    () =>
+      scanPairKey === null ||
+      freeAtomLevels === null ||
+      freeAtomLevels.length < 2 ||
+      orbitalLevels === null ||
+      orbitalLevels.length === 0
+        ? null
+        : buildCorrelation(
+            freeAtomLevels,
+            scanPairKey.split(',').map((z) => symbolOf(Number(z))),
+            orbitalLevels,
+            orbitalWeights,
+          ),
+    [scanPairKey, freeAtomLevels, orbitalLevels, orbitalWeights, symbolOf],
+  );
 
   /**
    * The pair a scan would walk: the two atoms on screen, and nothing else
@@ -1290,7 +1384,7 @@ export default function App() {
       const carry =
         carryRef.current ??
         (pickRef.current !== null && orbitalLevels !== null
-          ? { pick: pickRef.current, levels: orbitalLevels }
+          ? { pick: pickRef.current, levels: orbitalLevels, direction: directionRef.current }
           : null);
       const placed = alongTheAxis(atoms, scanPair.z, point.distance);
       setAtoms(placed);
@@ -1932,8 +2026,8 @@ export default function App() {
   // currently on screen, and that description is true whenever its SCF
   // converged, whether or not the optimiser had time to reach the bottom. What
   // the optimiser managed is a separate line of its own.
-  // The molecule on screen, so its own records are the ones at the top of the
-  // list. The formula alone, because the charge that completes a comparison key
+  // The molecule on screen, whose branch of the records tree is open and marked.
+  // The formula alone, because the charge that completes a comparison key
   // is only known once the engine has chosen one.
   const currentFormula = atoms.length > 0 ? hillFormula(atoms.map((a) => a.z), symbolOf) : null;
   // What the orbital section may talk about: the bonds the viewer is drawing -
@@ -1943,13 +2037,9 @@ export default function App() {
   const orbitalBonds: Bond[] = orbitalsOpen ? findBonds(atoms, covalentRadiusOf) : [];
   const orbitalSymbols = orbitalsOpen ? atoms.map((atom) => symbolOf(atom.z)) : [];
 
-  const recordGroups = useMemo(() => {
-    const all = groupRecords(records);
-    // A stable sort, so within each half the newest group stays first.
-    return all.sort(
-      (a, b) => Number(b.formula === currentFormula) - Number(a.formula === currentFormula),
-    );
-  }, [records, currentFormula]);
+  // The tree orders the molecules itself, by when each was first recorded (V6-1),
+  // so opening a record does not move its molecule.
+  const recordGroups = useMemo(() => groupRecords(records), [records]);
 
   const relaxation = result?.optimization ?? null;
   const solved = result !== null && result.converged;
@@ -1973,6 +2063,7 @@ export default function App() {
       canReplay={openedRecord !== null && openedRecord.trajectory.length > 1}
       onRename={renameRecord}
       onDelete={deleteRecord}
+      onDeleteMany={deleteRecords}
       onClear={clearRecords}
       onExport={exportRecords}
       onImport={(file) => void importRecords(file)}
@@ -2048,16 +2139,13 @@ export default function App() {
           outcome={describeOutcome({ solved, settled, stopped, resultLevel })}
           relaxation={describeRelaxation(relaxation, solved, stopped)}
           energy={solved ? result.energy : null}
-          partWay={isPartWay(relaxation, solved, stopped)}
-          slots={actionSlots({
+          stops={stopSlots({
             computing,
             stopping: job?.stopping ?? false,
             unavailable: unavailable !== null,
             atomCount: atoms.length,
           })}
-          onAction={(action) =>
-            action === 'relax' ? relax() : action === 'calculate' ? calculate() : stopCalculation()
-          }
+          onStop={stopCalculation}
         />
 
         <Tabs
@@ -2143,12 +2231,32 @@ export default function App() {
               {/* Advice, not a warning: what is about to be pressed still works, and
                   is not held back (`components/level.ts`). */}
               {advice !== null && <p className="hint level-hint">{advice}</p>}
-              {/* The buttons themselves are at the top of the panel (StatusHeader),
-                  and so is the line for a structure that is part way. */}
+              {/* The tab reads top to bottom as place, choose, run (V6-3). The
+                  stops are at the top of the panel instead, and only while
+                  something runs (StatusHeader): starting a calculation moves
+                  the panel to the observe tab. */}
               <p className="hint">
                 {'「安定な形にする」を押すと、原子どうしが引き合う力・押し合う力を計算して、' +
                   '落ち着く形まで少しずつ動かします。原子の数が多いほど時間がかかります。'}
               </p>
+              <ActionGrid columns={2}>
+                {runSlots({
+                  computing,
+                  unavailable: unavailable !== null,
+                  atomCount: atoms.length,
+                }).map((slot) => (
+                  <RunButton
+                    key={slot.action}
+                    onClick={() => (slot.action === 'relax' ? relax() : calculate())}
+                    disabled={slot.disabled}
+                  >
+                    {slot.label}
+                  </RunButton>
+                ))}
+              </ActionGrid>
+              {!computing && isPartWay(relaxation, solved, stopped) && (
+                <p className="hint">もう一度「安定な形にする」を押すと、ここから続きを計算します。</p>
+              )}
 
               <SearchPanel
                 candidates={candidates}
@@ -2217,7 +2325,7 @@ export default function App() {
                 loading={orbitalLevels === null && density.held && resultLevel === 'shape'}
                 otherLevel={solved && resultLevel !== 'shape'}
                 picked={orbitalPick}
-                onPick={selectOrbital}
+                onPick={pressOrbital}
                 isoLevel={levels.orbital}
                 onIsoLevel={(level) => setLevels((prev) => ({ ...prev, orbital: level }))}
                 character={orbitalCharacter}
@@ -2226,6 +2334,8 @@ export default function App() {
                 // The blobs of the surface that is up now, and only while that
                 // surface is the orbital's: a density's are a different picture.
                 lobes={mesh !== null && mesh.channel === 'orbital' ? mesh.lobes : null}
+                diatomic={atoms.length === 2}
+                correlation={correlation}
               />
 
               {/* Two atoms approaching, which only two atoms can do, so the section
@@ -2249,10 +2359,6 @@ export default function App() {
                     onMarker={moveMarker}
                     onStart={startScan}
                     onStop={stopScan}
-                    atomLevels={freeAtomLevels}
-                    levels={orbitalLevels}
-                    weights={orbitalWeights}
-                    symbols={atoms.map((atom) => symbolOf(atom.z))}
                   />
                 </Fold>
               )}

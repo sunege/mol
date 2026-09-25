@@ -15,7 +15,10 @@
 //! * which orbitals belong to the same degenerate level, which have to be shown
 //!   and thought of as a set: what the diagonalisation returns inside a
 //!   degenerate subspace is an arbitrary rotation of it, so a single member of
-//!   the set is not a thing the molecule has;
+//!   the set is not a thing the molecule has - but the member facing a given
+//!   direction is, and a set can be turned to face one ([`oriented`]);
+//! * the orbitals of each free atom, laid over the molecule's basis, for the
+//!   atomic ends of a correlation diagram ([`atomic_column`]);
 //! * whether an orbital piles electrons up between two nuclei or pushes them
 //!   apart, as a number (the Mulliken overlap population);
 //! * the amplitude just off the plane at each nucleus, which is what turns a pi
@@ -30,9 +33,12 @@
 
 use std::ops::Range;
 
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
 
+use crate::basis::BasisSet;
 use crate::bonding::{self, OrbitalRef};
+use crate::scf::guess::atomic_orbitals;
+use crate::scf::linalg::symmetric_eigen_sorted;
 use crate::scf::{ScfResult, System, OCCUPIED_THRESHOLD};
 
 /// Orbital energies within this of each other belong to one degenerate level,
@@ -64,6 +70,25 @@ pub const DEGENERACY_TOLERANCE: f64 = 1e-4;
 /// magnitude - only which sign each nucleus carries - so the figure is a
 /// vantage point rather than a measurement.
 const PROBE_HEIGHT: f64 = 1.0;
+
+/// Below this, a degenerate set has nothing along the direction it was asked to
+/// face, and [`oriented`] leaves it as it is.
+///
+/// What it is compared with is a sum of squared overlaps between normalised
+/// functions, of order one whenever the set has any p character along the
+/// direction at all; a pi pair asked to face its own bond axis gives zero up to
+/// the grid's small breaking of the symmetry, many orders of magnitude below.
+const NO_P_ALONG: f64 = 1e-8;
+
+/// Why an atomic orbital could not be drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrbitalError {
+    /// The molecule has no atom with this index.
+    NoSuchAtom { atom: usize, atoms: usize },
+    /// The free atom has no orbital with this index: there are as many as it has
+    /// basis functions.
+    NoSuchOrbital { orbital: usize, orbitals: usize },
+}
 
 /// One orbital, as much as can be said about it without evaluating it anywhere.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -201,11 +226,15 @@ pub fn degenerate_groups(orbitals: &[OrbitalInfo]) -> Vec<Range<usize>> {
 ///
 /// An eigenvector is only defined up to its sign, and the diagonalisation picks
 /// one for its own reasons, so the same molecule solved twice can come back with
-/// the lobes of an orbital swapped between the two colours. This is the only
-/// place that decides; ties go to the lower index, and [`ScfResult`] itself is
-/// left exactly as the SCF wrote it.
+/// the lobes of an orbital swapped between the two colours. This and
+/// [`oriented`] are the only places that decide; ties go to the lower index, and
+/// [`ScfResult`] itself is left exactly as the SCF wrote it.
 pub fn signed_column(result: &ScfResult, orbital: OrbitalRef) -> DVector<f64> {
-    let column = result.channels[orbital.channel].coefficients.column(orbital.index);
+    led_positive(result.channels[orbital.channel].coefficients.column(orbital.index).into_owned())
+}
+
+/// The sign convention of [`signed_column`], for any column.
+fn led_positive(column: DVector<f64>) -> DVector<f64> {
     let mut leader = 0;
     for mu in 1..column.len() {
         if column[mu].abs() > column[leader].abs() {
@@ -214,6 +243,167 @@ pub fn signed_column(result: &ScfResult, orbital: OrbitalRef) -> DVector<f64> {
     }
     let sign = if column[leader] < 0.0 { -1.0 } else { 1.0 };
     column * sign
+}
+
+/// The one member of a degenerate set that faces the direction `along`.
+///
+/// `set` holds the set's orbitals as columns, orthonormal in `overlap`. What
+/// the diagonalisation hands back inside a degenerate level is an arbitrary
+/// rotation of it, so "the second pi orbital" is not a thing the molecule has;
+/// "the pi orbital whose lobes point this way" is. The targets are a p function
+/// pointing along `along` on each p shell of each atom, and the combination
+/// wanted is the one that overlaps them most: the top eigenvector `a` of
+///
+/// ```text
+/// M_kl = sum_t (c_k^T S t) (c_l^T S t)
+/// ```
+///
+/// gives `u = C a`, normalised because `C` is. Each atom's p shell is its own
+/// target rather than one target summed over the molecule: a pi* orbital has
+/// opposite signs on the two atoms, and against the sum it would overlap
+/// nothing in any direction.
+///
+/// The sign then puts the positive lobe on the side `along` points to, at the
+/// target it overlaps most. A set of one is not rotated, and a set with no p
+/// function along `along` - a pi pair asked to face its bond - is returned as
+/// its first column; both keep the sign of [`signed_column`].
+pub fn oriented(
+    basis: &BasisSet,
+    overlap: &DMatrix<f64>,
+    set: &DMatrix<f64>,
+    along: [f64; 3],
+) -> DVector<f64> {
+    let first = || led_positive(set.column(0).into_owned());
+    let length = along.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if set.ncols() == 1 || length == 0.0 {
+        return first();
+    }
+    let direction = along.map(|x| x / length);
+
+    // `C^T S t` for every target at once: `S C` restricted to a p shell's rows,
+    // weighted by the direction's components.
+    let sc = overlap * set;
+    let projections: Vec<DVector<f64>> = basis
+        .shells
+        .iter()
+        .enumerate()
+        .filter(|(_, shell)| shell.l == 1)
+        .map(|(s, _)| {
+            let offset = basis.offset(s);
+            (0..3).fold(DVector::zeros(set.ncols()), |sum, c| {
+                sum + sc.row(offset + c).transpose() * direction[c]
+            })
+        })
+        .collect();
+    let m = projections
+        .iter()
+        .fold(DMatrix::zeros(set.ncols(), set.ncols()), |m, p| m + p * p.transpose());
+
+    let (values, vectors) = symmetric_eigen_sorted(m);
+    let top = values.len() - 1;
+    if values[top] < NO_P_ALONG {
+        return first();
+    }
+    let a = vectors.column(top);
+    let u = set * a;
+
+    // `u^T S t = a^T (C^T S t)`: the largest in magnitude decides the sign.
+    let facing = projections
+        .iter()
+        .map(|p| p.dot(&a))
+        .max_by(|x, y| x.abs().total_cmp(&y.abs()))
+        .expect("an eigenvalue above zero needs at least one p shell");
+    if facing < 0.0 {
+        -u
+    } else {
+        u
+    }
+}
+
+/// The degenerate level `index` belongs to, as a range of its channel.
+fn level_of(energies: &DVector<f64>, index: usize) -> Range<usize> {
+    let infos: Vec<OrbitalInfo> = energies
+        .iter()
+        .enumerate()
+        .map(|(i, &energy)| OrbitalInfo {
+            index: i,
+            energy,
+            occupation: 0.0,
+            parity: None,
+            inversion: None,
+        })
+        .collect();
+    degenerate_groups(&infos)
+        .into_iter()
+        .find(|group| group.contains(&index))
+        .expect("every orbital is in exactly one group")
+}
+
+/// One molecular orbital to draw: [`signed_column`] as it is, or - given a
+/// direction - the member of its degenerate level facing that way
+/// ([`oriented`]).
+pub fn molecular_oriented(
+    system: &System,
+    result: &ScfResult,
+    orbital: OrbitalRef,
+    along: Option<[f64; 3]>,
+) -> DVector<f64> {
+    let Some(along) = along else {
+        return signed_column(result, orbital);
+    };
+    let set = &result.channels[orbital.channel];
+    let level = level_of(&set.energies, orbital.index);
+    if level.len() == 1 {
+        return signed_column(result, orbital);
+    }
+    let columns = set.coefficients.columns(level.start, level.len()).into_owned();
+    oriented(&system.basis, &system.overlap, &columns, along)
+}
+
+/// One orbital of the free atom `atom`, as a column over the molecule's basis.
+///
+/// `orbital` counts the free atom's orbitals from the lowest, in the order of
+/// [`crate::scf::guess::atomic_levels`]. The atom is solved on its own in the
+/// molecule's basis and its coefficients are dropped into the atom's block;
+/// every other entry is exactly zero. The block is the free atom's basis
+/// function for function - shells are laid out atom by atom in the same order
+/// - and overlaps between functions on one centre do not depend on where it
+/// is, so the column is normalised in the molecule's overlap as well.
+///
+/// With a direction, the orbital's degenerate level is turned to face it
+/// ([`oriented`], against the free atom's own basis and overlap: the atom sits
+/// at the origin, but a Cartesian p function points the same way wherever it
+/// is). Without one, the column keeps the sign of [`signed_column`].
+pub fn atomic_column(
+    system: &System,
+    atom: usize,
+    orbital: usize,
+    along: Option<[f64; 3]>,
+) -> Result<DVector<f64>, OrbitalError> {
+    let atoms = system.molecule.atoms.len();
+    if atom >= atoms {
+        return Err(OrbitalError::NoSuchAtom { atom, atoms });
+    }
+    let (free, set) = atomic_orbitals(system.molecule.atoms[atom].z, system.kind);
+    let orbitals = set.energies.len();
+    if orbital >= orbitals {
+        return Err(OrbitalError::NoSuchOrbital { orbital, orbitals });
+    }
+
+    let level = level_of(&set.energies, orbital);
+    let local = match along {
+        Some(along) if level.len() > 1 => {
+            let columns = set.coefficients.columns(level.start, level.len()).into_owned();
+            oriented(&free.basis, &free.overlap, &columns, along)
+        }
+        _ => led_positive(set.coefficients.column(orbital).into_owned()),
+    };
+
+    let block = system.basis.atom_range(atom);
+    debug_assert_eq!(block.len(), local.len(), "the atom's block is the free atom's basis");
+    let mut column = DVector::zeros(system.basis.n_functions());
+    column.rows_mut(block.start, block.len()).copy_from(&local);
+    Ok(column)
 }
 
 /// Mulliken overlap population of one orbital between the nuclei `a` and `b`:
@@ -651,5 +841,193 @@ mod tests {
         assert_eq!(groups.iter().map(|g| g.len()).sum::<usize>(), ladder.len());
 
         assert!(degenerate_groups(&[]).is_empty());
+    }
+
+    /// N2 with its bond along neither axis, so that facing a direction is a
+    /// real rotation of the pi pair and not a pick of one Cartesian component.
+    /// `axis` is the bond's direction; `across` are two perpendiculars to it
+    /// and to each other.
+    struct Tilted {
+        molecule: Molecule,
+        axis: [f64; 3],
+        across: [[f64; 3]; 2],
+    }
+
+    fn tilted_nitrogen() -> Tilted {
+        let axis = [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0];
+        let r5 = 5.0_f64.sqrt();
+        let across = [
+            [2.0 / r5, -1.0 / r5, 0.0],
+            [2.0 / (3.0 * r5), 4.0 / (3.0 * r5), -5.0 / (3.0 * r5)],
+        ];
+        let half = 0.55;
+        let molecule = Molecule::from_angstrom(&[
+            (7, axis.map(|x| -half * x)),
+            (7, axis.map(|x| half * x)),
+        ])
+        .unwrap();
+        Tilted { molecule, axis, across }
+    }
+
+    fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    /// Where the p part of `u` on one atom points: `<u|S|p_c>` for the atom's
+    /// first p shell, one component per axis. Read through the overlap, not off
+    /// the coefficients, so it is the same whether or not the basis functions
+    /// of the atom overlap each other.
+    fn p_direction(system: &System, u: &DVector<f64>, atom: usize) -> [f64; 3] {
+        let su = &system.overlap * u;
+        let s = system
+            .basis
+            .shells
+            .iter()
+            .position(|shell| shell.center == atom && shell.l == 1)
+            .expect("nitrogen has a p shell");
+        let offset = system.basis.offset(s);
+        [su[offset], su[offset + 1], su[offset + 2]]
+    }
+
+    /// How far `v` is from lying along the unit vector `d`, relative to its
+    /// length: zero when parallel or antiparallel.
+    fn off_line(v: [f64; 3], d: [f64; 3]) -> f64 {
+        let along = dot3(v, d);
+        let rest = [v[0] - along * d[0], v[1] - along * d[1], v[2] - along * d[2]];
+        dot3(rest, rest).sqrt() / dot3(v, v).sqrt()
+    }
+
+    fn norm_in(system: &System, u: &DVector<f64>) -> f64 {
+        (u.transpose() * &system.overlap * u)[(0, 0)]
+    }
+
+    #[test]
+    fn an_atomic_orbital_sits_in_its_atoms_block_normalised() {
+        let tilted = tilted_nitrogen();
+        let system =
+            System::build(tilted.molecule, BasisKind::Sto3g, GridQuality::Coarse).unwrap();
+        for atom in 0..2 {
+            let block = system.basis.atom_range(atom);
+            for orbital in 0..block.len() {
+                for along in [None, Some(tilted.across[0]), Some(tilted.axis)] {
+                    let u = atomic_column(&system, atom, orbital, along).unwrap();
+                    assert_eq!(u.len(), system.basis.n_functions());
+                    for mu in (0..u.len()).filter(|mu| !block.contains(mu)) {
+                        assert_eq!(u[mu], 0.0, "atom {atom}, orbital {orbital}");
+                    }
+                    assert_relative_eq!(norm_in(&system, &u), 1.0, epsilon = 1e-8);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_atomic_p_level_faces_the_direction_it_is_given() {
+        let tilted = tilted_nitrogen();
+        let system =
+            System::build(tilted.molecule, BasisKind::Sto3g, GridQuality::Coarse).unwrap();
+        // Nitrogen in the minimal basis is 1s, 2s and three 2p.
+        let p = 2..5;
+        let offset = system.basis.atom_range(1).start + 2;
+
+        for orbital in p.clone() {
+            let u = atomic_column(&system, 1, orbital, Some([0.0, 0.0, 1.0])).unwrap();
+            assert!(u[offset].abs() < 1e-8 && u[offset + 1].abs() < 1e-8, "{u}");
+            assert!(u[offset + 2] > 0.5, "the positive lobe points along +z: {u}");
+        }
+
+        let d = {
+            let raw = [0.3, -0.5, 0.8];
+            let n = dot3(raw, raw).sqrt();
+            raw.map(|x| x / n)
+        };
+        let first = atomic_column(&system, 1, p.start, Some(d)).unwrap();
+        for orbital in p {
+            // Any member of the level names the level, and the level faces `d`.
+            let u = atomic_column(&system, 1, orbital, Some(d)).unwrap();
+            assert!((&u - &first).amax() < 1e-12);
+            let v = p_direction(&system, &u, 1);
+            assert!(off_line(v, d) < 1e-8, "{v:?}");
+            assert!(dot3(v, d) > 0.0, "the positive lobe is on the side d points to");
+        }
+    }
+
+    #[test]
+    fn an_atomic_orbital_out_of_range_is_an_error() {
+        let tilted = tilted_nitrogen();
+        let system =
+            System::build(tilted.molecule, BasisKind::Sto3g, GridQuality::Coarse).unwrap();
+        assert_eq!(
+            atomic_column(&system, 2, 0, None),
+            Err(OrbitalError::NoSuchAtom { atom: 2, atoms: 2 })
+        );
+        assert_eq!(
+            atomic_column(&system, 0, 5, Some(tilted.axis)),
+            Err(OrbitalError::NoSuchOrbital { orbital: 5, orbitals: 5 })
+        );
+    }
+
+    /// The pi pair and the pi* pair of a tilted N2, each turned to face two
+    /// perpendicular directions. The pi* pair is the one a single target summed
+    /// over both atoms would get wrong: its lobes have opposite signs on the two
+    /// nitrogens, so it overlaps such a target in no direction at all.
+    #[test]
+    fn a_pi_pair_turns_to_face_each_perpendicular_direction() {
+        let tilted = tilted_nitrogen();
+        let (system, result) = solve(tilted.molecule);
+        let orbitals = &list(&system, &result)[0];
+        let pairs: Vec<_> =
+            degenerate_groups(orbitals).into_iter().filter(|g| g.len() == 2).collect();
+        assert_eq!(pairs.len(), 2, "pi and pi* in the minimal basis");
+
+        for pair in pairs {
+            let at = |index: usize, d: [f64; 3]| {
+                molecular_oriented(&system, &result, OrbitalRef { channel: 0, index }, Some(d))
+            };
+            let [d1, d2] = tilted.across;
+            let (u1, u2) = (at(pair.start, d1), at(pair.start, d2));
+            // Either member of the pair names the pair.
+            assert!((&at(pair.start + 1, d1) - &u1).amax() < 1e-12);
+
+            assert_relative_eq!(norm_in(&system, &u1), 1.0, epsilon = 1e-8);
+            assert_relative_eq!(norm_in(&system, &u2), 1.0, epsilon = 1e-8);
+            assert!((u1.transpose() * &system.overlap * &u2)[(0, 0)].abs() < 1e-6);
+
+            for (u, d) in [(&u1, d1), (&u2, d2)] {
+                let ends = [p_direction(&system, u, 0), p_direction(&system, u, 1)];
+                for v in ends {
+                    // The grid breaks the axial symmetry slightly: 1e-6 measured.
+                    assert!(off_line(v, d) < 1e-5, "pair {pair:?}: {v:?} against {d:?}");
+                }
+                // The positive lobe points along `d` where the orbital is largest.
+                let facing = ends.map(|v| dot3(v, d));
+                let lead = if facing[0].abs() >= facing[1].abs() { facing[0] } else { facing[1] };
+                assert!(lead > 0.0, "pair {pair:?}: {facing:?}");
+            }
+
+            // Asked to face the bond, a pi pair has nothing to turn towards.
+            let along_bond = at(pair.start, tilted.axis);
+            let first = signed_column(&result, OrbitalRef { channel: 0, index: pair.start });
+            assert!((&along_bond - &first).amax() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn a_level_of_one_keeps_the_sign_convention() {
+        let tilted = tilted_nitrogen();
+        let (system, result) = solve(tilted.molecule);
+        let orbitals = &list(&system, &result)[0];
+        for group in degenerate_groups(orbitals) {
+            for index in group.clone() {
+                let orbital = OrbitalRef { channel: 0, index };
+                let signed = signed_column(&result, orbital);
+                assert_eq!(molecular_oriented(&system, &result, orbital, None), signed);
+                if group.len() == 1 {
+                    let turned =
+                        molecular_oriented(&system, &result, orbital, Some(tilted.across[0]));
+                    assert_eq!(turned, signed);
+                }
+            }
+        }
     }
 }

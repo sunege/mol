@@ -15,6 +15,13 @@ describe('the line under the 3D view', () => {
     expect(viewportHint('edit', 12)).toBe(EDIT_HINT);
   });
 
+  it('mentions the axis arrows in the edit tab only', () => {
+    expect(EDIT_HINT).toContain('矢印');
+    expect(OBSERVE_HINT).not.toContain('矢印');
+    // One clause longer than before the arrows, not a second line's worth.
+    expect(EDIT_HINT.length).toBeLessThanOrEqual(60);
+  });
+
   it('describes picking in the observe tab', () => {
     expect(viewportHint('observe', 1)).toBe(OBSERVE_HINT);
     expect(viewportHint('observe', 12)).toBe(OBSERVE_HINT);

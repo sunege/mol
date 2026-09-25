@@ -47,6 +47,16 @@ export class Calculation {
      * shown for is not decided here: that is a rule about the interface, and the
      * interface keeps it.
      *
+     * Two more arguments belong to `"orbital"` alone. `atom` draws one of that
+     * atom's orbitals as a free atom instead of one of the molecule's - the left
+     * and right ends of a correlation diagram - with `index` counting along its
+     * `atomLevels` and `spin` ignored, since a free atom is solved with both
+     * spins together. `along` is a direction: inside a degenerate set the
+     * members are an arbitrary rotation of one another, and this turns the set
+     * so that the member drawn faces it. Only its direction is read, so it has
+     * no unit, but it has to be three numbers that are not all zero; an orbital
+     * that is not degenerate is drawn the same with or without it.
+     *
      * The first call for a channel also samples its density, which is why it is
      * slower than the ones that follow. The same holds for an orbital, except
      * that only the last one asked for is kept.
@@ -54,14 +64,18 @@ export class Calculation {
      * @param {number} iso_level
      * @param {number | null} [index]
      * @param {string | null} [spin]
+     * @param {number | null} [atom]
+     * @param {Float64Array | null} [along]
      * @returns {IsoMesh}
      */
-    isosurface(channel, iso_level, index, spin) {
+    isosurface(channel, iso_level, index, spin, atom, along) {
         const ptr0 = passStringToWasm0(channel, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         var ptr1 = isLikeNone(spin) ? 0 : passStringToWasm0(spin, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len1 = WASM_VECTOR_LEN;
-        const ret = wasm.calculation_isosurface(this.__wbg_ptr, ptr0, len0, iso_level, isLikeNone(index) ? Number.MAX_SAFE_INTEGER : (index) >>> 0, ptr1, len1);
+        var ptr2 = isLikeNone(along) ? 0 : passArrayF64ToWasm0(along, wasm.__wbindgen_malloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.calculation_isosurface(this.__wbg_ptr, ptr0, len0, iso_level, isLikeNone(index) ? Number.MAX_SAFE_INTEGER : (index) >>> 0, ptr1, len1, isLikeNone(atom) ? Number.MAX_SAFE_INTEGER : (atom) >>> 0, ptr2, len2);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }

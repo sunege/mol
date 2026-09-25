@@ -36,6 +36,15 @@ describe('a log that lives in memory', () => {
     expect(await store.load()).toEqual([]);
   });
 
+  it('removes several at once, leaving the rest and ignoring ids it does not have', async () => {
+    const THIRD = fakeRecord({ energy: -74.5, id: 'third', savedAt: '2026-09-20T11:00:00.000Z' });
+    const store = new MemoryRecordStore([FIRST, SECOND, THIRD]);
+    await store.removeMany(['third', 'first', 'nowhere']);
+    expect((await store.load()).map((record) => record.id)).toEqual(['second']);
+    await store.removeMany([]);
+    expect(await store.load()).toHaveLength(1);
+  });
+
   it('hands out copies, so the list a panel holds cannot change underneath it', async () => {
     const store = new MemoryRecordStore([FIRST]);
     (await store.load()).pop();

@@ -14,10 +14,17 @@
  * different from any other - two columns instead of one - and that is the
  * point of it rather than a leak (decision 2).
  *
+ * A molecule of exactly two atoms gets the correlation diagram in the ladder's
+ * place (V6-4): its middle column is the same ladder, with the free atoms it
+ * was made of either side, and its lines are picked from exactly as the
+ * ladder's were. Two figures of one ladder, one above the other, said nothing
+ * the second did not.
+ *
  * The section owns nothing. Which orbital is picked, and the threshold it is
  * cut at, belong to the App beside the density's own: only one surface is ever
  * drawn, so the two selections have to be one decision.
  */
+import { CorrelationDiagram } from './CorrelationDiagram';
 import { Fold } from './Fold';
 import { ISO_RANGES, IsoLevelSlider } from './IsoLevelSlider';
 import { OrbitalLadder } from './OrbitalLadder';
@@ -39,6 +46,7 @@ import {
   type Bond,
   type OrbitalPick,
 } from './orbital';
+import { CORRELATION_HINT, atomPickWords, type CorrelationFigure } from './scan';
 import type { IsoMesh, OrbitalCharacter, OrbitalLevel } from '../worker/protocol';
 
 interface Props {
@@ -63,6 +71,10 @@ interface Props {
   symbols: readonly string[];
   /** The blobs the surface on screen came out in, or null while there is none. */
   lobes: IsoMesh['lobes'] | null;
+  /** Exactly two atoms on screen: the correlation diagram stands in for the ladder. */
+  diatomic: boolean;
+  /** That diagram, or null until the free atoms' levels have arrived as well. */
+  correlation: CorrelationFigure | null;
 }
 
 export function OrbitalPanel({
@@ -79,14 +91,22 @@ export function OrbitalPanel({
   bonds,
   symbols,
   lobes,
+  diatomic,
+  correlation,
 }: Props) {
   // What the picked orbital is like, in the three lines under the ladder. The
   // nodes are counted only for a rung the reflection calls pi: nobody counts
   // the nodes of an arbitrary orbital, and a molecule with no plane has no
   // amplitudes to count them from (`countNodes`).
+  //
+  // A free atom's orbital, pressed on the correlation diagram, has no bond to
+  // talk about: one line says whose it is instead (V6-8), and the blobs are
+  // counted as for any other.
   const rung = rungOf(levels, picked);
+  const atomWords =
+    picked?.atom === undefined ? '' : atomPickWords(correlation, picked, symbols);
   const bondWords =
-    character === null
+    character === null || atomWords !== ''
       ? ''
       : describeBonds(
           character.populations,
@@ -112,7 +132,18 @@ export function OrbitalPanel({
       ) : (
         <>
           <p className="hint">{ORBITAL_INTRO}</p>
-          <OrbitalLadder levels={levels} picked={picked} onPick={onPick} />
+          {!diatomic ? (
+            <OrbitalLadder levels={levels} picked={picked} onPick={onPick} />
+          ) : (
+            <>
+              <p className="hint">{CORRELATION_HINT}</p>
+              {correlation === null ? (
+                <p className="hint">{ORBITAL_LOADING}</p>
+              ) : (
+                <CorrelationDiagram figure={correlation} picked={picked} onPick={onPick} />
+              )}
+            </>
+          )}
           {/* The threshold is the orbital's own, and appears only while one
               is on screen: with none, it would slide nothing. */}
           {picked !== null && (
@@ -130,6 +161,7 @@ export function OrbitalPanel({
                   them, and the last for the surface itself, since the blobs
                   it counts are the ones on screen at this threshold. */}
               <ul className="orbital-character">
+                {atomWords !== '' && <li>{atomWords}</li>}
                 {bondWords !== '' && <li>{bondWords}</li>}
                 {nodes !== null && <li>{describeNodes(nodes)}</li>}
                 {lobeWords !== '' && <li>{lobeWords}</li>}

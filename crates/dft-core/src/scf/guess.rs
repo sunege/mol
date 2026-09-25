@@ -61,17 +61,25 @@ pub fn superposition_of_atomic_densities(system: &System) -> DMatrix<f64> {
 /// Computed rather than tabulated, for the same reason the guess is: changing
 /// the basis set needs no new data.
 pub fn atomic_levels(z: u8, kind: BasisKind) -> Vec<f64> {
-    atomic_scf(z, kind).energies.iter().copied().collect()
+    atomic_orbitals(z, kind).1.energies.iter().copied().collect()
 }
 
 /// Converges one isolated atom with its shells filled spherically.
 fn atomic_density(z: u8, kind: BasisKind) -> DMatrix<f64> {
-    atomic_scf(z, kind).density
+    atomic_orbitals(z, kind).1.density
 }
 
-/// The atomic calculation both of those read: one element, on its own, with its
-/// partly filled shell spread evenly over the degenerate orbitals.
-fn atomic_scf(z: u8, kind: BasisKind) -> OrbitalSet {
+/// The atomic calculation all of those read: one element, on its own at the
+/// origin, with its partly filled shell spread evenly over the degenerate
+/// orbitals.
+///
+/// The system comes back with the orbitals because a drawing of one atomic
+/// orbital needs it: turning a degenerate p set to face a direction is done
+/// against the atom's own basis and overlap ([`crate::orbital::atomic_column`]).
+/// The columns of `coefficients` are in the order of `energies`, ascending -
+/// the order [`atomic_levels`] hands out - since both come out of the same
+/// sorted diagonalisation of the same Kohn-Sham matrix.
+pub fn atomic_orbitals(z: u8, kind: BasisKind) -> (System, OrbitalSet) {
     let molecule = Molecule::new(vec![Atom { z, pos: [0.0; 3] }])
         .expect("a single supported atom is always a valid molecule");
     // A coarse grid is plenty: this density is only a starting point, and a
@@ -90,7 +98,9 @@ fn atomic_scf(z: u8, kind: BasisKind) -> OrbitalSet {
     // A non-converged atom still gives a perfectly serviceable guess, so the
     // flag is deliberately ignored here.
     let mut result = run_restricted(&system, &options);
-    result.channels.pop().expect("a restricted calculation has exactly one set of orbitals")
+    let orbitals =
+        result.channels.pop().expect("a restricted calculation has exactly one set of orbitals");
+    (system, orbitals)
 }
 
 #[cfg(test)]
@@ -211,6 +221,52 @@ mod tests {
             assert_relative_eq!(*level, carbon[2], epsilon = 1e-10);
         }
         assert!(carbon[1] - carbon[0] > 1.0, "the core sits far below the valence");
+    }
+
+    /// The columns of the atomic orbitals are in the order of the levels, which
+    /// is what lets a click on the n-th atomic level draw the n-th column.
+    /// Checked by parity rather than by energy: a lone level of a spherical atom
+    /// is s-like and has nothing on a p shell, and a threefold level is p-like
+    /// and has nothing on an s shell, so a column out of step with its level
+    /// shows up as weight on the wrong shells.
+    #[test]
+    fn atomic_orbital_columns_follow_the_levels() {
+        use crate::orbital::DEGENERACY_TOLERANCE;
+        for kind in KINDS {
+            for z in 1..=crate::element::MAX_Z {
+                let (atom, orbitals) = atomic_orbitals(z, kind);
+                let c = &orbitals.coefficients;
+                let gram = c.transpose() * &atom.overlap * c;
+                let identity = DMatrix::<f64>::identity(c.ncols(), c.ncols());
+                assert!((gram - identity).amax() < 1e-8, "{kind:?}, z = {z}: not orthonormal");
+
+                let e = &orbitals.energies;
+                let mut start = 0;
+                while start < e.len() {
+                    let mut end = start + 1;
+                    while end < e.len() && e[end] - e[start] <= DEGENERACY_TOLERANCE {
+                        end += 1;
+                    }
+                    let silent_l = match end - start {
+                        1 => Some(1),
+                        3 => Some(0),
+                        _ => None,
+                    };
+                    for (s, shell) in atom.basis.shells.iter().enumerate() {
+                        if Some(shell.l) != silent_l {
+                            continue;
+                        }
+                        let block = atom.basis.offset(s)..atom.basis.offset(s + 1);
+                        for i in start..end {
+                            for mu in block.clone() {
+                                assert!(c[(mu, i)].abs() < 1e-6, "{kind:?}, z = {z}, level {i}");
+                            }
+                        }
+                    }
+                    start = end;
+                }
+            }
+        }
     }
 
     #[test]

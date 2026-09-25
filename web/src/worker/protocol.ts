@@ -571,22 +571,6 @@ export type WorkerRequest =
    */
   | { id: number; type: 'orbitalCharacter'; index: number; spin?: SpinChannel }
   /**
-   * Cuts the density of the last `scf` or `optimize` request at a new level.
-   *
-   * The worker keeps one sampled lattice per channel it has been asked for, so
-   * only the first request for each is slow; the rest are marching cubes alone.
-   *
-   * `orbital` and `spin` are for `channel: 'orbital'` and are ignored by the
-   * others: which orbital to draw, as the `first` of an {@link OrbitalLevel}
-   * plus an offset into its `count`, and which spin's ladder that index counts
-   * along. Only the orbital asked for last is kept - one lattice, not one per
-   * orbital, because WebAssembly's linear memory never shrinks - so changing
-   * the threshold of the orbital on screen is as cheap as for a density while
-   * going back to an earlier one is not. Omitting `spin` means `'both'`, which
-   * an open-shell calculation answers with an `error` rather than a guess at
-   * which spin was meant.
-   */
-  /**
    * Solves the same two atoms at `points` separations evenly spaced from `from`
    * to `to`, both in Angstrom, answering with a `scanPoint` for each as it is
    * solved and then one `scanDone`.
@@ -631,6 +615,34 @@ export type WorkerRequest =
    * is about the elements, not about anything on screen.
    */
   | { id: number; type: 'atomLevels'; z: Uint8Array }
+  /**
+   * Cuts the density of the last `scf` or `optimize` request at a new level.
+   *
+   * The worker keeps one sampled lattice per channel it has been asked for, so
+   * only the first request for each is slow; the rest are marching cubes alone.
+   *
+   * `orbital` and `spin` are for `channel: 'orbital'` and are ignored by the
+   * others: which orbital to draw, as the `first` of an {@link OrbitalLevel}
+   * plus an offset into its `count`, and which spin's ladder that index counts
+   * along. Only the orbital asked for last is kept - one lattice, not one per
+   * orbital, because WebAssembly's linear memory never shrinks - so changing
+   * the threshold of the orbital on screen is as cheap as for a density while
+   * going back to an earlier one is not. Omitting `spin` means `'both'`, which
+   * an open-shell calculation answers with an `error` rather than a guess at
+   * which spin was meant.
+   *
+   * `atom` and `along` are for `channel: 'orbital'` too. With `atom`, the orbital
+   * drawn is not the molecule's but one of that atom's as a free atom - an end
+   * of the correlation diagram - and `orbital` then counts along the list
+   * `atomLevels` answers for that element (for N: 0 is 1s, 1 is 2s, 2 to 4 are
+   * the 2p), while `spin` is ignored: a free atom is solved with both spins
+   * together. `along` turns a degenerate set so that the member drawn faces it
+   * (inside the set the members are an arbitrary rotation of one another). Only
+   * its direction is read - no unit, any length - but three zeros are an
+   * `error`; an orbital that is not degenerate is drawn the same without it.
+   * Both share the one kept lattice with every other orbital, so a free atom's
+   * orbital replaces the molecule's on screen and the other way round.
+   */
   | {
       id: number;
       type: 'isosurface';
@@ -638,6 +650,8 @@ export type WorkerRequest =
       isoLevel: number;
       orbital?: number;
       spin?: SpinChannel;
+      atom?: number;
+      along?: [number, number, number];
     };
 
 /**

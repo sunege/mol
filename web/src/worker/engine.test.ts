@@ -58,6 +58,9 @@ const WATER = {
   xyz: new Float64Array([0, 0, 0.1173, 0, 0.7572, -0.4693, 0, -0.7572, -0.4693]),
 };
 
+/** A direction to turn a degenerate set to, as the protocol's `along`. */
+type Direction = [number, number, number];
+
 /** A shape the panel offers, so the molecules here are the ones a user picks. */
 function preset(id: string): SceneAtom[] {
   const found = PRESETS.find((each) => each.id === id);
@@ -616,6 +619,106 @@ describe('the ladder of orbital levels', { timeout: 180_000 }, () => {
     // Omitting the spin on a calculation that solved the two separately is an
     // error rather than a guess at which was meant.
     expect(() => calculation.isosurface('orbital', 0.05, 4)).toThrow('no both orbitals');
+    calculation.free();
+  });
+
+  it('draws a free atom’s orbitals, and turns a degenerate set to face a direction', () => {
+    // N2 along a slanted axis, so that no direction asked for is one of the
+    // coordinate axes the basis's p functions happen to point along.
+    const axis: Direction = [1, 1, 1];
+    const across: Direction = [1, -1, 0];
+    const other: Direction = [1, 1, -2];
+    const half = 1.1 / 2 / Math.sqrt(3);
+    const calculation = scf(
+      new Uint8Array([7, 7]),
+      new Float64Array([-half, -half, -half, half, half, half]),
+    );
+    const drawn = (index: number, spin?: string, atom?: number, along?: number[]) => {
+      const iso = calculation.isosurface(
+        'orbital',
+        0.05,
+        index,
+        spin,
+        atom,
+        along ? Float64Array.from(along) : undefined,
+      );
+      const mesh = {
+        channel: iso.channel,
+        positive: iso.positivePositions,
+        negative: iso.negativePositions,
+        lobes: { positive: iso.lobesPositive, negative: iso.lobesNegative },
+      };
+      iso.free();
+      return mesh;
+    };
+    // Which way an orbital points, read off the picture: from the middle of its
+    // negative lobe to the middle of its positive one.
+    const facing = (mesh: ReturnType<typeof drawn>) => {
+      const middle = (positions: Float32Array) =>
+        [0, 1, 2].map((k) => {
+          let sum = 0;
+          for (let i = k; i < positions.length; i += 3) sum += positions[i];
+          return sum / (positions.length / 3);
+        });
+      const [p, n] = [middle(mesh.positive), middle(mesh.negative)];
+      return [p[0] - n[0], p[1] - n[1], p[2] - n[2]];
+    };
+    const cosine = (a: number[], b: number[]) => {
+      const dot = a.reduce((sum, value, k) => sum + value * b[k], 0);
+      return dot / Math.hypot(...a) / Math.hypot(...b);
+    };
+
+    // The first atom's 2s (N's levels run 1s, 2s, then the three 2p). A free
+    // atom is solved with both spins together, so a spin sent along with it is
+    // not read - even one this closed-shell calculation has no orbitals for.
+    const twoS = drawn(1, 'up', 0);
+    expect(twoS.channel).toBe('orbital');
+    expect(twoS.positive.length).toBeGreaterThan(0);
+
+    // A 2p asked to face the bond, then across it: one lobe of each sign, and
+    // the positive one on the side it was asked to face.
+    for (const along of [axis, across, other]) {
+      const p = drawn(2, undefined, 0, along);
+      expect(p.lobes).toEqual({ positive: 1, negative: 1 });
+      expect(cosine(facing(p), along)).toBeGreaterThan(0.9);
+    }
+    // Any member of the set turned the same way is the same orbital.
+    expect(facing(drawn(4, undefined, 1, across))).toEqual(facing(drawn(2, undefined, 1, across)));
+    // Only the direction is read, so a longer arrow draws the same surface.
+    expect(drawn(2, undefined, 0, [3, 3, 3]).positive).toEqual(
+      drawn(2, undefined, 0, axis).positive,
+    );
+
+    // The molecule's bonding pi pair, turned to face each of the two directions
+    // across the bond: the same rung, two different pictures, each facing the
+    // way it was asked to.
+    const pi = ladder(calculation).find((level) => level.count === 2 && level.occupation > 0)!;
+    const one = drawn(pi.first, undefined, undefined, across);
+    const two = drawn(pi.first, undefined, undefined, other);
+    expect(one.positive).not.toEqual(two.positive);
+    expect(cosine(facing(one), across)).toBeGreaterThan(0.9);
+    expect(cosine(facing(two), other)).toBeGreaterThan(0.9);
+
+    // Moving the threshold of the orbital on screen is marching cubes alone;
+    // turning it is a new lattice. The free atom is solved again as well.
+    const time = (draw: () => void) => {
+      const started = performance.now();
+      draw();
+      return performance.now() - started;
+    };
+    const turned = time(() => calculation.isosurface('orbital', 0.05, 2, undefined, 0).free());
+    const threshold = time(() => calculation.isosurface('orbital', 0.1, 2, undefined, 0).free());
+    expect(threshold).toBeLessThan(turned);
+
+    // What has no direction, and orbitals that are not there, are errors rather
+    // than some other orbital.
+    const refused = (atom: number | undefined, index: number, along?: number[]) => () =>
+      calculation.isosurface('orbital', 0.05, index, undefined, atom, along && Float64Array.from(along));
+    expect(refused(0, 2, [0, 0, 0])).toThrow('cannot be zero');
+    expect(refused(undefined, pi.first, [0, 0, 0])).toThrow('cannot be zero');
+    expect(refused(0, 2, [1, 0])).toThrow('three numbers, not 2');
+    expect(refused(2, 1)).toThrow('atom 2 is past the 2 this molecule has');
+    expect(refused(0, 5)).toThrow('orbital 5 is past the 5 this atom has');
     calculation.free();
   });
 });
