@@ -18,10 +18,12 @@ const REQUESTS: DensitySurface[] = ['total', 'bonding', 'deformation'];
 const said = REQUESTS.flatMap((request) => [
   channelLabel(request),
   channelNote(request),
-  explainChannel(request, null),
-  ...(['total', 'pi', 'deformation'] as DensityChannel[]).map((channel) =>
-    explainChannel(request, drew(channel)),
-  ),
+  ...[false, true].flatMap((hasIons) => [
+    explainChannel(request, null, hasIons),
+    ...(['total', 'pi', 'deformation'] as DensityChannel[]).map((channel) =>
+      explainChannel(request, drew(channel), hasIons),
+    ),
+  ]),
 ]).join(' ');
 
 describe('which surfaces are offered', () => {
@@ -89,6 +91,28 @@ describe('the line under the slider', () => {
     expect(explainChannel('deformation', drew('deformation'))).toBe(
       explainChannel('bonding', drew('deformation')),
     );
+  });
+
+  it('says what the deformation density is measured against once there are ions', () => {
+    // The reference is the atoms and ions as placed, so a bare H+ fills with
+    // electrons and turns blue; the words have to say so, however it was asked for.
+    const withIons = explainChannel('deformation', null, true);
+    expect(withIons).not.toBe(explainChannel('deformation', null));
+    expect(withIons).toContain('イオン');
+    expect(withIons).toContain('H⁺');
+    expect(withIons).toContain('青');
+    expect(explainChannel('bonding', drew('deformation'), true)).toBe(withIons);
+    expect(explainChannel('deformation', drew('deformation'), true)).toBe(withIons);
+  });
+
+  it('keeps the words of the other surfaces when there are ions', () => {
+    expect(explainChannel('total', null, true)).toBe(explainChannel('total', null));
+    expect(explainChannel('bonding', drew('pi'), true)).toBe(explainChannel('bonding', drew('pi')));
+    expect(explainChannel('bonding', null, true)).toBe(explainChannel('bonding', null));
+  });
+
+  it('puts no number on screen, whichever button and whichever answer', () => {
+    expect(said).not.toMatch(/\d/);
   });
 
   it('names no DFT parameter, whichever button and whichever answer (requirement F4)', () => {

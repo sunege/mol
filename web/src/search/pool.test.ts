@@ -81,13 +81,18 @@ function outcome(
 
 const WATER = new Float64Array([0, 0, 0.1173, 0, 0.7572, -0.4693, 0, -0.7572, -0.4693]);
 
-function request(id: string, batch = 'batch-1'): CandidateRequest {
+function request(
+  id: string,
+  batch = 'batch-1',
+  charges = new Int8Array([0, 0, 0]),
+): CandidateRequest {
   return {
     id,
     batch,
     z: new Uint8Array([8, 1, 1]),
     built: WATER,
     start: WATER,
+    charges,
   };
 }
 
@@ -311,6 +316,20 @@ describe('the level a candidate is solved at', () => {
 
     await vi.waitFor(() => expect(workers.length).toBe(1));
     expect((await workers[0].optimizeRequest()).level).toBe('shape');
+    pool.dispose();
+  });
+});
+
+describe('the charges a candidate is solved with', () => {
+  it('are the ones it was given, on the request the worker receives', async () => {
+    // H2O with one hydrogen made H+ (v7): an H3O+ search must not quietly become H3O.
+    const { pool, workers } = setUp(2);
+    pool.add([request('ion', 'batch-1', new Int8Array([0, 1, 0])), request('neutral')]);
+
+    await vi.waitFor(() => expect(workers.length).toBe(2));
+    const [ion, neutral] = await Promise.all(workers.map((worker) => worker.optimizeRequest()));
+    expect(Array.from(ion.charges ?? [])).toEqual([0, 1, 0]);
+    expect(Array.from(neutral.charges ?? [])).toEqual([0, 0, 0]);
     pool.dispose();
   });
 });

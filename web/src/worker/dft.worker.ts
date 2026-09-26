@@ -95,7 +95,13 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         // Timed here rather than in Rust: `std::time::Instant` is not available
         // on wasm32-unknown-unknown.
         const started = performance.now();
-        const calculation = scf(request.z, request.xyz, reportProgress(request.id), request.level);
+        const calculation = scf(
+          request.z,
+          request.xyz,
+          reportProgress(request.id),
+          request.level,
+          request.charges,
+        );
         current?.free();
         current = calculation;
         const result = calculation.summary() as Omit<ScfOutcome, 'elapsedMs'>;
@@ -160,6 +166,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           },
           reportProgress(request.id),
           request.level,
+          request.charges,
         );
         current?.free();
         current = calculation;
@@ -230,10 +237,17 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           request.budgetMs === undefined || request.budgetMs === null
             ? Infinity
             : started + request.budgetMs;
-        scan(request.z, request.from, request.to, request.points, (point: ScanPoint) => {
-          post({ id: request.id, type: 'scanPoint', point });
-          if (performance.now() >= deadline) throw new Error('scan budget');
-        });
+        scan(
+          request.z,
+          request.from,
+          request.to,
+          request.points,
+          (point: ScanPoint) => {
+            post({ id: request.id, type: 'scanPoint', point });
+            if (performance.now() >= deadline) throw new Error('scan budget');
+          },
+          request.charges,
+        );
         post({ id: request.id, type: 'scanDone' });
         break;
       }
@@ -243,7 +257,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         post({
           id: request.id,
           type: 'atomLevels',
-          levels: atomLevels(request.z) as number[][],
+          levels: atomLevels(request.z, request.charges) as number[][],
         });
         break;
       }

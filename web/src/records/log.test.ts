@@ -17,7 +17,8 @@ describe('gathering records into what may be compared', () => {
       fakeRecord({ energy: -74, charge: 1, id: 'ion' }),
     ]);
     expect(groups).toHaveLength(3);
-    expect(groups.map((group) => group.formula).sort()).toEqual(['CH₄', 'H₂O', 'H₂O']);
+    // The ion is called by its charge too (v7): the user put it there.
+    expect(groups.map((group) => group.formula).sort()).toEqual(['CH₄', 'H₂O', 'H₂O⁺']);
   });
 
   it('keeps the two levels of one molecule apart, and says which each is', () => {

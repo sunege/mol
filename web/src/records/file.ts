@@ -15,17 +15,23 @@
  * records already in the browser are left alone.
  */
 import type { OptimizationReason } from '../worker/protocol';
-import { levelOfModel, type RecordSource, type StructureRecord } from './record';
+import { chargesOf, levelOfModel, type RecordSource, type StructureRecord } from './record';
 
 export const LOG_FORMAT = 'mol-structure-log';
 
 /**
  * The version a file written now carries.
  *
- * Nothing reads an older one yet, because there are no older ones: this is the
- * first. A file whose version is not this one is refused rather than guessed
- * at, and when the format does change, this is where the reading of the earlier
- * version goes.
+ * Version 2 (v7) is version 1 with the charge the user put on each atom: every
+ * record carries `charges`, one per atom, each -1 / 0 / +1, adding up to the
+ * total the engine solved for. Version 1 is still read, as records with every
+ * atom neutral - which they were, since atoms had no charges then - and a
+ * `charges` in one is dropped rather than trusted. A record made before v7
+ * (in the browser, without `charges`) is written with every atom neutral, and
+ * since the engine could then pick ±1 on its own, all zeros is the one set of
+ * charges that need not add up to the total. Any other version is refused
+ * rather than guessed at; when the format changes again, the reading of the
+ * earlier ones stays here.
  *
  * Records came to carry their level (V3-5) without a new version, because the
  * shape of a record did not change: the level is read from `model`, which every
@@ -34,7 +40,10 @@ export const LOG_FORMAT = 'mol-structure-log';
  * groups they were in. What changed is that a `model` this program never wrote
  * is now refused, since such a record could not be solved again at its level.
  */
-export const LOG_VERSION = 1;
+export const LOG_VERSION = 2;
+
+/** The versions {@link readStructureLog} lets in. */
+const READABLE_VERSIONS: readonly number[] = [1, LOG_VERSION];
 
 export interface StructureLogFile {
   format: typeof LOG_FORMAT;
@@ -73,7 +82,9 @@ export function writeStructureLog(
     format: LOG_FORMAT,
     version: LOG_VERSION,
     exportedAt: exportedAt.toISOString(),
-    records: [...records],
+    // Records kept in the browser since before v7 have no `charges`: a file
+    // always has them.
+    records: records.map((record) => ({ ...record, charges: chargesOf(record) })),
   };
   return JSON.stringify(file, null, 1) + '\n';
 }
@@ -96,7 +107,7 @@ export function readStructureLog(
     return fail({ kind: 'unreadable' });
   }
   if (!isObject(parsed) || parsed.format !== LOG_FORMAT) return fail({ kind: 'format' });
-  if (parsed.version !== LOG_VERSION) {
+  if (!READABLE_VERSIONS.includes(parsed.version as number)) {
     return fail({
       kind: 'version',
       version: typeof parsed.version === 'number' ? parsed.version : NaN,
@@ -106,7 +117,7 @@ export function readStructureLog(
 
   const records: StructureRecord[] = [];
   for (const [index, raw] of parsed.records.entries()) {
-    const checked = checkRecord(raw, isSupportedElement);
+    const checked = checkRecord(raw, isSupportedElement, parsed.version as number);
     if ('problem' in checked) {
       const problem = checked.problem;
       return fail(problem.kind === 'shape' ? { ...problem, index } : problem);
@@ -149,7 +160,11 @@ type Checked = { record: StructureRecord } | { problem: ImportProblem };
 const REASONS: readonly OptimizationReason[] = ['converged', 'maxSteps', 'interrupted', 'scf'];
 const SOURCES: readonly RecordSource[] = ['manual', 'search'];
 
-function checkRecord(raw: unknown, isSupportedElement: (z: number) => boolean): Checked {
+function checkRecord(
+  raw: unknown,
+  isSupportedElement: (z: number) => boolean,
+  version: number,
+): Checked {
   if (!isObject(raw)) return bad('記録ではありません');
   for (const field of ['id', 'savedAt', 'name', 'model', 'formula'] as const) {
     if (typeof raw[field] !== 'string' || raw[field] === '') return bad(`${field} がありません`);
@@ -176,7 +191,35 @@ function checkRecord(raw: unknown, isSupportedElement: (z: number) => boolean): 
 
   const outcome = checkOutcome(raw.outcome);
   if (outcome !== null) return bad(outcome);
+
+  if (version === 1) {
+    // Neutral atoms, which is what a record without `charges` means.
+    const neutral = { ...raw };
+    delete neutral.charges;
+    return { record: neutral as unknown as StructureRecord };
+  }
+  const total = (raw.outcome as { charge: number }).charge;
+  const charges = checkCharges(raw.charges, raw.z.length, total);
+  if (charges !== null) return bad(charges);
   return { record: raw as unknown as StructureRecord };
+}
+
+/**
+ * Null when `raw` is one charge per atom that adds up to the outcome's total -
+ * or is all neutral, which is how a record from before v7 is written whatever
+ * total the engine picked for it then.
+ */
+function checkCharges(raw: unknown, atoms: number, total: number): string | null {
+  if (!Array.isArray(raw)) return '原子ごとの電荷がありません';
+  if (raw.length !== atoms) return '原子ごとの電荷の数が原子の数と合いません';
+  if (!raw.every((charge) => charge === -1 || charge === 0 || charge === 1)) {
+    return '原子ごとの電荷が −1・0・+1 ではありません';
+  }
+  const sum = raw.reduce((sum: number, charge: number) => sum + charge, 0);
+  if (sum !== total && raw.some((charge) => charge !== 0)) {
+    return '原子ごとの電荷の和が計算結果の電荷と合いません';
+  }
+  return null;
 }
 
 /** Null when the outcome is one this program could have produced. */

@@ -46,7 +46,12 @@ import {
   type Bond,
   type OrbitalPick,
 } from './orbital';
-import { CORRELATION_HINT, atomPickWords, type CorrelationFigure } from './scan';
+import {
+  CORRELATION_HINT,
+  atomPickWords,
+  type CorrelationFigure,
+  type DiagramEnd,
+} from './scan';
 import type { IsoMesh, OrbitalCharacter, OrbitalLevel } from '../worker/protocol';
 
 interface Props {
@@ -69,6 +74,8 @@ interface Props {
   bonds: readonly Bond[];
   /** One symbol per atom, in the order the engine was given them. */
   symbols: readonly string[];
+  /** The two ends of the correlation diagram, ions headed as ions (V7-7). */
+  ends: readonly DiagramEnd[];
   /** The blobs the surface on screen came out in, or null while there is none. */
   lobes: IsoMesh['lobes'] | null;
   /** Exactly two atoms on screen: the correlation diagram stands in for the ladder. */
@@ -90,6 +97,7 @@ export function OrbitalPanel({
   character,
   bonds,
   symbols,
+  ends,
   lobes,
   diatomic,
   correlation,
@@ -104,7 +112,7 @@ export function OrbitalPanel({
   // counted as for any other.
   const rung = rungOf(levels, picked);
   const atomWords =
-    picked?.atom === undefined ? '' : atomPickWords(correlation, picked, symbols);
+    picked?.atom === undefined ? '' : atomPickWords(correlation, picked, ends);
   const bondWords =
     character === null || atomWords !== ''
       ? ''

@@ -153,10 +153,23 @@ impl OpenShellReferences {
 impl OpenShellReference {
     /// The geometry with the charge and multiplicity PySCF was given, so the
     /// engine solves for exactly the same state.
+    ///
+    /// PySCF knows only the total charge, so it is placed on the first atom,
+    /// which can carry it in every reference. Where it sits changes nothing the
+    /// SCF sees; `reference_ions.rs` checks that separately.
     pub fn molecule(&self) -> Molecule {
+        let mut charges = vec![0; self.atoms.len()];
+        charges[0] = self.charge;
+        self.molecule_with(charges)
+    }
+
+    /// The same, with the total charge split over the atoms as given.
+    pub fn molecule_with(&self, charges: Vec<i32>) -> Molecule {
         let atoms = self.atoms.iter().map(|a| Atom { z: a.z, pos: a.pos }).collect();
-        let mut molecule = Molecule::new(atoms).expect("reference geometry must be valid");
-        molecule.charge = self.charge;
+        let mut molecule = Molecule::new(atoms)
+            .and_then(|molecule| molecule.with_atom_charges(charges))
+            .expect("reference geometry must be valid");
+        assert_eq!(molecule.charge, self.charge, "{}: charges do not add up", self.key);
         molecule.multiplicity = self.multiplicity;
         assert_eq!(
             molecule.spin_occupation(),

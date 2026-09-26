@@ -73,13 +73,23 @@ export const PRESETS: Preset[] = [
   { id: 'c6h6', label: 'C₆H₆', atoms: benzene() },
 ];
 
-/** Flattens atoms into the arrays the worker expects. */
-export function toWorkerArrays(atoms: SceneAtom[]): { z: Uint8Array; xyz: Float64Array } {
+/**
+ * Flattens atoms into the arrays the worker expects - the only place they are
+ * made. `charges` is always there, all zeros for a neutral molecule, so the
+ * caller never has to decide whether to send it.
+ */
+export function toWorkerArrays(atoms: SceneAtom[]): {
+  z: Uint8Array;
+  xyz: Float64Array;
+  charges: Int8Array;
+} {
   const z = new Uint8Array(atoms.length);
   const xyz = new Float64Array(atoms.length * 3);
+  const charges = new Int8Array(atoms.length);
   atoms.forEach((atom, i) => {
     z[i] = atom.z;
     xyz.set(atom.pos, i * 3);
+    charges[i] = atom.charge ?? 0;
   });
-  return { z, xyz };
+  return { z, xyz, charges };
 }

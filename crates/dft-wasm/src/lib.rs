@@ -17,7 +17,7 @@ use dft_core::opt;
 use dft_core::orbital::{self, OrbitalInfo};
 use dft_core::scan::{self, ScanPoint};
 use dft_core::scf::{guess, ScfResult, System};
-use dft_core::{element, Molecule};
+use dft_core::{element, GeometryError, Molecule};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -107,13 +107,14 @@ struct StepOutput {
 struct ScfOutput {
     converged: bool,
     iterations: usize,
-    /// The spin multiplicity the engine settled on, and the charge it used.
+    /// The spin multiplicity the engine settled on.
     ///
-    /// Diagnostics, not interface: requirement F4 keeps both off the screen.
-    /// They are here so a developer can confirm from the console that O2 really
-    /// was treated as a triplet, and so phase 5 can hold the state fixed across
-    /// an optimisation.
+    /// Diagnostics, not interface: requirement F4 keeps it off the screen. It
+    /// is here so a developer can confirm from the console that O2 really was
+    /// treated as a triplet.
     multiplicity: u32,
+    /// The total charge solved at: the sum of the charges placed on the atoms,
+    /// exactly as given (the engine no longer chooses one).
     charge: i32,
     /// How many spin states were solved before settling on this one.
     attempts: usize,
@@ -905,8 +906,9 @@ fn basis_for(level: Option<&str>) -> Result<BasisKind, JsValue> {
     }
 }
 
-/// Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
-/// the charge and spin state itself (requirement F4).
+/// Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, at the
+/// charge placed on its atoms and choosing the spin state itself (requirement
+/// F4).
 ///
 /// Non-convergence comes back through `summary().converged`, never as a thrown
 /// error: the UI turns it into an animation rather than a message
@@ -917,16 +919,20 @@ fn basis_for(level: Option<&str>) -> Result<BasisKind, JsValue> {
 ///
 /// `level` is what the calculation is for: `"shape"` (the default) or
 /// `"measure"`. Any other name throws rather than being solved at the default.
+///
+/// `charges` is the charge placed on each atom, in the order of `z`; absent
+/// means every atom is neutral (see [`atom_charges`]).
 #[wasm_bindgen(js_name = scf)]
 pub fn scf(
     z: &[u8],
     xyz_angstrom: &[f64],
     on_progress: Option<js_sys::Function>,
     level: Option<String>,
+    charges: Option<Vec<i8>>,
 ) -> Result<Calculation, JsValue> {
     let on_progress = on_progress.as_ref();
     let kind = basis_for(level.as_deref())?;
-    let molecule = build_molecule(z, xyz_angstrom)?;
+    let molecule = build_molecule(z, xyz_angstrom, charges)?;
     report(on_progress, stage::PREPARING, 0);
     let mut system = System::build(molecule, kind, GridQuality::Medium)
         .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
@@ -964,7 +970,7 @@ const OPTIMIZE_BUDGET_SECONDS: f64 = 1800.0;
 /// Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
 /// structure as it is produced (requirement F2).
 ///
-/// The charge and spin state are chosen once, on the structure as given, and
+/// The spin state is chosen once, on the structure as given, and
 /// held for the whole optimisation: running the search at every geometry would
 /// multiply the cost by the number of states tried, and the state is not what is
 /// being optimised.
@@ -986,6 +992,7 @@ const OPTIMIZE_BUDGET_SECONDS: f64 = 1800.0;
 ///
 /// `level` is what the calculation is for, as for [`scf`], and holds for every
 /// step: the optimiser builds each new geometry in the basis of the one before.
+/// So do `charges`, as for [`scf`].
 #[wasm_bindgen(js_name = optimize)]
 pub fn optimize(
     z: &[u8],
@@ -993,10 +1000,11 @@ pub fn optimize(
     on_step: &js_sys::Function,
     on_progress: Option<js_sys::Function>,
     level: Option<String>,
+    charges: Option<Vec<i8>>,
 ) -> Result<Calculation, JsValue> {
     let on_progress = on_progress.as_ref();
     let kind = basis_for(level.as_deref())?;
-    let molecule = build_molecule(z, xyz_angstrom)?;
+    let molecule = build_molecule(z, xyz_angstrom, charges)?;
     report(on_progress, stage::PREPARING, 0);
     // The spin state is chosen on the grid a single point uses and only the
     // winner is solved again on the optimiser's finer one: the choice does not
@@ -1135,6 +1143,11 @@ struct ScanPointOutput {
 ///
 /// Nothing here holds on to a calculation, so a scan neither replaces nor
 /// disturbs the one the surfaces are being drawn from.
+///
+/// `charges` is the charge on each of the two atoms, as for [`scf`]. The engine
+/// turns charges it refuses into a scan with no points; they are refused here
+/// instead, with the same message a single point would give, so that a caller
+/// is not left drawing an empty figure.
 #[wasm_bindgen(js_name = scan)]
 pub fn scan(
     z: &[u8],
@@ -1142,6 +1155,7 @@ pub fn scan(
     to_angstrom: f64,
     points: usize,
     on_point: &js_sys::Function,
+    charges: Option<Vec<i8>>,
 ) -> Result<(), JsValue> {
     let &[first, second] = z else {
         return Err(JsValue::from_str(&format!(
@@ -1154,6 +1168,15 @@ pub fn scan(
             return Err(JsValue::from_str(&format!("unsupported element {element}")));
         }
     }
+    // Checked on a stand-in geometry: whether the charges can be carried does
+    // not depend on the distance, and this is the one place that says so.
+    let placed = atom_charges(z, charges)?;
+    let &[first_charge, second_charge] = placed.as_slice() else {
+        unreachable!("atom_charges returns one charge per atom");
+    };
+    Molecule::from_angstrom(&[(first, [0.0; 3]), (second, [0.0, 0.0, 1.0])])
+        .and_then(|molecule| molecule.with_atom_charges(placed))
+        .map_err(|e| describe(&e))?;
     // The scan is always at the level a shape is found at, which is what the
     // interface offers it for (`docs/plan-v4.md`); as everywhere else, which
     // basis that means is decided in one place.
@@ -1161,6 +1184,7 @@ pub fn scan(
 
     scan::distance_scan(
         [first, second],
+        [first_charge, second_charge],
         from_angstrom * BOHR_PER_ANGSTROM,
         to_angstrom * BOHR_PER_ANGSTROM,
         points,
@@ -1208,15 +1232,27 @@ pub fn scan(
 /// A few milliseconds per element - it is the same atomic calculation every
 /// molecular SCF already starts from - and at the level the scan beside it runs
 /// at.
+///
+/// `charges` is the charge on each entry of `z`, as for [`scf`]: an ion's levels
+/// are its own (a proton's are all empty, and lower than a hydrogen atom's).
 #[wasm_bindgen(js_name = atomLevels)]
-pub fn atom_levels(z: &[u8]) -> Result<JsValue, JsValue> {
+pub fn atom_levels(z: &[u8], charges: Option<Vec<i8>>) -> Result<JsValue, JsValue> {
     let kind = basis_for(None)?;
+    let charges = atom_charges(z, charges)?;
     let mut levels = Vec::with_capacity(z.len());
-    for &element in z {
+    for (atom, (&element, &charge)) in z.iter().zip(&charges).enumerate() {
         if element::get(element).is_none() {
             return Err(JsValue::from_str(&format!("unsupported element {element}")));
         }
-        levels.push(guess::atomic_levels(element, kind));
+        // The engine solves each element as a molecule of one atom, so the
+        // atom an error names is renumbered to this one's place in `z`.
+        let atom_levels = guess::atomic_levels(element, charge, kind).map_err(|e| match e {
+            GeometryError::UnsupportedAtomCharge { z, charge, .. } => {
+                describe(&GeometryError::UnsupportedAtomCharge { atom, z, charge })
+            }
+            other => describe(&other),
+        })?;
+        levels.push(atom_levels);
     }
     serde_wasm_bindgen::to_value(&levels).map_err(Into::into)
 }
@@ -1226,7 +1262,55 @@ fn to_angstrom(bohr: &[f64]) -> Vec<f64> {
     bohr.iter().map(|value| value * ANGSTROM_PER_BOHR).collect()
 }
 
-fn build_molecule(z: &[u8], xyz_angstrom: &[f64]) -> Result<Molecule, JsValue> {
+/// The charge on each atom as the engine takes it: `charges` widened, or every
+/// atom neutral when it is absent - the one place that default is set, as
+/// [`basis_for`] is for the level.
+///
+/// A list of the wrong length is refused here rather than read short or
+/// padded. Which charges an atom can carry is not checked here: that is
+/// [`Molecule::with_atom_charges`]'s to say, and its refusals reach the caller
+/// through [`describe`].
+fn atom_charges(z: &[u8], charges: Option<Vec<i8>>) -> Result<Vec<i32>, JsValue> {
+    let Some(charges) = charges else {
+        return Ok(vec![0; z.len()]);
+    };
+    if charges.len() != z.len() {
+        return Err(describe(&GeometryError::AtomChargeCount {
+            expected: z.len(),
+            got: charges.len(),
+        }));
+    }
+    Ok(charges.into_iter().map(i32::from).collect())
+}
+
+/// A geometry the engine refused, in words for the console rather than the
+/// `Debug` form of the Rust type, which is not part of the contract.
+fn describe(error: &GeometryError) -> JsValue {
+    let message = match error {
+        GeometryError::Empty => "a molecule needs at least one atom".to_string(),
+        GeometryError::UnsupportedElement { z } => format!("unsupported element {z}"),
+        GeometryError::CoincidentAtoms { a, b } => {
+            format!("atoms {a} and {b} are on top of each other")
+        }
+        GeometryError::NoElectrons => "the total charge leaves no electrons".to_string(),
+        GeometryError::AtomChargeCount { expected, got } => format!(
+            "charges must have one entry per atom: expected {expected}, got {got}"
+        ),
+        GeometryError::UnsupportedAtomCharge { atom, z, charge } => {
+            format!("atom {atom} (element {z}) cannot carry a charge of {charge}")
+        }
+        GeometryError::ChargeMismatch { total, atoms } => format!(
+            "the total charge {total} is not the sum of the atoms' charges {atoms}"
+        ),
+    };
+    JsValue::from_str(&message)
+}
+
+fn build_molecule(
+    z: &[u8],
+    xyz_angstrom: &[f64],
+    charges: Option<Vec<i8>>,
+) -> Result<Molecule, JsValue> {
     if xyz_angstrom.len() != z.len() * 3 {
         return Err(JsValue::from_str(
             "coordinate array length must be three times the atom count",
@@ -1239,5 +1323,8 @@ fn build_molecule(z: &[u8], xyz_angstrom: &[f64]) -> Result<Molecule, JsValue> {
             (zi, [xyz_angstrom[3 * i], xyz_angstrom[3 * i + 1], xyz_angstrom[3 * i + 2]])
         })
         .collect();
-    Molecule::from_angstrom(&atoms).map_err(|e| JsValue::from_str(&format!("{e:?}")))
+    let charges = atom_charges(z, charges)?;
+    Molecule::from_angstrom(&atoms)
+        .and_then(|molecule| molecule.with_atom_charges(charges))
+        .map_err(|e| describe(&e))
 }

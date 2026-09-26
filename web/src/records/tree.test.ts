@@ -88,12 +88,20 @@ describe('the shape of the tree', () => {
     expect(molecule.children.map((level) => level.kind)).toEqual(['level']);
   });
 
-  it('gives groups that differ only by the charge a level node each', () => {
+  it('puts an ion under a molecule of its own, called with its charge (v7)', () => {
     const tree = treeOf([at(0), at(0, { charge: 1 })]);
+    expect(tree.map((molecule) => molecule.formula)).toEqual(['H₂O⁺', 'H₂O']);
+    expect(tree[0].id).not.toBe(tree[1].id);
+    expect(tree.map((molecule) => molecule.children.length)).toEqual([1, 1]);
+  });
+
+  it('gives groups that read the same a level node each', () => {
+    // Two models this program never wrote: both of unknown level, one heading.
+    const tree = treeOf([{ ...at(0), model: 'old/one' }, { ...at(0), model: 'old/two' }]);
     expect(tree).toHaveLength(1);
-    const [neutral, ion] = tree[0].children;
-    expect(neutral.level).toBe(ion.level);
-    expect(neutral.id).not.toBe(ion.id);
+    const [one, two] = tree[0].children;
+    expect(one.level).toBe(two.level);
+    expect(one.id).not.toBe(two.id);
   });
 
   it('orders the molecules newest first by their oldest record', () => {
@@ -244,13 +252,18 @@ describe('the candidates of the search', () => {
     expect(tree[0].children.map((level) => level.level)).toEqual(['shape', 'measure']);
   });
 
-  it('goes under the first of two levels that differ only by the charge', () => {
+  it('goes under the molecule of the charge it asks for', () => {
     const tree = buildRecordTree(groupRecords([at(0), at(0, { charge: 1 })]), [
-      pending('a', 'running'),
+      pending('a', 'running', 'H₂O⁺'),
+      pending('b', 'running'),
     ]);
-    const [first, second] = tree[0].children;
-    expect(first.children[0].kind).toBe('candidate');
-    expect(second.children.some((child) => child.kind === 'candidate')).toBe(false);
+    const heads = (formula: string) =>
+      tree
+        .find((molecule) => molecule.formula === formula)!
+        .children[0].children.filter((child) => child.kind === 'candidate')
+        .map((child) => (child as CandidateNode).candidateId);
+    expect(heads('H₂O⁺')).toEqual(['a']);
+    expect(heads('H₂O')).toEqual(['b']);
   });
 
   it('leaves out the ones that became records', () => {
@@ -282,20 +295,25 @@ describe('the candidates of the search', () => {
 });
 
 describe('the records under a node, for deleting them together (V6-2)', () => {
-  it('are every record of every level under a molecule', () => {
-    const records = [at(0), at(0.2), at(20), at(0, { level: 'measure' }), at(0, { charge: 1 })];
-    const other = at(0, { z: AMMONIA });
-    const water = treeOf([...records, other]).find((m) => m.formula === 'H₂O')!;
+  it('are every record of every level under a molecule, and not its ion', () => {
+    const records = [at(0), at(0.2), at(20), at(0, { level: 'measure' })];
+    const [other, ion] = [at(0, { z: AMMONIA }), at(0, { charge: 1 })];
+    const tree = treeOf([...records, other, ion]);
+    const water = tree.find((m) => m.formula === 'H₂O')!;
     expect(recordIdsUnder(water).sort()).toEqual(records.map((r) => r.id).sort());
+    expect(recordIdsUnder(tree.find((m) => m.formula === 'H₂O⁺')!)).toEqual([ion.id]);
   });
 
   it('are only its own group under a level, of two that read the same', () => {
-    const [neutral, ion] = [at(0), at(0, { charge: 1 })];
-    const [first, second] = treeOf([neutral, at(0.1), ion])[0].children;
+    const [one, two] = [
+      { ...at(0), model: 'old/one' },
+      { ...at(0), model: 'old/two' },
+    ];
+    const [first, second] = treeOf([one, { ...at(0.1), model: 'old/one' }, two])[0].children;
     expect(first.level).toBe(second.level);
     const ids = [recordIdsUnder(first), recordIdsUnder(second)];
-    expect(ids.find((each) => each.includes(ion.id))).toEqual([ion.id]);
-    expect(ids.find((each) => each.includes(neutral.id))).toHaveLength(2);
+    expect(ids.find((each) => each.includes(two.id))).toEqual([two.id]);
+    expect(ids.find((each) => each.includes(one.id))).toHaveLength(2);
   });
 
   it('are none under a level that holds only candidates, and leave candidates out', () => {

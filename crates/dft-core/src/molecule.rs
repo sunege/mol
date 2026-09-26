@@ -23,19 +23,45 @@ pub enum GeometryError {
     CoincidentAtoms { a: usize, b: usize },
     /// The requested charge would leave the system with no electrons at all.
     NoElectrons,
+    /// A list of per-atom charges that is not one per atom.
+    AtomChargeCount { expected: usize, got: usize },
+    /// A charge one atom cannot carry: more than one extra electron, more
+    /// electrons taken away than it has, or any extra electron on a noble gas
+    /// (see [`Molecule::with_atom_charges`]).
+    UnsupportedAtomCharge { atom: usize, z: u8, charge: i32 },
+    /// The total charge is not the sum of the atoms' charges, which the rest of
+    /// the engine relies on. Only reachable by writing `charge` directly.
+    ChargeMismatch { total: i32, atoms: i32 },
 }
+
+/// The elements whose shells are full, so that the minimal basis has no
+/// function for an extra electron to go into: an anion of one of them would be
+/// solved with the electron silently missing (docs/v7, "V7-0 で入ったもの").
+/// Noble gas anions do not exist anyway.
+const NOBLE_GASES: [u8; 3] = [2, 10, 18];
 
 /// Nuclei closer than this (in Bohr) are treated as coincident.
 const MIN_SEPARATION: f64 = 1.0e-3;
 
-/// A non-periodic molecule: nuclei, total charge and spin multiplicity.
+/// A non-periodic molecule: nuclei, the charge placed on each of them, the
+/// total charge and the spin multiplicity.
 ///
-/// `charge` and `multiplicity` are chosen automatically by the driver and are
-/// never exposed to the user, but they are explicit here so the SCF code can be
-/// driven deterministically and tested against reference values.
+/// The charges are the user's: an ion is placed, not inferred, and the total is
+/// solved for exactly as placed. The SCF only ever sees the total - Na+ next to
+/// Cl- is the same calculation as neutral NaCl - and the per-atom split matters
+/// only to what the molecule is compared with: the atomic densities the SCF
+/// starts from and the "moved electrons" surface is drawn against, and the free
+/// atoms at the ends of a correlation diagram. `charge` is always the sum of
+/// `atom_charges`; `validate` checks it.
+///
+/// `multiplicity` is chosen by the driver and never exposed to the user, but it
+/// is explicit here so the SCF code can be driven deterministically and tested
+/// against reference values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Molecule {
     pub atoms: Vec<Atom>,
+    /// Charge placed on each atom, in the order of `atoms`.
+    pub atom_charges: Vec<i32>,
     /// Total charge in units of the elementary charge.
     pub charge: i32,
     /// Spin multiplicity 2S+1.
@@ -46,10 +72,32 @@ impl Molecule {
     /// Builds a neutral molecule from positions given in Bohr, with the
     /// multiplicity guessed from the electron count parity.
     pub fn new(atoms: Vec<Atom>) -> Result<Self, GeometryError> {
-        let mut mol = Molecule { atoms, charge: 0, multiplicity: 1 };
+        let atom_charges = vec![0; atoms.len()];
+        let mut mol = Molecule { atoms, atom_charges, charge: 0, multiplicity: 1 };
         mol.validate()?;
         mol.multiplicity = mol.default_multiplicity();
         Ok(mol)
+    }
+
+    /// The same nuclei with a charge placed on each, one per atom and in the
+    /// same order. The total becomes their sum and the multiplicity is guessed
+    /// afresh from the new electron count.
+    ///
+    /// An atom can lose any of its electrons - a bare proton is an ordinary
+    /// thing to place next to water - but gain at most one, and a noble gas
+    /// none at all; see [`GeometryError::UnsupportedAtomCharge`].
+    pub fn with_atom_charges(mut self, charges: Vec<i32>) -> Result<Self, GeometryError> {
+        if charges.len() != self.atoms.len() {
+            return Err(GeometryError::AtomChargeCount {
+                expected: self.atoms.len(),
+                got: charges.len(),
+            });
+        }
+        self.charge = charges.iter().sum();
+        self.atom_charges = charges;
+        self.validate()?;
+        self.multiplicity = self.default_multiplicity();
+        Ok(self)
     }
 
     /// Builds a neutral molecule from positions given in Angstrom.
@@ -85,6 +133,23 @@ impl Molecule {
                     return Err(GeometryError::CoincidentAtoms { a, b });
                 }
             }
+        }
+        if self.atom_charges.len() != self.atoms.len() {
+            return Err(GeometryError::AtomChargeCount {
+                expected: self.atoms.len(),
+                got: self.atom_charges.len(),
+            });
+        }
+        for (atom, (&Atom { z, .. }, &charge)) in
+            self.atoms.iter().zip(&self.atom_charges).enumerate()
+        {
+            if charge < -1 || charge > z as i32 || (charge < 0 && NOBLE_GASES.contains(&z)) {
+                return Err(GeometryError::UnsupportedAtomCharge { atom, z, charge });
+            }
+        }
+        let atoms = self.atom_charges.iter().sum();
+        if self.charge != atoms {
+            return Err(GeometryError::ChargeMismatch { total: self.charge, atoms });
         }
         if self.n_electrons() < 1 {
             return Err(GeometryError::NoElectrons);
@@ -285,8 +350,74 @@ mod tests {
         o2.multiplicity = 3;
         assert_eq!(o2.spin_occupation(), Some((9, 7)));
         // A triplet is impossible for an odd electron count.
-        o2.charge = 1;
-        assert_eq!(o2.spin_occupation(), None);
+        let mut cation = o2.with_atom_charges(vec![1, 0]).unwrap();
+        assert_eq!(cation.multiplicity, 2, "the guess follows the new electron count");
+        cation.multiplicity = 3;
+        assert_eq!(cation.spin_occupation(), None);
+    }
+
+    #[test]
+    fn atom_charges_add_up_to_the_total() {
+        // H3O+ placed as water and a bare proton.
+        let hydronium = Molecule::from_angstrom(&[
+            (8, [0.0, 0.0, 0.0]),
+            (1, [0.0, 0.94, 0.3]),
+            (1, [0.81, -0.47, 0.3]),
+            (1, [-0.81, -0.47, 0.3]),
+        ])
+        .unwrap()
+        .with_atom_charges(vec![0, 0, 0, 1])
+        .unwrap();
+        assert_eq!(hydronium.charge, 1);
+        assert_eq!(hydronium.atom_charges, vec![0, 0, 0, 1]);
+        assert_eq!(hydronium.n_electrons(), 10);
+        assert_eq!(hydronium.multiplicity, 1);
+
+        // Na+ and Cl- are neutral in total, and the SCF sees them as NaCl.
+        let salt = Molecule::from_angstrom(&[(11, [0.0; 3]), (17, [0.0, 0.0, 2.36])])
+            .unwrap()
+            .with_atom_charges(vec![1, -1])
+            .unwrap();
+        assert_eq!(salt.charge, 0);
+        assert_eq!(salt.n_electrons(), 28);
+    }
+
+    #[test]
+    fn impossible_atom_charges_are_rejected() {
+        let hydrogen = || Molecule::new(vec![Atom { z: 1, pos: [0.0; 3] }]).unwrap();
+        // A bare proton on its own has no electrons to solve for.
+        assert_eq!(hydrogen().with_atom_charges(vec![1]).unwrap_err(), GeometryError::NoElectrons);
+        assert_eq!(
+            hydrogen().with_atom_charges(vec![0, 0]).unwrap_err(),
+            GeometryError::AtomChargeCount { expected: 1, got: 2 }
+        );
+        assert_eq!(
+            hydrogen().with_atom_charges(vec![-2]).unwrap_err(),
+            GeometryError::UnsupportedAtomCharge { atom: 0, z: 1, charge: -2 }
+        );
+        assert_eq!(
+            hydrogen().with_atom_charges(vec![2]).unwrap_err(),
+            GeometryError::UnsupportedAtomCharge { atom: 0, z: 1, charge: 2 }
+        );
+        // The noble gases take no extra electron (the minimal basis has nowhere
+        // to put it), and can still lose one.
+        for z in NOBLE_GASES {
+            let pair = || {
+                Molecule::from_angstrom(&[(1, [0.0; 3]), (z, [0.0, 0.0, 1.5])]).unwrap()
+            };
+            assert_eq!(
+                pair().with_atom_charges(vec![0, -1]).unwrap_err(),
+                GeometryError::UnsupportedAtomCharge { atom: 1, z, charge: -1 }
+            );
+            assert!(pair().with_atom_charges(vec![0, 1]).is_ok());
+        }
+        // Writing the total by hand is caught when the molecule is checked.
+        let mut water = water();
+        water.charge = 1;
+        assert_eq!(
+            water.validate().unwrap_err(),
+            GeometryError::ChargeMismatch { total: 1, atoms: 0 }
+        );
     }
 
     #[test]

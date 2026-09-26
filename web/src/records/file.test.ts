@@ -8,9 +8,23 @@ import {
 } from './file';
 import { fakeRecord, isSupportedElement } from './fixtures';
 import { groupRecords } from './log';
+import { chargesOf, headingOf, type StructureRecord } from './record';
 
 const WATER = fakeRecord({ energy: -74.74311011, id: 'water' });
 const METHANE = fakeRecord({ energy: -39.61713241, z: [6, 1, 1, 1, 1], id: 'methane' });
+/** H₃O⁺: water with a proton put on it, the proton last. */
+const HYDRONIUM = fakeRecord({ energy: -75.1, z: [8, 1, 1, 1], charge: 1, id: 'hydronium' });
+
+/** A record as version 1 wrote it: no `charges`. */
+function asVersion1(record: StructureRecord): Record<string, unknown> {
+  const old: Record<string, unknown> = { ...record };
+  delete old.charges;
+  return old;
+}
+
+function version1FileOf(records: unknown[]) {
+  return fileOf(records, { version: 1 });
+}
 
 /** A file with `records` in it, however malformed those are. */
 function fileOf(records: unknown[], overrides: Record<string, unknown> = {}) {
@@ -49,16 +63,10 @@ describe('writing and reading back', () => {
   });
 
   it('opens a file written before records had levels, into the groups of finding the shape', () => {
-    // Files prepared for a lecture before V3-5: version 1, as now, and every
-    // record with the one model there was. Nothing about them has to change.
-    const before = { ...WATER, model: 'sto-3g/lda-vwn5/fine' };
-    const text = JSON.stringify({
-      format: LOG_FORMAT,
-      version: 1,
-      exportedAt: '2026-09-20T09:00:00.000Z',
-      records: [before],
-    });
-    const result = readStructureLog(text, isSupportedElement);
+    // Files prepared for a lecture before V3-5: version 1, and every record
+    // with the one model there was. Nothing about them has to change.
+    const before = { ...asVersion1(WATER), model: 'sto-3g/lda-vwn5/fine' };
+    const result = readStructureLog(version1FileOf([before]), isSupportedElement);
     expect(result).toEqual({ ok: true, records: [before] });
     if (!result.ok) return;
     expect(groupRecords(result.records)[0].level).toBe('shape');
@@ -90,7 +98,7 @@ describe('refusing a file, with a reason', () => {
   });
 
   it('refuses a version it does not know, and says which', () => {
-    for (const version of [0, 2]) {
+    for (const version of [0, 3]) {
       expect(readStructureLog(fileOf([WATER], { version }), isSupportedElement)).toEqual({
         ok: false,
         problem: { kind: 'version', version },
@@ -165,6 +173,94 @@ describe('refusing a file, with a reason', () => {
     const result = readStructureLog(fileOf([WATER, { ...METHANE, z: [] }]), isSupportedElement);
     expect(result).toMatchObject({ ok: false });
     expect('records' in result).toBe(false);
+  });
+});
+
+describe('the charge on each atom (version 2)', () => {
+  it('writes version 2, with a charge for every atom', () => {
+    const file = JSON.parse(writeStructureLog([WATER, HYDRONIUM]));
+    expect(LOG_VERSION).toBe(2);
+    expect(file.version).toBe(2);
+    expect(file.records.map((record: StructureRecord) => record.charges)).toEqual([
+      [0, 0, 0],
+      [0, 0, 0, 1],
+    ]);
+  });
+
+  it('brings an ion back as the ion it was, heading and all', () => {
+    const result = readStructureLog(writeStructureLog([HYDRONIUM]), isSupportedElement);
+    expect(result).toEqual({ ok: true, records: [HYDRONIUM] });
+    if (!result.ok) return;
+    expect(chargesOf(result.records[0])).toEqual([0, 0, 0, 1]);
+    expect(headingOf(result.records[0])).toBe('H₃O⁺');
+    expect(groupRecords(result.records)[0].formula).toBe('H₃O⁺');
+  });
+
+  it('opens a version 1 file with every atom neutral', () => {
+    const result = readStructureLog(
+      version1FileOf([asVersion1(WATER), asVersion1(METHANE)]),
+      isSupportedElement,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.records.map((record) => record.charges)).toEqual([undefined, undefined]);
+    expect(result.records.map(chargesOf)).toEqual([
+      [0, 0, 0],
+      [0, 0, 0, 0, 0],
+    ]);
+    expect(result.records.map(headingOf)).toEqual(['H₂O', 'CH₄']);
+  });
+
+  it('does not trust charges in a version 1 file, which never wrote any', () => {
+    const result = readStructureLog(version1FileOf([HYDRONIUM]), isSupportedElement);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.records[0].charges).toBeUndefined();
+    expect(chargesOf(result.records[0])).toEqual([0, 0, 0, 0]);
+  });
+
+  it('writes a record from before v7 with every atom neutral, and reads it back', () => {
+    // Kept in the browser without `charges`: one as every record was, and one
+    // the engine could only solve as an ion (before v7 it picked ±1 itself).
+    const neutral = asVersion1(WATER) as unknown as StructureRecord;
+    const picked = asVersion1(HYDRONIUM) as unknown as StructureRecord;
+    const text = writeStructureLog([neutral, picked]);
+    expect(JSON.parse(text).records.map((record: StructureRecord) => record.charges)).toEqual([
+      [0, 0, 0],
+      [0, 0, 0, 0],
+    ]);
+    const result = readStructureLog(text, isSupportedElement);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.records.map(headingOf)).toEqual(['H₂O', 'H₃O⁺']);
+    expect(result.records.map(chargesOf)).toEqual([
+      [0, 0, 0],
+      [0, 0, 0, 0],
+    ]);
+  });
+
+  it.each([
+    ['no charges', asVersion1(HYDRONIUM), '原子ごとの電荷がありません'],
+    [
+      'one charge too few',
+      { ...HYDRONIUM, charges: [0, 0, 1] },
+      '原子ごとの電荷の数が原子の数と合いません',
+    ],
+    [
+      'a charge that is not -1, 0 or +1',
+      { ...HYDRONIUM, charges: [0, 0, 0, 2] },
+      '原子ごとの電荷が −1・0・+1 ではありません',
+    ],
+    [
+      'charges that do not add up to the total',
+      { ...HYDRONIUM, charges: [0, 0, 1, 1] },
+      '原子ごとの電荷の和が計算結果の電荷と合いません',
+    ],
+  ])('refuses a version 2 record with %s, and says which', (_, bad, detail) => {
+    expect(readStructureLog(fileOf([WATER, bad]), isSupportedElement)).toEqual({
+      ok: false,
+      problem: { kind: 'shape', detail, index: 1 },
+    });
   });
 });
 

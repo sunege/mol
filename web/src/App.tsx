@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MoleculeViewer, type SceneAtom } from './scene/viewer';
+import { MoleculeViewer, type AtomCharge, type SceneAtom } from './scene/viewer';
 import { findBonds } from './scene/bonds';
 import { probeWebGl, type WebGlProbe } from './scene/webgl';
 import { keyAction, type ViewerMode } from './scene/gestures';
@@ -7,6 +7,18 @@ import { measureAtoms, toggleMeasured } from './scene/measure';
 import { LiveMeasurement } from './scene/liveMeasurement';
 import { DftWorkerClient, RelaxationStopped } from './worker/workerClient';
 import { PRESETS, toWorkerArrays } from './molecules/presets';
+import { atomsFromFlat, withPositions } from './molecules/atoms';
+import {
+  ANION_CAVEAT,
+  ION_GROUP_LABEL,
+  ION_OPTIONS,
+  chargeOfChoice,
+  choiceOfCharge,
+  hasAnion,
+  hasIons,
+  ionOptions,
+  type IonChoice,
+} from './components/ion';
 import { PeriodicPicker } from './components/PeriodicPicker';
 import { ISO_RANGES, IsoLevelSlider } from './components/IsoLevelSlider';
 import {
@@ -26,6 +38,7 @@ import {
   SCAN_TEASER,
   atomFraction,
   buildCorrelation,
+  diagramEnds,
   scanPairFor,
   type RungMakeup,
   type ScanPair,
@@ -37,9 +50,11 @@ import { divergenceFrames } from './animation/divergence';
 import { FramePlayer } from './animation/framePlayer';
 import { needsNudge, perturb, randomSeed, PERTURB_AMPLITUDE } from './records/perturb';
 import {
+  chargesOf,
   createRecord,
-  hillFormula,
+  headingOf,
   levelOfModel,
+  moleculeHeading,
   type StructureRecord,
 } from './records/record';
 import { groupRecords } from './records/log';
@@ -652,6 +667,28 @@ export default function App() {
     invalidateResult();
   }, [invalidateResult]);
 
+  /**
+   * Makes the selected atom an ion, or neutral again (v7). Only the charge
+   * changes: the positions are where they were, so `handBuilt` - which says
+   * where the positions came from - and the measurements both stay. The answer
+   * on screen was for another molecule, though, so it goes.
+   */
+  const chargeSelected = useCallback(
+    (choice: IonChoice) => {
+      if (selected === null) return;
+      const charge = chargeOfChoice(choice);
+      setAtoms((prev) =>
+        prev.map((atom, i) => {
+          if (i !== selected) return atom;
+          // Neutral carries no `charge` at all, the shape `atoms.ts` builds.
+          return charge === 0 ? { z: atom.z, pos: atom.pos } : { z: atom.z, pos: atom.pos, charge };
+        }),
+      );
+      invalidateResult();
+    },
+    [selected, invalidateResult],
+  );
+
   const pickForMeasuring = useCallback((index: number) => {
     setMeasured((prev) => toggleMeasured(prev, index));
   }, []);
@@ -791,6 +828,7 @@ export default function App() {
           createRecord(
             {
               z: Array.from(candidate.z),
+              charges: candidate.charges,
               built: Array.from(candidate.built),
               trajectory: candidate.trajectory,
               stepEnergies: candidate.stepEnergies,
@@ -839,20 +877,17 @@ export default function App() {
     void storeRef.current?.clear();
   }, []);
 
-  /** Atoms from the flattened pair the records and the search both keep. */
+  /** Atoms from the flattened arrays the records and the search both keep (absent charges: neutral). */
   const atomsOfFlat = useCallback(
-    (z: ArrayLike<number>, xyz: ArrayLike<number>): SceneAtom[] =>
-      Array.from({ length: z.length }, (_, i) => ({
-        z: z[i],
-        pos: [xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]] as [number, number, number],
-      })),
+    (z: ArrayLike<number>, xyz: ArrayLike<number>, charges?: ArrayLike<number>): SceneAtom[] =>
+      atomsFromFlat(z, xyz, charges),
     [],
   );
 
-  /** The atoms of a structure kept in a record, which stores them flattened. */
+  /** The atoms of a structure kept in a record, which stores them flattened - ions and all. */
   const atomsOfRecord = useCallback(
     (record: StructureRecord, xyz: readonly number[]): SceneAtom[] =>
-      atomsOfFlat(record.z, xyz),
+      atomsOfFlat(record.z, xyz, chargesOf(record)),
     [atomsOfFlat],
   );
 
@@ -1212,15 +1247,33 @@ export default function App() {
    * is open - the molecular-orbital one since V6-4, where the diagram stands in
    * for the ladder of two atoms - and only for the two atoms it can be drawn
    * between.
+   *
+   * An atom made into an ion is the free ion at its end (V7-7), so the key is
+   * each atom's number and charge, "1:1,1:0" for H⁺ beside H: a charge moved
+   * from one atom to the other is a different pair of ends.
    */
-  const scanPairKey = atoms.length === 2 ? `${atoms[0].z},${atoms[1].z}` : null;
+  const scanPairKey =
+    atoms.length === 2 ? atoms.map((atom) => `${atom.z}:${atom.charge ?? 0}`).join(',') : null;
+  const scanPairEnds = useMemo(
+    () =>
+      scanPairKey === null
+        ? null
+        : scanPairKey.split(',').map((end) => {
+            const [z, charge] = end.split(':').map(Number);
+            return { z, charge };
+          }),
+    [scanPairKey],
+  );
   useEffect(() => {
     setFreeAtomLevels(null);
     const client = clientRef.current;
-    if (!orbitalsOpen || !client || scanPairKey === null) return;
+    if (!orbitalsOpen || !client || scanPairEnds === null) return;
     let live = true;
     client
-      .atomLevels(new Uint8Array(scanPairKey.split(',').map(Number)))
+      .atomLevels(
+        new Uint8Array(scanPairEnds.map((end) => end.z)),
+        new Int8Array(scanPairEnds.map((end) => end.charge)),
+      )
       .then((levels) => {
         if (live) setFreeAtomLevels(levels);
       })
@@ -1232,7 +1285,7 @@ export default function App() {
     return () => {
       live = false;
     };
-  }, [orbitalsOpen, scanPairKey]);
+  }, [orbitalsOpen, scanPairEnds]);
 
   /**
    * How much of each rung sits on each nucleus, which is what the lines between
@@ -1279,24 +1332,24 @@ export default function App() {
    * The correlation diagram of the two atoms on screen, which the orbital
    * section draws in place of the ladder (V6-4). Only once both ends of it and
    * the molecule between them are in: one end missing would be a different
-   * picture, not a partial one. The symbols come from the same pair of atomic
-   * numbers the free atoms were asked for, so the two cannot disagree.
+   * picture, not a partial one. The headings come from the same atomic
+   * numbers and charges the free atoms were asked for, so the two cannot
+   * disagree.
    */
+  const correlationEnds = useMemo(
+    () => (scanPairEnds === null ? [] : diagramEnds(scanPairEnds, symbolOf)),
+    [scanPairEnds, symbolOf],
+  );
   const correlation = useMemo(
     () =>
-      scanPairKey === null ||
+      correlationEnds.length !== 2 ||
       freeAtomLevels === null ||
       freeAtomLevels.length < 2 ||
       orbitalLevels === null ||
       orbitalLevels.length === 0
         ? null
-        : buildCorrelation(
-            freeAtomLevels,
-            scanPairKey.split(',').map((z) => symbolOf(Number(z))),
-            orbitalLevels,
-            orbitalWeights,
-          ),
-    [scanPairKey, freeAtomLevels, orbitalLevels, orbitalWeights, symbolOf],
+        : buildCorrelation(freeAtomLevels, correlationEnds, orbitalLevels, orbitalWeights),
+    [correlationEnds, freeAtomLevels, orbitalLevels, orbitalWeights],
   );
 
   /**
@@ -1311,21 +1364,22 @@ export default function App() {
       b.pos[1] - a.pos[1],
       b.pos[2] - a.pos[2],
     );
-    return scanPairFor([a.z, b.z], distance);
+    return scanPairFor([a.z, b.z], distance, [a.charge ?? 0, b.charge ?? 0]);
   }, [atoms]);
 
   /**
    * Whether the scan that was run is of the atoms on screen. Moving the marker
-   * keeps them the same elements in the same order; any other edit that leaves
-   * two atoms (another preset, a record, an element changed) makes the figure
-   * about a molecule that is not there, so it is not drawn and its marker cannot
-   * put that other pair back.
+   * keeps them the same elements in the same order, with the same charges; any
+   * other edit that leaves two atoms (another preset, a record, an element or a
+   * charge changed) makes the figure about a molecule that is not there, so it
+   * is not drawn and its marker cannot put that other pair back.
    */
   const scanOnScreen =
     scanPair !== null &&
     screenPair !== null &&
-    scanPair.z[0] === screenPair.z[0] &&
-    scanPair.z[1] === screenPair.z[1];
+    [0, 1].every(
+      (i) => scanPair.z[i] === screenPair.z[i] && scanPair.charges[i] === screenPair.charges[i],
+    );
 
   /**
    * Walks the chosen pair from one separation to the next, drawing as it goes.
@@ -1348,9 +1402,17 @@ export default function App() {
     setScanMarker(null);
     setError(null);
     client
-      .scan(new Uint8Array(pair.z), pair.from, pair.to, pair.points, (point) => {
-        if (scanTokenRef.current === token) setScanPoints((previous) => [...previous, point]);
-      })
+      .scan(
+        new Uint8Array(pair.z),
+        pair.from,
+        pair.to,
+        pair.points,
+        (point) => {
+          if (scanTokenRef.current === token) setScanPoints((previous) => [...previous, point]);
+        },
+        undefined,
+        new Int8Array(pair.charges),
+      )
       .then(() => {
         if (scanTokenRef.current !== token) return;
         scanningRef.current = false;
@@ -1386,7 +1448,7 @@ export default function App() {
         (pickRef.current !== null && orbitalLevels !== null
           ? { pick: pickRef.current, levels: orbitalLevels, direction: directionRef.current }
           : null);
-      const placed = alongTheAxis(atoms, scanPair.z, point.distance);
+      const placed = alongTheAxis(atoms, scanPair, point.distance);
       setAtoms(placed);
       setPresetId(null);
       // A shape this app placed, along the axis the pair is already on: not the
@@ -1431,7 +1493,7 @@ export default function App() {
   const calculate = useCallback((structure: SceneAtom[] = atoms) => {
     const client = clientRef.current;
     if (!client || structure.length === 0) return;
-    const { z, xyz } = toWorkerArrays(structure);
+    const { z, xyz, charges } = toWorkerArrays(structure);
     const token = ++requestRef.current;
     inFlightRef.current = true;
     relaxingRef.current = false;
@@ -1445,7 +1507,7 @@ export default function App() {
     setError(null);
     const onProgress = beginJob('single', token);
     client
-      .scf(z, xyz, onProgress, level)
+      .scf(z, xyz, onProgress, level, charges)
       .then((outcome) => {
         if (requestRef.current !== token) return;
         inFlightRef.current = false;
@@ -1533,7 +1595,7 @@ export default function App() {
     const player = playerRef.current;
     if (!client || !player || atoms.length === 0) return;
     const original = atoms;
-    const { z, xyz } = toWorkerArrays(original);
+    const { z, xyz, charges } = toWorkerArrays(original);
     // A structure the user built by clicking, with every atom in one plane, is
     // one the optimiser cannot leave: it would report the flat shape settled.
     // Nudge it off the plane first. A shape this app supplied - a preset, a
@@ -1580,6 +1642,7 @@ export default function App() {
         // The front worker has no budget of its own: the user stops it.
         null,
         level,
+        charges,
       )
       .then((outcome) => {
         if (requestRef.current !== token) return;
@@ -1611,6 +1674,7 @@ export default function App() {
         const record = createRecord(
           {
             z: Array.from(z),
+            charges,
             built: Array.from(xyz),
             trajectory: stepsRef.current.map((step) => step.xyz),
             stepEnergies: stepsRef.current.map((step) => step.energy),
@@ -1709,14 +1773,14 @@ export default function App() {
     (structure: SceneAtom[], recordLevel: ModelLevel) => {
       const client = clientRef.current;
       if (!client || structure.length === 0) return;
-      const { z, xyz } = toWorkerArrays(structure);
+      const { z, xyz, charges } = toWorkerArrays(structure);
       const token = ++requestRef.current;
       inFlightRef.current = true;
       relaxingRef.current = false;
       setComputing(true);
       const onProgress = beginJob('single', token);
       client
-        .scf(z, xyz, onProgress, recordLevel)
+        .scf(z, xyz, onProgress, recordLevel, charges)
         .then((outcome) => {
           if (requestRef.current !== token) return;
           inFlightRef.current = false;
@@ -1832,10 +1896,11 @@ export default function App() {
     (count: number) => {
       const pool = poolRef.current;
       if (!pool || atoms.length === 0) return;
-      const { z, xyz } = toWorkerArrays(atoms);
+      const { z, xyz, charges } = toWorkerArrays(atoms);
       const source = {
         z,
         xyz,
+        charges,
         covalentRadius: covalentRadiusRef.current,
         batch: crypto.randomUUID(),
         id: () => crypto.randomUUID(),
@@ -1865,7 +1930,7 @@ export default function App() {
         if (record) openRecord(record);
         return;
       }
-      const structure = atomsOfFlat(candidate.z, candidate.start);
+      const structure = atomsOfFlat(candidate.z, candidate.start, candidate.charges);
       if (structure.length === 0) return;
       cancelCalculation();
       stopAnimation();
@@ -1902,6 +1967,10 @@ export default function App() {
 
   // The extra line under the choice of level, when there is one to say.
   const advice = atoms.length === 0 ? null : levelAdvice(level, handBuilt);
+  // The ion row's atom: the selected one, while it is still there.
+  const selectedAtom = selected === null ? undefined : atoms[selected];
+  const ionRow =
+    selected === null || selectedAtom === undefined ? ION_OPTIONS : ionOptions(atoms, selected);
 
   const openedRecord = records.find((record) => record.id === openRecordId) ?? null;
   // A string rather than the record, so the effect below does not run again
@@ -1949,7 +2018,7 @@ export default function App() {
   /** Hands the log to the browser as a file to save. */
   const exportRecords = useCallback(
     (only: string | null) => {
-      const chosen = only === null ? records : records.filter((r) => r.formula === only);
+      const chosen = only === null ? records : records.filter((r) => headingOf(r) === only);
       if (chosen.length === 0) return;
       const url = URL.createObjectURL(
         new Blob([writeStructureLog(chosen)], { type: 'application/json' }),
@@ -2026,10 +2095,16 @@ export default function App() {
   // currently on screen, and that description is true whenever its SCF
   // converged, whether or not the optimiser had time to reach the bottom. What
   // the optimiser managed is a separate line of its own.
-  // The molecule on screen, whose branch of the records tree is open and marked.
-  // The formula alone, because the charge that completes a comparison key
-  // is only known once the engine has chosen one.
-  const currentFormula = atoms.length > 0 ? hillFormula(atoms.map((a) => a.z), symbolOf) : null;
+  // The molecule on screen, whose branch of the records tree is open and marked:
+  // its heading, the formula with the charge the user put on it (H₃O⁺).
+  const currentFormula =
+    atoms.length > 0
+      ? moleculeHeading(
+          atoms.map((a) => a.z),
+          atoms.map((a) => a.charge ?? 0),
+          symbolOf,
+        )
+      : null;
   // What the orbital section may talk about: the bonds the viewer is drawing -
   // a guess from the geometry the engine has never seen (`scene/bonds.ts`) -
   // and one symbol per atom. Computed rather than memoised: a molecule of this
@@ -2216,6 +2291,18 @@ export default function App() {
                   全消去
                 </button>
               </ActionGrid>
+              {/* The ion row (v7): the charge goes on the selected atom. Nothing
+                  selected leaves all three there and disabled, like 削除; which
+                  ones a selected atom cannot take is `ionOptions`. Fixed while a
+                  calculation runs, like the level below. */}
+              <Segmented
+                label={ION_GROUP_LABEL}
+                options={ionRow}
+                value={choiceOfCharge(selectedAtom?.charge)}
+                onChange={chargeSelected}
+                disabled={selectedAtom === undefined || computing}
+              />
+              {hasAnion(atoms) && <p className="hint anion-caveat">{ANION_CAVEAT}</p>}
 
               <h2>次の計算</h2>
               {/* Fixed while a calculation runs: the answer on its way belongs to
@@ -2268,6 +2355,9 @@ export default function App() {
             </TabPanel>
           ) : (
             <TabPanel tab="observe">
+              {/* Next to the numbers in the header, and above everything else in
+                  the tab so that it appearing moves nothing it would cover. */}
+              {hasAnion(atoms) && <p className="hint anion-caveat">{ANION_CAVEAT}</p>}
               <ObservePanel
                 live={liveMeasurement}
                 before={measuredBefore}
@@ -2313,7 +2403,9 @@ export default function App() {
                 disabled={!showDensity || !solved || orbitalPick !== null}
               />
               <p className="hint">
-                {explainChannel(densityRequest, orbitalPick === null ? mesh : null)}
+                {/* Ions are read off the atoms on screen, like `hasPi`, so the words
+                    do not change back while a calculation runs. */}
+                {explainChannel(densityRequest, orbitalPick === null ? mesh : null, hasIons(atoms))}
               </p>
 
               <OrbitalPanel
@@ -2331,6 +2423,7 @@ export default function App() {
                 character={orbitalCharacter}
                 bonds={orbitalBonds}
                 symbols={orbitalSymbols}
+                ends={correlationEnds}
                 // The blobs of the surface that is up now, and only while that
                 // surface is the orbital's: a density's are a different picture.
                 lobes={mesh !== null && mesh.channel === 'orbital' ? mesh.lobes : null}
@@ -2422,11 +2515,11 @@ const MARKER_SETTLE_MS = 400;
  * Along the axis the pair on screen is already on, about the middle of it, so
  * that dragging the marker stretches the molecule the user is looking at rather
  * than swinging it into some other orientation. The pair is always the one on
- * screen (V5-11), so the elements are the ones already there.
+ * screen (V5-11), so the elements - and the charges on them - are the ones already there.
  */
 function alongTheAxis(
   atoms: readonly SceneAtom[],
-  z: readonly [number, number],
+  { z, charges }: Pick<ScanPair, 'z' | 'charges'>,
   distance: number,
 ): SceneAtom[] {
   const a = atoms[0]?.pos ?? [0, 0, 0];
@@ -2440,23 +2533,10 @@ function alongTheAxis(
     middle[1] + sign * along[1] * distance * 0.5,
     middle[2] + sign * along[2] * distance * 0.5,
   ];
-  return [
-    { z: z[0], pos: place(-1) },
-    { z: z[1], pos: place(1) },
-  ];
-}
-
-/**
- * The same atoms at new positions, which is what a finished relaxation returns.
- *
- * Elements never change - only the optimiser's coordinates do - so the element
- * list comes from the structure that went in.
- */
-function withPositions(atoms: SceneAtom[], xyz: number[]): SceneAtom[] {
-  return atoms.map((atom, i) => ({
-    z: atom.z,
-    pos: [xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]] as [number, number, number],
-  }));
+  // The ions stay the ions they were (V7-7); neutral carries no `charge` at all.
+  const atom = (i: 0 | 1, pos: [number, number, number]): SceneAtom =>
+    charges[i] === 0 ? { z: z[i], pos } : { z: z[i], pos, charge: charges[i] as AtomCharge };
+  return [atom(0, place(-1)), atom(1, place(1))];
 }
 
 /**

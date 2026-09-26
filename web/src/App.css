@@ -95,6 +95,24 @@
   white-space: nowrap;
 }
 
+/* The + / − on an ion (V7-5), a round badge at the atom's upper right. Not
+   blue or red: those are the deformation density's colours, and a mark in
+   them would read as where electrons went. */
+.charge-badge {
+  display: grid;
+  place-items: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 1px solid #2d3644;
+  border-radius: 50%;
+  background: #151a21;
+  color: #d6dde8;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
 /* A column of a head that stays and a body that scrolls (V5-2): the state and
    the two main buttons never scroll out of reach, however far down the body
    is read. Not `position: sticky`, so that the tabs of V5-3 can sit between
@@ -706,6 +724,12 @@
 }
 
 .hint.level-hint {
+  margin: 6px 0 10px;
+}
+
+/* Under the ion row, and at the top of the observe tab (v7): weak text like
+   every hint, set close to what it is about. */
+.hint.anion-caveat {
   margin: 6px 0 10px;
 }
 

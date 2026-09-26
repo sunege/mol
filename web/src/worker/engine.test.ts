@@ -814,6 +814,141 @@ describe('a distance scan', { timeout: 180_000 }, () => {
 });
 
 /**
+ * Hydronium: oxygen with three hydrogens around it in a shallow pyramid.
+ *
+ * Built from angles rather than copied from anywhere, as `PLANAR_AMMONIA` is:
+ * a single point only needs a geometry that is plausibly a molecule.
+ */
+const HYDRONIUM = {
+  z: new Uint8Array([8, 1, 1, 1]),
+  xyz: new Float64Array([
+    0,
+    0,
+    0,
+    ...[0, 1, 2].flatMap((i) => {
+      const around = (2 * Math.PI * i) / 3;
+      const down = (110 * Math.PI) / 180;
+      return [
+        0.98 * Math.sin(down) * Math.cos(around),
+        0.98 * Math.sin(down) * Math.sin(around),
+        0.98 * Math.cos(down),
+      ];
+    }),
+  ]),
+};
+
+// The charge on each atom (docs/v7): the SCF solves the total, and the split is
+// what the molecule is compared with.
+describe('the charges placed on the atoms', { timeout: 120_000 }, () => {
+  const solve = (charges?: Int8Array) => {
+    const calculation = scf(HYDRONIUM.z, HYDRONIUM.xyz, undefined, undefined, charges);
+    const summary = calculation.summary() as { converged: boolean; charge: number; energy: number };
+    return { calculation, summary };
+  };
+
+  /** The extremes and the size of a deformation surface, which is what differs. */
+  const deformation = (calculation: Calculation) => {
+    const iso = calculation.isosurface('deformation', 0.02);
+    const drawn = {
+      channel: iso.channel,
+      min: iso.densityMin,
+      max: iso.densityMax,
+      vertices: iso.positivePositions.length + iso.negativePositions.length,
+    };
+    iso.free();
+    return drawn;
+  };
+
+  it('solves hydronium at the total placed, and it is not the neutral radical', () => {
+    const cation = solve(new Int8Array([0, 1, 0, 0]));
+    expect(cation.summary.converged).toBe(true);
+    expect(cation.summary.charge).toBe(1);
+    const radical = solve();
+    expect(radical.summary.charge).toBe(0);
+    // One electron more is a different molecule; how different is not the
+    // point, only that the charge reached the SCF.
+    expect(Math.abs(cation.summary.energy - radical.summary.energy)).toBeGreaterThan(0.01);
+    cation.calculation.free();
+    radical.calculation.free();
+  });
+
+  it('draws electrons moved from the ions as placed, and solves the same molecule', () => {
+    const proton = solve(new Int8Array([0, 1, 0, 0]));
+    const oxygen = solve(new Int8Array([1, 0, 0, 0]));
+    // The SCF sees only the total and starts from neutral atoms, so the two are
+    // the same calculation to the bit.
+    expect(oxygen.summary.energy).toBe(proton.summary.energy);
+    const fromProton = deformation(proton.calculation);
+    const fromOxygen = deformation(oxygen.calculation);
+    expect(fromProton.channel).toBe('deformation');
+    expect(fromOxygen.channel).toBe('deformation');
+    expect(fromProton).not.toEqual(fromOxygen);
+    // Against O⁺ the oxygen is missing an electron that the molecule has
+    // around it, so the density gained peaks higher, where the oxygen is.
+    expect(fromOxygen.max).toBeGreaterThan(fromProton.max);
+    proton.calculation.free();
+    oxygen.calculation.free();
+  });
+
+  it('gives a free ion its own levels, and a proton one empty level', () => {
+    const [proton] = atomLevels(new Uint8Array([1]), new Int8Array([1])) as number[][];
+    const [hydrogen] = atomLevels(new Uint8Array([1])) as number[][];
+    expect(proton).toHaveLength(1);
+    expect(proton[0]).not.toBe(hydrogen[0]);
+    const ions = new Int8Array([1, -1]);
+    const [cation, anion] = atomLevels(new Uint8Array([8, 8]), ions) as number[][];
+    const [neutral] = atomLevels(new Uint8Array([8])) as number[][];
+    // An ion's electrons are held more tightly the fewer of them there are.
+    expect(cation[0]).toBeLessThan(neutral[0]);
+    expect(anion[0]).toBeGreaterThan(neutral[0]);
+  });
+
+  it('scans a charged pair, the same whichever atom the charge was put on', () => {
+    const walk = (charges?: Int8Array) => {
+      const collected: ScanPoint[] = [];
+      const collect = (point: ScanPoint) => void collected.push(point);
+      scan(new Uint8Array([1, 1]), 0.6, 1.2, 3, collect, charges);
+      return collected;
+    };
+    const left = walk(new Int8Array([1, 0]));
+    const right = walk(new Int8Array([0, 1]));
+    expect(left).toHaveLength(3);
+    expect(left.every((point) => point.converged)).toBe(true);
+    expect(right.map((point) => point.energy)).toEqual(left.map((point) => point.energy));
+    expect(left[0].energy).not.toBe(walk()[0].energy);
+  });
+
+  it('refuses charges that are not one per atom, or that leave no electrons', () => {
+    const one = (charge: number) => new Int8Array([charge]);
+    const alone = (z: number) => [new Uint8Array([z]), new Float64Array(3)] as const;
+    const pair = new Uint8Array([1, 1]);
+    const refusals: [() => unknown, string][] = [
+      [() => scf(WATER.z, WATER.xyz, undefined, undefined, one(1)), 'one entry per atom'],
+      [
+        () => optimize(WATER.z, WATER.xyz, () => undefined, undefined, undefined, new Int8Array(2)),
+        'one entry per atom',
+      ],
+      [() => scan(pair, 0.6, 1.2, 3, () => undefined, one(1)), 'one entry per atom'],
+      [() => atomLevels(new Uint8Array([1, 8]), one(0)), 'one entry per atom'],
+      [() => scf(...alone(1), undefined, undefined, one(1)), 'leaves no electrons'],
+      [
+        () => scan(pair, 0.6, 1.2, 3, () => undefined, new Int8Array([1, 1])),
+        'leaves no electrons',
+      ],
+      [
+        () => scf(...alone(2), undefined, undefined, one(-1)),
+        'atom 0 (element 2) cannot carry a charge of -1',
+      ],
+      [
+        () => atomLevels(new Uint8Array([1, 10]), new Int8Array([0, -1])),
+        'atom 1 (element 10) cannot carry a charge of -1',
+      ],
+    ];
+    for (const [call, message] of refusals) expect(call).toThrow(message);
+  });
+});
+
+/**
  * Ammonia with its three hydrogens in a plane through the nitrogen, which is
  * the shape a user builds by clicking without turning the camera.
  *

@@ -26,8 +26,13 @@ export interface FakeRelaxation {
   energy: number;
   /** How the optimiser stopped; it settled unless the test says otherwise. */
   reason?: OptimizationReason;
-  /** The charge the engine had to choose, which splits comparable sets. */
+  /** The molecule's total charge, which splits comparable sets. */
   charge?: number;
+  /**
+   * The charge on each atom. By default the total sits on the last atom (one
+   * of water's hydrogens made H⁺), so the two agree as a file requires.
+   */
+  charges?: number[];
   /** What it was solved for, which splits them too; "形を探す" unless said. */
   level?: ModelLevel;
   savedAt?: string;
@@ -63,9 +68,12 @@ export function fakeOutcome(relaxation: FakeRelaxation, xyz: number[]): ScfOutco
 export function fakeRecord(relaxation: FakeRelaxation): StructureRecord {
   const z = relaxation.z ?? [8, 1, 1];
   const xyz = Array.from({ length: z.length * 3 }, (_, i) => i * 0.1);
+  const last = z.length - 1;
+  const charges = relaxation.charges ?? z.map((_, i) => (i === last ? (relaxation.charge ?? 0) : 0));
   return createRecord(
     {
       z,
+      charges,
       built: xyz,
       trajectory: [xyz, xyz],
       stepEnergies: [relaxation.energy + 0.01, relaxation.energy],

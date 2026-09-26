@@ -106,12 +106,18 @@ describe('the words of the tree', () => {
       { ...fakeRecord({ energy: BOTTOM, id: 'odd' }), model: 'sto-3g/lda-vwn5/medium' },
     ]),
   );
-  const [water] = tree;
-  const [shape, measure, ion, other] = water.children;
+  const [water, ion] = tree;
+  const [shape, measure, other] = water.children;
 
   it('counts the records of a molecule beside its formula', () => {
     expect(water.formula).toBe('H₂O');
-    expect(formulaMeta(water)).toBe('8');
+    expect(formulaMeta(water)).toBe('7');
+  });
+
+  it('names an ion with its charge, as a molecule of its own (v7)', () => {
+    expect(ion.formula).toBe('H₂O⁺');
+    expect(formulaMeta(ion)).toBe('1');
+    expect(levelHeading(ion.children[0].level)).toBe('形を測る');
   });
 
   it('names a level and counts it, with the shapes once there are two', () => {
@@ -130,20 +136,18 @@ describe('the words of the tree', () => {
   });
 
   it('asks before deleting a molecule or a level, naming it and counting (V6-2)', () => {
-    expect(deleteConfirm(deleteWhat(water), 8)).toBe('H₂O の記録を 8 件消します。よろしいですか？');
+    expect(deleteConfirm(deleteWhat(water), 7)).toBe('H₂O の記録を 7 件消します。よろしいですか？');
     expect(deleteConfirm(deleteWhat(water, shape), 5)).toBe(
       'H₂O の「形を探す」の記録を 5 件消します。よろしいですか？',
     );
     expect(deleteWhat(water, other)).toBe('H₂O の「ほかの計算」');
-    // The two groups that differ by the charge are named alike.
-    expect(deleteWhat(water, ion)).toBe(deleteWhat(water, measure));
+    // An ion is its own molecule, named with its charge.
+    expect(deleteWhat(ion, ion.children[0])).toBe('H₂O⁺ の「形を測る」');
+    expect(deleteWhat(ion, ion.children[0])).not.toBe(deleteWhat(water, measure));
   });
 
-  it('names no DFT parameter and no group key, even with two charges (requirement F4)', () => {
-    // Two groups at one level that differ by the charge read the same.
-    expect(levelHeading(ion.level)).toBe(levelHeading(measure.level));
-    expect(levelMeta(ion.group!)).toBe(levelMeta(measure.group!));
-
+  it('names no DFT parameter and no group key, with an ion among them (requirement F4)', () => {
+    // The charge is shown as a superscript after the formula, never as a word.
     const words: string[] = [];
     for (const molecule of tree) {
       words.push(molecule.formula, formulaMeta(molecule));
@@ -161,11 +165,20 @@ describe('the words of the tree', () => {
       }
     }
     words.push(...Object.values(EXPLORER_WORDS));
-    words.push(deleteConfirm(deleteWhat(water), 8));
-    for (const level of water.children) words.push(deleteConfirm(deleteWhat(water, level), 1));
+    for (const molecule of tree) {
+      words.push(deleteConfirm(deleteWhat(molecule), 8));
+      for (const level of molecule.children) {
+        words.push(deleteConfirm(deleteWhat(molecule, level), 1));
+      }
+    }
     const text = words.join('\n').toLowerCase();
+    expect(text).toContain('h₂o⁺');
     for (const word of [...FORBIDDEN, 'STO', '6-31']) expect(text).not.toContain(word.toLowerCase());
-    for (const level of water.children) expect(text).not.toContain(level.group!.key.toLowerCase());
+    for (const molecule of tree) {
+      for (const level of molecule.children) {
+        expect(text).not.toContain(level.group!.key.toLowerCase());
+      }
+    }
   });
 });
 

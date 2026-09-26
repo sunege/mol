@@ -36,6 +36,8 @@ export interface SegmentedOption<T extends string> {
   label: string;
   /** Shown on hover, for when the label alone is terse. */
   title?: string;
+  /** This one choice cannot be made right now; the rest of the row still can. */
+  disabled?: boolean;
 }
 
 export interface SegmentedProps<T extends string> {
@@ -71,7 +73,7 @@ export function Segmented<T extends string>({
           className={classes('btn', small && 'small', option.value === value && 'active')}
           aria-pressed={option.value === value}
           title={option.title}
-          disabled={disabled}
+          disabled={disabled || option.disabled}
           onClick={() => onChange(option.value)}
         >
           {option.label}

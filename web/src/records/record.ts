@@ -7,14 +7,16 @@
  * valleys a molecule fell into - which is the point of the log: not archiving,
  * but "you started it there and it came out here, and this one is deeper".
  *
- * Two things in a record are diagnostics rather than interface. The whole
- * `ScfOutcome` is kept, charge and multiplicity included, because a record has
- * to reproduce what was on screen; requirement F4 keeps those off the screen,
- * here as everywhere else. The charge is also the one DFT parameter the log
- * *uses*: two runs of the same atoms that the engine had to give different
- * charges are not the same system and their energies cannot be subtracted, so
- * it goes into {@link comparisonKey} without ever being shown.
+ * The whole `ScfOutcome` is kept, multiplicity included, because a record has
+ * to reproduce what was on screen; requirement F4 keeps the multiplicity off
+ * the screen, here as everywhere else. The charge is not a diagnostic since v7:
+ * the user put it on the atoms (`charges`, one per atom), so it is part of what
+ * they built, and the molecule's heading carries the total (H₃O⁺,
+ * {@link headingOf}). Two runs of the same atoms with different totals are not
+ * the same system and their energies cannot be subtracted, so the total goes
+ * into {@link comparisonKey} too.
  */
+import { formulaWithCharge } from '../components/ion';
 import type { ModelLevel, ScfOutcome } from '../worker/protocol';
 
 /**
@@ -72,10 +74,19 @@ export interface StructureRecord {
    * rather than kept beside it, so the two cannot disagree.
    */
   model: string;
-  /** Hill formula, with subscript digits, as the interface spells it. */
+  /**
+   * Hill formula, with subscript digits, as the interface spells it - without
+   * the charge, which {@link headingOf} adds.
+   */
   formula: string;
   /** Atomic numbers, in the order every coordinate list below uses. */
   z: number[];
+  /**
+   * The charge the user put on each atom (-1 / 0 / +1), in the order of `z`
+   * (v7, file version 2). Absent in a record made before then, which means
+   * every atom neutral: read it through {@link chargesOf} and nowhere else.
+   */
+  charges?: number[];
   /** The structure the user built, in Angstrom - before the nudge. */
   built: number[];
   /**
@@ -117,14 +128,46 @@ export function isSettled(record: StructureRecord): boolean {
 }
 
 /**
+ * The charge on each atom, in the order of `z`: the record's own, or all
+ * neutral for one made before atoms had charges (file version 1).
+ */
+export function chargesOf(record: StructureRecord): number[] {
+  return record.charges ? [...record.charges] : record.z.map(() => 0);
+}
+
+/**
+ * What the molecule of a record is called on screen: its formula and the total
+ * charge (H₃O⁺). The total is the one the engine solved for, `outcome.charge`,
+ * rather than the sum of `charges`: the two agree for every record made since
+ * v7, and for one from before, when the engine could still pick ±1 on its own,
+ * the heading then says what was actually calculated.
+ */
+export function headingOf(record: StructureRecord): string {
+  return formulaWithCharge(record.formula, record.outcome.charge);
+}
+
+/**
+ * The same heading for atoms that are not a record (yet): the molecule on
+ * screen, or a candidate of the search, whose total is the one it asks for.
+ */
+export function moleculeHeading(
+  z: ArrayLike<number>,
+  charges: ArrayLike<number>,
+  symbolOf: (z: number) => string,
+): string {
+  const total = Array.from(charges).reduce((sum, charge) => sum + charge, 0);
+  return formulaWithCharge(hillFormula(Array.from(z), symbolOf), total);
+}
+
+/**
  * The records that may be compared with this one: same molecule, same charge,
  * same engine - which includes the same level, since each level is its own
  * {@link engineModel}.
  *
  * Same molecule means the same formula, not the same structure - that is the
- * whole point. Charge is in here because the engine picks it: a molecule it
- * could only solve as an ion has a different number of electrons, and the
- * energies are not differences of the same thing. It never reaches the screen.
+ * whole point. Charge is in here because an ion has a different number of
+ * electrons, and the energies are not differences of the same thing. It is the
+ * total, as in the heading: Na⁺ + Cl⁻ is the same calculation as neutral NaCl.
  */
 export function comparisonKey(record: StructureRecord): string {
   return `${record.model}|${record.outcome.charge}|${record.formula}`;
@@ -158,9 +201,9 @@ function subscript(n: number): string {
 }
 
 /**
- * What a new record is called until someone renames it: the formula and the
- * time of day, which is what tells two runs of the same molecule apart during a
- * lecture.
+ * What a new record is called until someone renames it: the formula (with its
+ * charge, {@link headingOf}) and the time of day, which is what tells two runs
+ * of the same molecule apart during a lecture.
  */
 export function defaultRecordName(formula: string, savedAt: Date): string {
   const two = (n: number) => String(n).padStart(2, '0');
@@ -170,6 +213,8 @@ export function defaultRecordName(formula: string, savedAt: Date): string {
 /** Everything about a finished relaxation that only the App knows. */
 export interface RecordDraft {
   z: number[];
+  /** The charge on each atom, in the order of `z`; always written. */
+  charges: ArrayLike<number>;
   built: number[];
   /** As the steps arrived, in Angstrom. */
   trajectory: ArrayLike<number>[];
@@ -197,10 +242,11 @@ export function createRecord(
   return {
     id,
     savedAt: savedAt.toISOString(),
-    name: defaultRecordName(formula, savedAt),
+    name: defaultRecordName(formulaWithCharge(formula, draft.outcome.charge), savedAt),
     model: engineModel(draft.level),
     formula,
     z: [...draft.z],
+    charges: Array.from(draft.charges),
     built: [...draft.built],
     trajectory: draft.trajectory.map((frame) => Array.from(frame, roundStep)),
     stepEnergies: [...draft.stepEnergies],

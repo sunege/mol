@@ -15,6 +15,7 @@ import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer
 import { findBonds } from './bonds';
 import { dashLayout } from './dashes';
 import { axisDragPosition, axisParameter, handleLength, type Vec3 } from './axisDrag';
+import { badgeAnchor } from './badges';
 import { clickAction, pressAction, type Axis, type HandleHit, type ViewerMode } from './gestures';
 import {
   distance,
@@ -25,12 +26,24 @@ import {
   type Measurement,
 } from './measure';
 import type { CameraAxes } from '../components/orient';
+import { badgeText } from '../components/ion';
 import type { ElementInfo, IsoMesh, SurfaceGeometry } from '../worker/protocol';
+
+/** The charge a user can put on one atom (v7). */
+export type AtomCharge = -1 | 0 | 1;
 
 export interface SceneAtom {
   z: number;
   /** Position in Angstrom. */
   pos: [number, number, number];
+  /**
+   * The ion this atom was made into; absent is neutral. The charge sits on the
+   * atom, but the engine's SCF uses only the molecule's total: Na+ next to Cl-
+   * is the same calculation as neutral NaCl. The per-atom value matters only
+   * for the reference of the deformation density (the separated atoms and ions
+   * as placed) and for the free-atom side of the correlation diagram.
+   */
+  charge?: AtomCharge;
 }
 
 /** Spheres are drawn well inside their van der Waals radius so bonds stay visible. */
@@ -134,6 +147,10 @@ export class MoleculeViewer {
   #measuredGroup = new THREE.Group();
   #dashGroup = new THREE.Group();
   #bondLabelGroup = new THREE.Group();
+  /** A + / − mark on every ion (V7-5), in the order of `#badgeAtoms`. */
+  #chargeBadgeGroup = new THREE.Group();
+  /** The atom each mark belongs to. */
+  #badgeAtoms: number[] = [];
   #measureLabel: CSS2DObject;
   #labelRenderer = new CSS2DRenderer();
   #positiveSurface: THREE.Mesh;
@@ -200,6 +217,8 @@ export class MoleculeViewer {
   #viewportHeight = 1;
   #scratch = new THREE.Vector3();
   #forward = new THREE.Vector3();
+  #cameraRight = new THREE.Vector3();
+  #cameraUp = new THREE.Vector3();
 
   // Pointer gesture state.
   #raycaster = new THREE.Raycaster();
@@ -288,6 +307,7 @@ export class MoleculeViewer {
       this.#measuredGroup,
       this.#dashGroup,
       this.#bondLabelGroup,
+      this.#chargeBadgeGroup,
       this.#measureLabel,
     );
 
@@ -314,6 +334,7 @@ export class MoleculeViewer {
       this.#frame = requestAnimationFrame(tick);
       this.#controls.update();
       this.#scaleHandles();
+      this.#placeChargeBadges();
       this.#renderer.render(this.#scene, this.#camera);
       this.#labelRenderer.render(this.#scene, this.#camera);
     };
@@ -394,8 +415,9 @@ export class MoleculeViewer {
   setPositions(positions: ArrayLike<number>) {
     if (positions.length !== this.#atoms.length * 3) return;
     for (let i = 0; i < this.#atoms.length; i++) {
+      // Spread, so the ion's charge rides along with it and its mark with it.
       this.#atoms[i] = {
-        z: this.#atoms[i].z,
+        ...this.#atoms[i],
         pos: [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]],
       };
     }
@@ -410,6 +432,7 @@ export class MoleculeViewer {
     this.#updateHandles();
     this.#syncMeasurement();
     this.#syncBondLabels();
+    this.#syncChargeBadges();
   }
 
   /**
@@ -695,6 +718,52 @@ export class MoleculeViewer {
     });
   }
 
+  /**
+   * A + or − on every atom made into an ion, and nothing on a neutral one. The
+   * mark says only the sign: the size of a charge is always one (v7).
+   */
+  #syncChargeBadges() {
+    const group = this.#chargeBadgeGroup;
+    const marks: Array<[number, string]> = [];
+    this.#atoms.forEach((atom, i) => {
+      const text = badgeText(atom.charge);
+      if (text !== null) marks.push([i, text]);
+    });
+
+    // Removed rather than truncated, as in #syncBondLabels.
+    while (group.children.length > marks.length) group.remove(group.children.at(-1)!);
+    while (group.children.length < marks.length) {
+      group.add(new CSS2DObject(labelElement('charge-badge')));
+    }
+    this.#badgeAtoms = marks.map(([i]) => i);
+    marks.forEach(([, text], k) => setText((group.children[k] as CSS2DObject).element, text));
+    this.#placeChargeBadges();
+  }
+
+  /**
+   * Keeps each mark at its atom's upper right as the camera sees it, which
+   * turning the view changes, so this runs every frame as well as whenever
+   * the atoms move.
+   */
+  #placeChargeBadges() {
+    const group = this.#chargeBadgeGroup;
+    if (group.children.length === 0) return;
+    const turn = this.#camera.quaternion;
+    const right = this.#cameraRight.set(1, 0, 0).applyQuaternion(turn);
+    const up = this.#cameraUp.set(0, 1, 0).applyQuaternion(turn);
+    this.#badgeAtoms.forEach((i, k) => {
+      const atom = this.#atoms[i];
+      if (!atom) return;
+      const [x, y, z] = badgeAnchor(
+        atom.pos,
+        this.#atomRadius(atom.z),
+        [right.x, right.y, right.z],
+        [up.x, up.y, up.z],
+      );
+      group.children[k].position.set(x, y, z);
+    });
+  }
+
   // --- pointer interaction -------------------------------------------------
 
   /** Normalised device coordinates for a pointer event. */
@@ -938,6 +1007,7 @@ export class MoleculeViewer {
     this.#dashGroup.clear();
     // Detaching the labels removes their elements; the layer itself goes too.
     this.#bondLabelGroup.clear();
+    this.#chargeBadgeGroup.clear();
     this.#scene.remove(this.#measureLabel);
     this.#labelRenderer.domElement.remove();
     this.#positiveSurface.geometry.dispose();

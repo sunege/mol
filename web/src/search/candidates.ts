@@ -70,6 +70,8 @@ export interface CandidateSource {
   z: Uint8Array;
   /** The structure on screen, in Angstrom. */
   xyz: Float64Array;
+  /** The charge on each atom (v7), copied as it is to every candidate: only positions are nudged. */
+  charges: Int8Array;
   /** The engine's covalent radii, for the overlap check. */
   covalentRadius: (z: number) => number;
   /** Shared by everything started together; the records carry it. */
@@ -92,6 +94,7 @@ export function candidateAsBuilt(source: CandidateSource): CandidateRequest {
     z: source.z,
     built: source.xyz,
     start: source.xyz,
+    charges: source.charges,
   };
 }
 
@@ -117,6 +120,7 @@ export function nudgedCandidates(
       z: source.z,
       built: source.xyz,
       start: drawApart(source, amplitude, (seed + index * 0x9e3779b1) >>> 0),
+      charges: source.charges,
     });
   }
   return candidates;

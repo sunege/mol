@@ -86,6 +86,16 @@ const WORDS: Record<Exclude<DensityChannel, 'orbital'>, string> = {
 };
 
 /**
+ * The deformation density's words once an atom carries a charge (v7). The
+ * reference is then the separated atoms and ions as placed, so an ion with no
+ * electrons of its own - H+ - is an empty place the molecule's electrons flow
+ * into, and shows blue however it bonded. Said here so that blue is not read
+ * as a bond on its own.
+ */
+const DEFORMATION_WITH_IONS =
+  '置いた原子やイオンがばらばらだったときと比べて、電子が濃くなった場所（青）と薄くなった場所（赤）です。H⁺ のように電子を持たないイオンのまわりは、流れ込んだ電子で青くなります。';
+
+/**
  * The line under the slider, which has to explain what is on screen without
  * naming a single orbital or functional (requirement F4).
  *
@@ -93,11 +103,20 @@ const WORDS: Record<Exclude<DensityChannel, 'orbital'>, string> = {
  * answered one way, so they can be explained before the first surface arrives;
  * that one is not, and until it comes back all that can honestly be said is
  * what was asked for.
+ *
+ * `hasIons` (any atom on screen carries a charge, `ion.ts`'s `hasIons`) changes
+ * only the deformation density's words; left out, it is the neutral wording.
  */
-export function explainChannel(request: DensitySurface, mesh: IsoMesh | null): string {
+export function explainChannel(
+  request: DensitySurface,
+  mesh: IsoMesh | null,
+  hasIons = false,
+): string {
+  const deformation = hasIons ? DEFORMATION_WITH_IONS : WORDS.deformation;
   if (request === 'total') return WORDS.total;
-  if (request === 'deformation') return WORDS.deformation;
+  if (request === 'deformation') return deformation;
   const shown: DensityChannel | null = mesh?.channel ?? null;
-  if (shown === 'pi' || shown === 'deformation') return WORDS[shown];
+  if (shown === 'pi') return WORDS.pi;
+  if (shown === 'deformation') return deformation;
   return '原子が結びついたことで動いた電子だけを表示します。';
 }

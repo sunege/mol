@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  chargesOf,
   comparisonKey,
   createRecord,
   defaultRecordName,
   hillFormula,
   engineModel,
+  headingOf,
   isSettled,
   levelOfModel,
+  moleculeHeading,
   TRAJECTORY_DECIMALS,
 } from './record';
 import { fakeOutcome, fakeRecord, symbolOf } from './fixtures';
@@ -43,12 +46,17 @@ describe('which records may be compared', () => {
     );
   });
 
-  it('separates the same atoms the engine had to give different charges', () => {
-    // Never shown (requirement F4), but two different numbers of electrons are
-    // not two shapes of one molecule.
+  it('separates the same atoms with different charges', () => {
+    // Two different numbers of electrons are not two shapes of one molecule.
     expect(comparisonKey(fakeRecord({ energy: -1 }))).not.toBe(
       comparisonKey(fakeRecord({ energy: -1, charge: 1 })),
     );
+  });
+
+  it('joins the same total however it is spread over the atoms', () => {
+    // Na⁺ + Cl⁻ is the same calculation as neutral NaCl: the engine sees the total.
+    const zwitter = fakeRecord({ energy: -1, charges: [-1, 1, 0] });
+    expect(comparisonKey(zwitter)).toBe(comparisonKey(fakeRecord({ energy: -1 })));
   });
 
   it('separates records made by a different engine', () => {
@@ -104,6 +112,7 @@ describe('turning a finished relaxation into a record', () => {
     stepEnergies: [-74.7, -74.74311011],
     outcome: fakeOutcome({ energy: -74.74311011 }, xyz),
     level: 'shape' as const,
+    charges: [0, 0, 0],
   };
 
   it('names it after the molecule and the time of day', () => {
@@ -112,6 +121,32 @@ describe('turning a finished relaxation into a record', () => {
     expect(record.name).toBe('H₂O · 14:32');
     expect(record.name).toBe(defaultRecordName(record.formula, at));
     expect(record.savedAt).toBe(at.toISOString());
+  });
+
+  it('names an ion with its charge', () => {
+    const at = new Date(2026, 8, 20, 14, 32);
+    const ion = createRecord(
+      {
+        ...draft,
+        charges: new Int8Array([-1, 0, 0]),
+        outcome: fakeOutcome({ energy: -74.1, charge: -1 }, xyz),
+      },
+      symbolOf,
+      at,
+      'id',
+    );
+    expect(ion.name).toBe('H₂O⁻ · 14:32');
+    // The formula stays the Hill formula; the heading adds the charge.
+    expect(ion.formula).toBe('H₂O');
+    expect(headingOf(ion)).toBe('H₂O⁻');
+  });
+
+  it('always writes the charge on each atom, as plain numbers', () => {
+    const neutral = createRecord(draft, symbolOf, new Date(), 'id');
+    expect(neutral.charges).toEqual([0, 0, 0]);
+    const ion = createRecord({ ...draft, charges: new Int8Array([0, 1, 0]) }, symbolOf);
+    expect(ion.charges).toEqual([0, 1, 0]);
+    expect(Array.isArray(ion.charges)).toBe(true);
   });
 
   it('rounds the trajectory but not the structure it ended on', () => {
@@ -153,5 +188,36 @@ describe('a structure that came to rest', () => {
     expect(isSettled(fakeRecord({ energy: -1 }))).toBe(true);
     expect(isSettled(fakeRecord({ energy: -1, reason: 'interrupted' }))).toBe(false);
     expect(isSettled(fakeRecord({ energy: -1, reason: 'maxSteps' }))).toBe(false);
+  });
+});
+
+describe('the charges and the heading of a record', () => {
+  it('reads a record without charges, from before v7, as all neutral', () => {
+    const old = fakeRecord({ energy: -1, z: [6, 1, 1, 1, 1] });
+    delete old.charges;
+    expect(chargesOf(old)).toEqual([0, 0, 0, 0, 0]);
+    expect(headingOf(old)).toBe('CH₄');
+  });
+
+  it('gives a copy, so the record cannot be changed through it', () => {
+    const record = fakeRecord({ energy: -1, charge: 1 });
+    chargesOf(record)[2] = 0;
+    expect(record.charges).toEqual([0, 0, 1]);
+  });
+
+  it('heads a record with the total the engine solved for', () => {
+    // Before v7 the engine could pick ±1 for atoms with no charge on them; the
+    // heading then says what was calculated.
+    const picked = fakeRecord({ energy: -1, charge: 1 });
+    delete picked.charges;
+    expect(chargesOf(picked)).toEqual([0, 0, 0]);
+    expect(headingOf(picked)).toBe('H₂O⁺');
+  });
+
+  it('heads atoms that are not a record the same way', () => {
+    expect(moleculeHeading([8, 1, 1, 1], [0, 0, 0, 1], symbolOf)).toBe('H₃O⁺');
+    expect(moleculeHeading(new Int8Array([8, 1, 1, 1]), new Int8Array(4), symbolOf)).toBe('H₃O');
+    expect(moleculeHeading([8, 1], [-1, 0], symbolOf)).toBe('HO⁻');
+    expect(moleculeHeading([8, 8], [-1, -1], symbolOf)).toBe('O₂²⁻');
   });
 });

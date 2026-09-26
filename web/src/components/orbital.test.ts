@@ -10,6 +10,7 @@ import {
   ORBITAL_SURFACE_HINT,
   ORBITAL_TEASER,
   atomOrbitalWords,
+  freeAtomKind,
   carryPick,
   coreText,
   countNodes,
@@ -598,6 +599,26 @@ describe('picks of a free atom’s orbital and of a direction (V6-7)', () => {
     );
     for (const along of ['axis', 'across', 'toward', null] as const) {
       const words = atomOrbitalWords('Cl', '3p', along);
+      expect(words.replace('3p', '')).not.toMatch(/\d/);
+    }
+  });
+
+  it('says an ion’s orbital is an ion’s, and H⁺’s an empty one (V7-7)', () => {
+    expect(freeAtomKind(1, 0)).toBe('atom');
+    expect(freeAtomKind(1, 1)).toBe('bare');
+    expect(freeAtomKind(8, -1)).toBe('ion');
+    expect(freeAtomKind(2, 1)).toBe('ion');
+    expect(atomOrbitalWords('H⁺', '1s', null, 'bare')).toBe(
+      'H⁺ の 1s。結合する前の、電子の入っていない、イオンひとつの部屋です。',
+    );
+    expect(atomOrbitalWords('O⁻', '2p', 'axis', 'ion')).toBe(
+      'O⁻ の 2p（結合の軸の向き）。結合する前の、イオンひとつの部屋です。',
+    );
+    // A neutral atom is said as before, whether or not the kind is given.
+    expect(atomOrbitalWords('H', '1s', null, 'atom')).toBe(atomOrbitalWords('H', '1s', null));
+    for (const kind of ['ion', 'bare'] as const) {
+      const words = atomOrbitalWords('Cl⁺', '3p', 'toward', kind);
+      expect(words).not.toContain('原子');
       expect(words.replace('3p', '')).not.toMatch(/\d/);
     }
   });

@@ -135,14 +135,39 @@ export const ALONG_WORDS: Record<Along, string> = {
 };
 
 /**
+ * What stands at one end of the correlation diagram (v7): a neutral atom, an
+ * ion, or an ion with no electrons left at all - H+, the one the ion buttons
+ * allow (`components/ion.ts`), whose rooms are all empty.
+ */
+export type FreeAtomKind = 'atom' | 'ion' | 'bare';
+
+export function freeAtomKind(z: number, charge: number): FreeAtomKind {
+  if (charge === 0) return 'atom';
+  return z - charge <= 0 ? 'bare' : 'ion';
+}
+
+/**
  * What the section says of a free atom's orbital, in place of the three lines
  * about bonds and nodes a molecule's gets: an atom's orbital has no bond to be
  * bonding across, which is the point of it being on the diagram at all.
+ *
+ * `heading` is the atom as its column is headed, with its charge (H⁺) when it
+ * is an ion; an ion's room is said to be an ion's (V7-7), and H⁺'s to have no
+ * electron in it, which the diagram itself does not draw.
  */
-export function atomOrbitalWords(symbol: string, name: string, along: Along | null): string {
+export function atomOrbitalWords(
+  heading: string,
+  name: string,
+  along: Along | null,
+  kind: FreeAtomKind = 'atom',
+): string {
   const which = name === '' ? '部屋' : ` ${name}`;
   const way = along === null ? '' : `（${ALONG_WORDS[along]}）`;
-  return `${symbol} の原子の${which}${way}。結合する前の、原子ひとつの部屋です。`;
+  if (kind === 'atom') {
+    return `${heading} の原子の${which}${way}。結合する前の、原子ひとつの部屋です。`;
+  }
+  const empty = kind === 'bare' ? '電子の入っていない、' : '';
+  return `${heading} の${which}${way}。結合する前の、${empty}イオンひとつの部屋です。`;
 }
 
 /** Whether two picks are the same orbital, either of them possibly none. */

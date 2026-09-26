@@ -25,6 +25,14 @@
 //!   it in the other direction has to give the same curve - and starting each
 //!   one afresh is what makes that true. At 27 points it costs nothing worth
 //!   saving.
+//! * **The charge is the one the atoms were placed with**, at every point. A
+//!   charged point that the ordinary SCF cannot settle is solved once more with
+//!   the driver's persistent settings: a cation with one hole in a pi shell
+//!   (Cl2+, HCl+) otherwise oscillates at every separation and the whole curve
+//!   is a gap, and with them it is not (docs/v7, "V7-0 で入ったもの"). A neutral
+//!   point never gets the second try, so a neutral scan is exactly what it was
+//!   before ions existed - hydrogen fluoride still stops converging past
+//!   1.89 Angstrom.
 //!
 //! What comes back per point is the total energy and the ladder of levels, with
 //! the degenerate ones grouped ([`ScanLevel::count`]). The grouping is not
@@ -107,8 +115,9 @@ pub struct ScanPoint {
     pub levels: Vec<ScanLevel>,
 }
 
-/// Solves `z` at `points` separations evenly spaced from `from` to `to`, both
-/// in Bohr, calling `on_point` with each as it is produced.
+/// Solves `z`, carrying `charges` (in the same order), at `points` separations
+/// evenly spaced from `from` to `to`, both in Bohr, calling `on_point` with each
+/// as it is produced.
 ///
 /// `on_point` returning false stops the scan where it is; the points already
 /// handed over stand. Nothing is returned, because everything a caller gets is
@@ -117,18 +126,22 @@ pub struct ScanPoint {
 ///
 /// A distance too small to be a molecule at all - two nuclei on top of each
 /// other - is skipped rather than solved, and so is every distance when the
-/// elements are ones the basis does not cover. Both come back as a scan that
-/// produced no points.
+/// elements are ones the basis does not cover or the charges are ones
+/// [`Molecule::with_atom_charges`] refuses. All of those come back as a scan
+/// that produced no points.
 pub fn distance_scan(
     z: [u8; 2],
+    charges: [i32; 2],
     from: f64,
     to: f64,
     points: usize,
     kind: BasisKind,
     on_point: &mut dyn FnMut(ScanPoint) -> bool,
 ) {
-    let distances: Vec<f64> =
-        spacing(from, to, points).into_iter().filter(|&r| diatomic(z, r).is_ok()).collect();
+    let distances: Vec<f64> = spacing(from, to, points)
+        .into_iter()
+        .filter(|&r| diatomic(z, charges, r).is_ok())
+        .collect();
     // Where the state is decided: the short end, where a closed shell is
     // unambiguously the answer (see the module note).
     let Some(shortest) = (0..distances.len()).min_by(|&a, &b| distances[a].total_cmp(&distances[b]))
@@ -136,7 +149,7 @@ pub fn distance_scan(
         return;
     };
 
-    let Some(mut system) = diatomic(z, distances[shortest])
+    let Some(mut system) = diatomic(z, charges, distances[shortest])
         .ok()
         .and_then(|molecule| System::build(molecule, kind, SCAN_GRID).ok())
     else {
@@ -154,7 +167,7 @@ pub fn distance_scan(
         let solved = if index == shortest {
             chosen.take()
         } else {
-            solve_at(z, distance, state, kind)
+            solve_at(z, charges, distance, state, kind)
         };
         let Some((system, result)) = solved else {
             continue;
@@ -179,33 +192,41 @@ fn spacing(from: f64, to: f64, points: usize) -> Vec<f64> {
     }
 }
 
-/// The two nuclei on the z axis, `distance` Bohr apart.
-fn diatomic(z: [u8; 2], distance: f64) -> Result<Molecule, GeometryError> {
+/// The two nuclei on the z axis, `distance` Bohr apart, with their charges.
+fn diatomic(z: [u8; 2], charges: [i32; 2], distance: f64) -> Result<Molecule, GeometryError> {
     Molecule::new(vec![
         Atom { z: z[0], pos: [0.0, 0.0, 0.0] },
         Atom { z: z[1], pos: [0.0, 0.0, distance] },
-    ])
+    ])?
+    .with_atom_charges(charges.to_vec())
 }
 
 /// Builds and solves one separation in the state the scan settled on, or `None`
 /// when there is no molecule there to solve.
 fn solve_at(
     z: [u8; 2],
+    charges: [i32; 2],
     distance: f64,
     state: SpinState,
     kind: BasisKind,
 ) -> Option<(System, ScfResult)> {
-    let mut molecule = diatomic(z, distance).ok()?;
-    molecule.charge = state.charge;
+    let mut molecule = diatomic(z, charges, distance).ok()?;
+    debug_assert_eq!(molecule.charge, state.charge, "the driver keeps the charge");
     molecule.multiplicity = state.multiplicity;
     molecule.validate().ok()?;
     let system = System::build(molecule, kind, SCAN_GRID).ok()?;
-    let options = ScfOptions::default();
-    let result = if state.is_restricted() {
-        scf::run_restricted(&system, &options)
-    } else {
-        scf::run_unrestricted(&system, &options)
+    let run = |options: &ScfOptions| {
+        if state.is_restricted() {
+            scf::run_restricted(&system, options)
+        } else {
+            scf::run_unrestricted(&system, options)
+        }
     };
+    let mut result = run(&ScfOptions::default());
+    // Only for an ion (see the module note): a neutral scan stays as it was.
+    if !result.converged && system.molecule.charge != 0 {
+        result = run(&DriverOptions::default().persistent_scf);
+    }
     Some((system, result))
 }
 
@@ -256,6 +277,7 @@ mod tests {
         let mut collected = Vec::new();
         distance_scan(
             z,
+            [0, 0],
             from * BOHR_PER_ANGSTROM,
             to * BOHR_PER_ANGSTROM,
             points,
@@ -337,6 +359,7 @@ mod tests {
         let mut collected = Vec::new();
         distance_scan(
             [1, 1],
+            [0, 0],
             0.6 * BOHR_PER_ANGSTROM,
             2.0 * BOHR_PER_ANGSTROM,
             20,
@@ -447,6 +470,80 @@ mod tests {
             let top = point.levels.last().unwrap();
             assert!(top.overlap < -0.5, "the empty sigma* is antibonding: {top:?}");
         }
+    }
+
+    /// Electrons on a rung times the orbitals on it, summed over the ladder.
+    fn electrons(point: &ScanPoint) -> f64 {
+        point.levels.iter().map(|level| level.count as f64 * level.occupation).sum()
+    }
+
+    fn charged_scan(
+        z: [u8; 2],
+        charges: [i32; 2],
+        from: f64,
+        to: f64,
+        points: usize,
+    ) -> Vec<ScanPoint> {
+        let mut collected = Vec::new();
+        distance_scan(
+            z,
+            charges,
+            from * BOHR_PER_ANGSTROM,
+            to * BOHR_PER_ANGSTROM,
+            points,
+            BasisKind::Sto3g,
+            &mut |point| {
+                collected.push(point);
+                true
+            },
+        );
+        collected
+    }
+
+    /// The charge is the one placed, at every point, and which of the two atoms
+    /// carries it makes no difference to the SCF: H2+ is one electron whichever
+    /// proton is bare.
+    #[test]
+    fn a_charged_scan_keeps_its_charge_wherever_it_was_placed() {
+        let left = charged_scan([1, 1], [1, 0], 0.6, 2.4, 7);
+        let right = charged_scan([1, 1], [0, 1], 0.6, 2.4, 7);
+        assert_eq!(left.len(), 7);
+        for (a, b) in left.iter().zip(&right) {
+            assert!(a.converged, "at {} Bohr", a.distance);
+            assert_eq!(electrons(a), 1.0, "at {} Bohr", a.distance);
+            // One electron is a doublet, solved as two spin channels.
+            assert!(a.levels.iter().any(|level| level.spin == 1));
+            assert!((a.energy - b.energy).abs() < 1e-10, "at {} Bohr", a.distance);
+        }
+        // Neither ends up bound to the neutral molecule's energy: at the same
+        // separations H2 has an electron more and lies well below.
+        let neutral = scan([1, 1], 0.6, 2.4, 7);
+        for (ion, molecule) in left.iter().zip(&neutral) {
+            assert_eq!(electrons(molecule), 2.0);
+            assert!(ion.energy > molecule.energy, "at {} Bohr", ion.distance);
+        }
+    }
+
+    /// Cl2+ has one hole in a pi pair, and the ordinary SCF swaps the hole back
+    /// and forth between the two orbitals at every separation - the whole curve
+    /// would be a gap. The second, persistent try is what closes it, over the
+    /// range a charged scan is drawn on (up to 1.4 times the bond length, 2.08
+    /// Angstrom for this molecule in this basis; docs/v7, "V7-0 で入ったもの").
+    #[test]
+    fn a_cation_with_a_hole_in_a_pi_pair_is_solved_at_every_separation() {
+        let bond = 2.08;
+        let points = charged_scan([17, 17], [1, 0], 0.7 * bond, 1.4 * bond, 6);
+        assert_eq!(points.len(), 6);
+        for point in &points {
+            assert!(point.converged, "at {} Bohr", point.distance);
+            assert_eq!(electrons(point), 33.0, "at {} Bohr", point.distance);
+        }
+
+        // And it really is the second try: the ordinary one fails there.
+        let molecule = diatomic([17, 17], [1, 0], bond * BOHR_PER_ANGSTROM).unwrap();
+        let system = System::build(molecule, BasisKind::Sto3g, SCAN_GRID).unwrap();
+        let plain = scf::run_unrestricted(&system, &ScfOptions::default());
+        assert!(!plain.converged, "Cl2+ converged unaided; this no longer tests the retry");
     }
 
     #[test]

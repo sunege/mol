@@ -5,10 +5,11 @@
  * `groupRecords` already decides everything about comparison - which records
  * belong together, which valley each is in, how they are ordered - and this file
  * only gives that a shape to open and close. It changes nothing inside the
- * groups: a group becomes one level node even when two share a level (they
- * differ by the charge, which is not shown - requirement F4 - so their headings
- * read the same, as they always have), and a valley of one record is just that
- * record. The one order it decides is the molecules' (V6-1): newest first by the
+ * groups: a group becomes one level node, and a valley of one record is just
+ * that record. A molecule is its heading, the formula with its charge (v7,
+ * `headingOf`), so H₃O⁺ and neutral H₃O are two molecules, not two groups under
+ * one - before v7 the charge was the engine's choice and not shown (F4), and two
+ * groups that differed only by it read the same. The one order it decides is the molecules' (V6-1): newest first by the
  * molecule's oldest record, so a molecule stays where it is when a record of it
  * is opened or added, rather than jumping to the top with the newest group.
  *
@@ -82,7 +83,7 @@ export interface CandidateNode {
 /** What the tree needs of a candidate; the App makes it, clock and all. */
 export interface PendingCandidate {
   id: string;
-  /** The Hill formula of its atoms. */
+  /** Its heading: the Hill formula of its atoms and the charge it asks for (`moleculeHeading`). */
   formula: string;
   name: string;
   status: CandidateStatus;
@@ -115,8 +116,8 @@ export function buildRecordTree(
       };
       fresh.push(molecule);
     }
-    // Its charge is not known until it is solved, so of two groups at the
-    // search's level (a neutral one and an ion) it goes under the first.
+    // Its heading carries the charge it asks for (`moleculeHeading`), so its
+    // molecule has at most one group at the search's level.
     let level = molecule.children.find((node) => node.level === SEARCH_LEVEL);
     if (level === undefined) {
       level = {
@@ -153,9 +154,9 @@ function inTree(status: CandidateStatus): boolean {
 /**
  * The ids of the records under a molecule or a level, for deleting them
  * together (V6-2). A level is its one group, so of two levels that read the
- * same (they differ by the charge) only its own. Candidates are not records and
- * are left out: one still running becomes a record later, as it would after the
- * whole log is cleared.
+ * same (records of models this program does not know) only its own. Candidates
+ * are not records and are left out: one still running becomes a record later,
+ * as it would after the whole log is cleared.
  */
 export function recordIdsUnder(node: FormulaNode | LevelNode): string[] {
   if (node.kind === 'formula') return node.children.flatMap(recordIdsUnder);

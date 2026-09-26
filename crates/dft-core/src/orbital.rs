@@ -364,11 +364,14 @@ pub fn molecular_oriented(
 ///
 /// `orbital` counts the free atom's orbitals from the lowest, in the order of
 /// [`crate::scf::guess::atomic_levels`]. The atom is solved on its own in the
-/// molecule's basis and its coefficients are dropped into the atom's block;
-/// every other entry is exactly zero. The block is the free atom's basis
-/// function for function - shells are laid out atom by atom in the same order
-/// - and overlaps between functions on one centre do not depend on where it
-/// is, so the column is normalised in the molecule's overlap as well.
+/// molecule's basis, as the ion it was placed as
+/// ([`crate::molecule::Molecule::atom_charges`]: the same free atom the
+/// correlation diagram's end and the deformation density's reference are made
+/// of), and its coefficients are dropped into the atom's block; every other
+/// entry is exactly zero. The block is the free atom's basis function for
+/// function (shells are laid out atom by atom in the same order), and overlaps
+/// between functions on one centre do not depend on where it is, so the column
+/// is normalised in the molecule's overlap as well.
 ///
 /// With a direction, the orbital's degenerate level is turned to face it
 /// ([`oriented`], against the free atom's own basis and overlap: the atom sits
@@ -384,7 +387,10 @@ pub fn atomic_column(
     if atom >= atoms {
         return Err(OrbitalError::NoSuchAtom { atom, atoms });
     }
-    let (free, set) = atomic_orbitals(system.molecule.atoms[atom].z, system.kind);
+    let z = system.molecule.atoms[atom].z;
+    let charge = system.molecule.atom_charges[atom];
+    let (free, set) = atomic_orbitals(z, charge, system.kind)
+        .expect("a placed atom's charge was checked when the molecule was built");
     let orbitals = set.energies.len();
     if orbital >= orbitals {
         return Err(OrbitalError::NoSuchOrbital { orbital, orbitals });
@@ -965,6 +971,26 @@ mod tests {
             atomic_column(&system, 0, 5, Some(tilted.axis)),
             Err(OrbitalError::NoSuchOrbital { orbital: 5, orbitals: 5 })
         );
+    }
+
+    /// An atom placed as an ion is drawn as that ion's orbital: OH- placed as
+    /// O- and H gives the oxide's 2s, not the oxygen atom's.
+    #[test]
+    fn an_atomic_orbital_is_the_placed_ion_s() {
+        let molecule = Molecule::from_angstrom(&[(8, [0.0; 3]), (1, [0.0, 0.0, 0.97])])
+            .unwrap()
+            .with_atom_charges(vec![-1, 0])
+            .unwrap();
+        let system = System::build(molecule, BasisKind::Sto3g, GridQuality::Coarse).unwrap();
+        let block = system.basis.atom_range(0);
+        let column = |charge: i32| {
+            let (_, set) = atomic_orbitals(8, charge, BasisKind::Sto3g).unwrap();
+            led_positive(set.coefficients.column(1).into_owned())
+        };
+        let drawn = atomic_column(&system, 0, 1, None).unwrap();
+        let drawn = drawn.rows(block.start, block.len());
+        assert!((drawn - column(-1)).amax() < 1e-12);
+        assert!((drawn - column(0)).amax() > 1e-4, "the ion and the atom differ");
     }
 
     /// The pi pair and the pi* pair of a tilted N2, each turned to face two

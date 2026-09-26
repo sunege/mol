@@ -131,6 +131,11 @@ export interface CandidateRequest {
   built: Float64Array;
   /** What is actually submitted, in Angstrom: the nudged structure, or `built`. */
   start: Float64Array;
+  /**
+   * The charge on each atom, in the order of `z` (v7). A nudge moves atoms, never
+   * their charges, so every candidate of a batch carries the structure's own.
+   */
+  charges: Int8Array;
 }
 
 /** A shape being tried, with everything known about it so far. */
@@ -392,6 +397,7 @@ export class SearchPool {
         this.#budgetMs,
         // Never the front's level: at 'measure' three workers would hold ~750 MiB.
         SEARCH_LEVEL,
+        candidate.charges,
       )
       .then((outcome) => {
         if (this.#disposed || candidate.status !== 'running') return;

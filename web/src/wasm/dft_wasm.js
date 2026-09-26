@@ -363,13 +363,19 @@ if (Symbol.dispose) OrbitalCharacter.prototype[Symbol.dispose] = OrbitalCharacte
  * A few milliseconds per element - it is the same atomic calculation every
  * molecular SCF already starts from - and at the level the scan beside it runs
  * at.
+ *
+ * `charges` is the charge on each entry of `z`, as for [`scf`]: an ion's levels
+ * are its own (a proton's are all empty, and lower than a hydrogen atom's).
  * @param {Uint8Array} z
+ * @param {Int8Array | null} [charges]
  * @returns {any}
  */
-export function atomLevels(z) {
+export function atomLevels(z, charges) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.atomLevels(ptr0, len0);
+    var ptr1 = isLikeNone(charges) ? 0 : passArray8ToWasm0(charges, wasm.__wbindgen_malloc);
+    var len1 = WASM_VECTOR_LEN;
+    const ret = wasm.atomLevels(ptr0, len0, ptr1, len1);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -380,7 +386,7 @@ export function atomLevels(z) {
  * Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
  * structure as it is produced (requirement F2).
  *
- * The charge and spin state are chosen once, on the structure as given, and
+ * The spin state is chosen once, on the structure as given, and
  * held for the whole optimisation: running the search at every geometry would
  * multiply the cost by the number of states tried, and the state is not what is
  * being optimised.
@@ -402,21 +408,25 @@ export function atomLevels(z) {
  *
  * `level` is what the calculation is for, as for [`scf`], and holds for every
  * step: the optimiser builds each new geometry in the basis of the one before.
+ * So do `charges`, as for [`scf`].
  * @param {Uint8Array} z
  * @param {Float64Array} xyz_angstrom
  * @param {Function} on_step
  * @param {Function | null} [on_progress]
  * @param {string | null} [level]
+ * @param {Int8Array | null} [charges]
  * @returns {Calculation}
  */
-export function optimize(z, xyz_angstrom, on_step, on_progress, level) {
+export function optimize(z, xyz_angstrom, on_step, on_progress, level, charges) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     var ptr2 = isLikeNone(level) ? 0 : passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     var len2 = WASM_VECTOR_LEN;
-    const ret = wasm.optimize(ptr0, len0, ptr1, len1, on_step, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress), ptr2, len2);
+    var ptr3 = isLikeNone(charges) ? 0 : passArray8ToWasm0(charges, wasm.__wbindgen_malloc);
+    var len3 = WASM_VECTOR_LEN;
+    const ret = wasm.optimize(ptr0, len0, ptr1, len1, on_step, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress), ptr2, len2, ptr3, len3);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -444,24 +454,33 @@ export function optimize(z, xyz_angstrom, on_step, on_progress, level) {
  *
  * Nothing here holds on to a calculation, so a scan neither replaces nor
  * disturbs the one the surfaces are being drawn from.
+ *
+ * `charges` is the charge on each of the two atoms, as for [`scf`]. The engine
+ * turns charges it refuses into a scan with no points; they are refused here
+ * instead, with the same message a single point would give, so that a caller
+ * is not left drawing an empty figure.
  * @param {Uint8Array} z
  * @param {number} from_angstrom
  * @param {number} to_angstrom
  * @param {number} points
  * @param {Function} on_point
+ * @param {Int8Array | null} [charges]
  */
-export function scan(z, from_angstrom, to_angstrom, points, on_point) {
+export function scan(z, from_angstrom, to_angstrom, points, on_point, charges) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.scan(ptr0, len0, from_angstrom, to_angstrom, points, on_point);
+    var ptr1 = isLikeNone(charges) ? 0 : passArray8ToWasm0(charges, wasm.__wbindgen_malloc);
+    var len1 = WASM_VECTOR_LEN;
+    const ret = wasm.scan(ptr0, len0, from_angstrom, to_angstrom, points, on_point, ptr1, len1);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
 
 /**
- * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
- * the charge and spin state itself (requirement F4).
+ * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, at the
+ * charge placed on its atoms and choosing the spin state itself (requirement
+ * F4).
  *
  * Non-convergence comes back through `summary().converged`, never as a thrown
  * error: the UI turns it into an animation rather than a message
@@ -472,20 +491,26 @@ export function scan(z, from_angstrom, to_angstrom, points, on_point) {
  *
  * `level` is what the calculation is for: `"shape"` (the default) or
  * `"measure"`. Any other name throws rather than being solved at the default.
+ *
+ * `charges` is the charge placed on each atom, in the order of `z`; absent
+ * means every atom is neutral (see [`atom_charges`]).
  * @param {Uint8Array} z
  * @param {Float64Array} xyz_angstrom
  * @param {Function | null} [on_progress]
  * @param {string | null} [level]
+ * @param {Int8Array | null} [charges]
  * @returns {Calculation}
  */
-export function scf(z, xyz_angstrom, on_progress, level) {
+export function scf(z, xyz_angstrom, on_progress, level, charges) {
     const ptr0 = passArray8ToWasm0(z, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF64ToWasm0(xyz_angstrom, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     var ptr2 = isLikeNone(level) ? 0 : passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     var len2 = WASM_VECTOR_LEN;
-    const ret = wasm.scf(ptr0, len0, ptr1, len1, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress), ptr2, len2);
+    var ptr3 = isLikeNone(charges) ? 0 : passArray8ToWasm0(charges, wasm.__wbindgen_malloc);
+    var len3 = WASM_VECTOR_LEN;
+    const ret = wasm.scf(ptr0, len0, ptr1, len1, isLikeNone(on_progress) ? 0 : addToExternrefTable0(on_progress), ptr2, len2, ptr3, len3);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

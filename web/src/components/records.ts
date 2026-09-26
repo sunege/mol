@@ -161,8 +161,10 @@ export function levelMeta(group: LogGroup | null): string {
 /**
  * What deleting from a molecule's or a level's menu takes away (V6-2), as the
  * confirmation names it: the molecule, or the molecule and the level in the
- * words of the choice. Two levels that differ by the charge read the same here
- * as in the tree (requirement F4); the count in `deleteConfirm` tells them apart.
+ * words of the choice. The molecule is its heading, so an ion is named with its
+ * charge (H₃O⁺, v7). Two levels that read the same in the tree (models this
+ * program does not know) read the same here; the count in `deleteConfirm` tells
+ * them apart.
  */
 export function deleteWhat(molecule: FormulaNode, level?: LevelNode): string {
   return level === undefined

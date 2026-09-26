@@ -353,6 +353,30 @@ GEOMETRIES = {
         ("H", (0.8121, -0.4689, -0.2737)),
         ("H", (-0.8121, -0.4689, -0.2737)),
     ],
+    # Ions (v7), for the per-atom charges. Rounded textbook shapes: hydronium a
+    # flattened pyramid (O-H 0.98, H-O-H 112 degrees), ammonium a tetrahedron
+    # (N-H 1.03), H3+ an equilateral triangle (0.87). The hydroxide ion reuses
+    # "oh" above.
+    "h3o_plus": [
+        ("O", (0.0, 0.0, 0.0)),
+        ("H", (0.9381, 0.0, -0.2834)),
+        ("H", (-0.4691, 0.8125, -0.2834)),
+        ("H", (-0.4691, -0.8125, -0.2834)),
+    ],
+    "nh4_plus": [
+        ("N", (0.0, 0.0, 0.0)),
+        ("H", (0.5947, 0.5947, 0.5947)),
+        ("H", (0.5947, -0.5947, -0.5947)),
+        ("H", (-0.5947, 0.5947, -0.5947)),
+        ("H", (-0.5947, -0.5947, 0.5947)),
+    ],
+    "h3_plus": [
+        ("H", (0.0, 0.0, 0.0)),
+        ("H", (0.87, 0.0, 0.0)),
+        ("H", (0.435, 0.7534, 0.0)),
+    ],
+    "heh_plus": [("He", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.77))],
+    "h2_plus": [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 1.06))],
     "benzene": [
         ("C", (0.0000, 1.3970, 0.0)),
         ("C", (1.2098, 0.6985, 0.0)),
@@ -370,8 +394,9 @@ GEOMETRIES = {
 }
 
 
-def make_mol(atoms, unit: str, basis: str, cart: bool, spin: int):
-    """One neutral PySCF molecule, refusing a basis the engine would build differently.
+def make_mol(atoms, unit: str, basis: str, cart: bool, spin: int, charge: int = 0):
+    """One PySCF molecule, neutral unless told otherwise, refusing a basis the
+    engine would build differently.
 
     The engine builds every shell from Cartesian functions. For s and p shells
     that is the same thing as PySCF's default spherical ones, which is why the
@@ -386,7 +411,7 @@ def make_mol(atoms, unit: str, basis: str, cart: bool, spin: int):
     mol.unit = unit
     mol.cart = cart
     mol.spin = spin
-    mol.charge = 0
+    mol.charge = charge
     mol.verbose = 0
     mol.build()
     assert cart or all(mol.bas_angular(i) < 2 for i in range(mol.nbas)), (
@@ -395,9 +420,11 @@ def make_mol(atoms, unit: str, basis: str, cart: bool, spin: int):
     return mol
 
 
-def build_mol(name: str, basis: str = "sto-3g", cart: bool = False, spin: int = 0):
+def build_mol(
+    name: str, basis: str = "sto-3g", cart: bool = False, spin: int = 0, charge: int = 0
+):
     atoms = [(sym, pos) for sym, pos in GEOMETRIES[name]]
-    return make_mol(atoms, "Angstrom", basis, cart, spin)
+    return make_mol(atoms, "Angstrom", basis, cart, spin, charge)
 
 
 def engine_normalisation(mol):
@@ -681,6 +708,58 @@ def open_shell_reference() -> None:
 
 
 # --------------------------------------------------------------------------
+# Ions (v7)
+# --------------------------------------------------------------------------
+
+# (key, geometry, charge, multiplicity). The engine solves only the total
+# charge; which atom the user marked is not in these at all. Cations first, then
+# the anion, then H2+, the one-electron case whose restricted-or-not question
+# has a single answer (HF is exact for it within the basis).
+ION_MOLECULES = [
+    ("h3o_plus", "h3o_plus", 1, 1),
+    ("nh4_plus", "nh4_plus", 1, 1),
+    ("h3_plus", "h3_plus", 1, 1),
+    ("heh_plus", "heh_plus", 1, 1),
+    ("oh_minus", "oh", -1, 1),
+    ("h2_plus", "h2_plus", 1, 2),
+]
+
+# Closed-shell free ions: like the neutral closed-shell atoms, the spherically
+# averaged atomic solver must reproduce these exactly, and they are the
+# reference densities "electrons that moved" is measured against.
+ION_ATOMS = [("H", -1), ("Li", 1), ("F", -1), ("Na", 1), ("Cl", -1)]
+
+
+def ion_reference() -> None:
+    """Charged systems in the open-shell file's shape, which carries the charge.
+
+    Closed shells are solved with RKS and written as two equal spin channels, as
+    there, so one loader reads the whole file.
+    """
+    systems = []
+    for key, name, charge, multiplicity in ION_MOLECULES:
+        mol = build_mol(name, spin=multiplicity - 1, charge=charge)
+        systems.append(unrestricted_payload(mol, key))
+
+    atoms = []
+    for symbol, charge in ION_ATOMS:
+        mol = make_mol([(symbol, (0.0, 0.0, 0.0))], "Angstrom", "sto-3g", False, 0, charge)
+        sign = "plus" if charge > 0 else "minus"
+        atoms.append(unrestricted_payload(mol, f"{symbol.lower()}_{sign}"))
+
+    dump(
+        "scf_ions.json",
+        {
+            "functional": "lda,vwn5",
+            "basis": "sto-3g",
+            "grid_level": REFERENCE_GRID_LEVEL,
+            "systems": systems,
+            "atoms": atoms,
+        },
+    )
+
+
+# --------------------------------------------------------------------------
 # Analytic nuclear gradients, and a relaxed geometry to compare against
 # --------------------------------------------------------------------------
 
@@ -860,6 +939,7 @@ def main() -> None:
     scf_reference("benzene", "benzene", with_density=False)
     atomic_reference()
     open_shell_reference()
+    ion_reference()
     gradient_reference("gradients.json", "sto-3g", False, [("h2o", 1), ("ch4", 1)])
 
     # 6-31G*, the basis of the "measure the shape" level. Benzene is left out:

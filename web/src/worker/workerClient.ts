@@ -259,15 +259,20 @@ export class DftWorkerClient {
    *
    * `level` is what the calculation is for; omitted means `'shape'`. Results
    * at different levels cannot be compared (see {@link ModelLevel}).
+   *
+   * `charges` is the charge placed on each atom, in the order of `z`; omitted
+   * means every atom is neutral. What it changes is spelled out on the `scf`
+   * request in `protocol.ts`; charges the engine refuses reject.
    */
   async scf(
     z: Uint8Array,
     xyz: Float64Array,
     onProgress?: (progress: CalculationProgress) => void,
     level?: ModelLevel,
+    charges?: Int8Array,
   ): Promise<ScfOutcome> {
     const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>(
-      (id) => ({ id, type: 'scf', z, xyz, level }),
+      (id) => ({ id, type: 'scf', z, xyz, level, charges }),
       (partial) => {
         if (partial.type === 'progress') onProgress?.(partial.progress);
       },
@@ -294,7 +299,7 @@ export class DftWorkerClient {
    * unlike one thrown away with its worker by `cancelAll`.
    *
    * `level` is what the calculation is for, and holds for every step; omitted
-   * means `'shape'`.
+   * means `'shape'`. `charges` holds for every step too, as for {@link scf}.
    *
    * {@link stopRelaxations} ends it early the way the user does: normally
    * with `reason: 'interrupted'` where the worker can be asked to, and
@@ -308,13 +313,14 @@ export class DftWorkerClient {
     onProgress?: (progress: CalculationProgress) => void,
     budgetMs?: number | null,
     level?: ModelLevel,
+    charges?: Int8Array,
   ): Promise<ScfOutcome> {
     const relaxation: NonNullable<Pending['relaxation']> = {
       last: null,
       flag: this.#stopInPlace ? stopFlag() : null,
     };
     const response = await this.#send<Extract<WorkerResponse, { type: 'scf' }>>(
-      (id) => ({ id, type: 'optimize', z, xyz, budgetMs, level, stop: relaxation.flag }),
+      (id) => ({ id, type: 'optimize', z, xyz, budgetMs, level, stop: relaxation.flag, charges }),
       (partial) => {
         if (partial.type === 'step') {
           relaxation.last = partial.step;
@@ -374,6 +380,8 @@ export class DftWorkerClient {
    * surface on screen survives a scan. {@link cancelAll} does not: stopping a
    * scan that way takes the held calculation with it, and the surface has to be
    * solved again from the SCF.
+   *
+   * `charges` is the charge on each of the two atoms, as for {@link scf}.
    */
   async scan(
     z: Uint8Array,
@@ -382,9 +390,10 @@ export class DftWorkerClient {
     points: number,
     onPoint: (point: ScanPoint) => void,
     budgetMs?: number | null,
+    charges?: Int8Array,
   ): Promise<void> {
     await this.#send<Extract<WorkerResponse, { type: 'scanDone' }>>(
-      (id) => ({ id, type: 'scan', z, from, to, points, budgetMs }),
+      (id) => ({ id, type: 'scan', z, from, to, points, budgetMs, charges }),
       (partial) => {
         if (partial.type === 'scanPoint') onPoint(partial.point);
       },
@@ -399,12 +408,15 @@ export class DftWorkerClient {
    * molecule between them is solved - a free atom is solved spherically, so its
    * levels do not split by spin. It reads no calculation, so unlike
    * {@link orbitals} it answers whether or not one is loaded.
+   *
+   * `charges` makes each entry the ion placed, as for {@link scf}.
    */
-  async atomLevels(z: Uint8Array): Promise<number[][]> {
+  async atomLevels(z: Uint8Array, charges?: Int8Array): Promise<number[][]> {
     const response = await this.#send<Extract<WorkerResponse, { type: 'atomLevels' }>>((id) => ({
       id,
       type: 'atomLevels',
       z,
+      charges,
     }));
     return response.levels;
   }

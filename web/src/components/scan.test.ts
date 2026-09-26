@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CHARGED_REACH,
   MIN_WELL,
+  NEUTRAL_REACH,
+  SCAN_CHARGED_NOTE,
   SCAN_HEADING,
   SCAN_INTRO,
   SCAN_PART_HEADING,
@@ -13,6 +16,7 @@ import {
   buildScan,
   correlationTexts,
   defaultMarker,
+  diagramEnds,
   diatomicName,
   lowestPoint,
   presetFor,
@@ -239,6 +243,20 @@ describe('the deepest separation', () => {
     expect(figure.notes[0]).toContain('もっと近いところ');
   });
 
+  it('says so when the curve is still falling where the figure ends on the right', () => {
+    // H2+ placed at H2's length, walked to the charged reach (V7-7): its bottom
+    // is past the right edge, which is not the same thing as there being none.
+    const squashed = HYDROGEN.slice(0, 2);
+    expect(lowestPoint(squashed)).toBeNull();
+    const figure = buildScan(squashed, RANGE(0.4, 0.74, 2));
+    expect(figure.notes[0]).toContain('もっと遠いところ');
+    // A tail flat to a hair keeps its own sentence even when its far end happens
+    // to come out lowest: helium's, with the last point nudged below the rest.
+    const flat = [...HELIUM.slice(1, -1), { ...HELIUM[HELIUM.length - 1], energy: -5.54387 }];
+    const tail = buildScan(flat, RANGE(2.0, 4.0, 4));
+    expect(tail.notes.some((note) => note.includes('谷と呼べるものがありません'))).toBe(true);
+  });
+
   it('is where the marker starts, and otherwise the shortest separation', () => {
     expect(defaultMarker(HYDROGEN)).toBe(1);
     expect(defaultMarker(HELIUM)).toBe(0);
@@ -383,9 +401,19 @@ describe('the pair a scan walks', () => {
   it('walks the two atoms on screen, in their order, over the measured range if any', () => {
     // Hydrogen fluoride placed fluorine first: the measured range, but the
     // elements stay where they were on screen.
-    expect(scanPairFor([9, 1], 0.92)).toEqual({ z: [9, 1], from: 0.6, to: 1.7, points: 27 });
+    expect(scanPairFor([9, 1], 0.92)).toEqual({
+      z: [9, 1],
+      charges: [0, 0],
+      from: 0.6,
+      to: 1.7,
+      points: 27,
+    });
     // Carbon monoxide has no measured range: one around where it sits.
-    expect(scanPairFor([6, 8], 1.13)).toEqual({ z: [6, 8], ...rangeAround(1.13) });
+    expect(scanPairFor([6, 8], 1.13)).toEqual({
+      z: [6, 8],
+      charges: [0, 0],
+      ...rangeAround(1.13),
+    });
     // And the measured range does not follow the marker: a stretched O2 is
     // still walked over O2's own range.
     expect(scanPairFor([8, 8], 1.9)).toMatchObject({ from: 0.9, to: 2.1 });
@@ -401,6 +429,58 @@ describe('the pair a scan walks', () => {
     // And the wall does not start so far in that it flattens the well: every
     // preset heavier than H2 starts at 0.65 to 0.75 times its bond.
     expect(rangeAround(1.208).from).toBeGreaterThanOrEqual(0.65 * 1.208);
+  });
+
+  it('walks a charged pair over no preset, and not as far out (V7-7)', () => {
+    // H2+ at H2's length: H2 has a measured range to 3.0, but that was walked
+    // neutral; the charged one stops at 1.4 bonds, the same near end as ever.
+    const h2plus = scanPairFor([1, 1], 0.74, [1, 0]);
+    expect(h2plus).toEqual({
+      z: [1, 1],
+      charges: [1, 0],
+      ...rangeAround(0.74, CHARGED_REACH),
+      charged: true,
+    });
+    expect(h2plus.to).toBeLessThan(presetFor([1, 1])!.to);
+    expect(h2plus.from).toBe(rangeAround(0.74).from);
+    // The same pair around the same length, neutral, reaches further.
+    expect(h2plus.to).toBeLessThan(rangeAround(0.74).to);
+    expect(CHARGED_REACH).toBeLessThan(NEUTRAL_REACH);
+    // A charged pair no preset covers: OH-, cut short the same way.
+    const hydroxide = scanPairFor([8, 1], 0.98, [-1, 0]);
+    expect(hydroxide.to).toBe(rangeAround(0.98, CHARGED_REACH).to);
+    expect(hydroxide.to).toBeLessThan(rangeAround(0.98).to);
+  });
+
+  it('decides a pair is charged by its total, not by its atoms (V7-0)', () => {
+    // H+ beside F- is neutral HF to the engine: HF's own range, no note. The
+    // charges still go with the pair, for the free ions at the diagram's ends.
+    expect(scanPairFor([1, 9], 0.92, [1, -1])).toEqual({
+      z: [1, 9],
+      charges: [1, -1],
+      from: 0.6,
+      to: 1.7,
+      points: 27,
+    });
+    expect(scanPairFor([11, 17], 2.36, [1, -1]).charged).toBeUndefined();
+  });
+});
+
+describe('the note under a charged pair’s scan', () => {
+  it('says why the far end is near, only when the pair is charged', () => {
+    const charged = buildScan(HYDROGEN, { ...RANGE(0.4, 3.0, 5), charged: true });
+    expect(charged.notes).toContain(SCAN_CHARGED_NOTE);
+    expect(buildScan(HYDROGEN, RANGE(0.4, 3.0, 5)).notes).not.toContain(SCAN_CHARGED_NOTE);
+    // And with a range from `scanPairFor`, which is how the app asks for it.
+    const asked = scanPairFor([1, 1], 0.74, [0, 1]);
+    expect(buildScan(HYDROGEN, asked).notes).toContain(SCAN_CHARGED_NOTE);
+  });
+
+  it('writes no number and names nothing of the method (requirement F4)', () => {
+    expect(SCAN_CHARGED_NOTE).not.toMatch(/\d/);
+    for (const word of ['Å', '倍', '基底', 'STO-3G', '6-31G', '汎関数', 'LDA', '電荷', '多重度']) {
+      expect(SCAN_CHARGED_NOTE).not.toContain(word);
+    }
   });
 });
 
@@ -790,7 +870,7 @@ describe('the correlation diagram', () => {
   it('names a free atom’s orbital by its column and its rung', () => {
     // V6-8: the words under the diagram for a line of either atom's column.
     const n2 = buildCorrelation(N2_ATOMS, ['N', 'N'], N2_LEVELS, N2_MAKEUP);
-    const symbols = ['N', 'N'];
+    const symbols = diagramEnds([{ z: 7 }, { z: 7 }], () => 'N');
     expect(atomPickWords(n2, { index: 2, spin: 'both', atom: 1, along: 'axis' }, symbols)).toBe(
       'N の原子の 2p（結合の軸の向き）。結合する前の、原子ひとつの部屋です。',
     );
@@ -801,6 +881,36 @@ describe('the correlation diagram', () => {
     expect(atomPickWords(null, { index: 4, spin: 'both', atom: 0, along: 'toward' }, symbols)).toBe(
       'N の原子の部屋（軸に垂直・手前）。結合する前の、原子ひとつの部屋です。',
     );
+  });
+
+  it('puts the ions at the ends as they were placed (V7-7)', () => {
+    // H+ beside H: H+ has one level and no electron (`atomLevels`), H its 1s.
+    const ends = diagramEnds([{ z: 1, charge: 1 }, { z: 1 }], () => 'H');
+    expect(ends).toEqual([
+      { heading: 'H⁺', kind: 'bare' },
+      { heading: 'H', kind: 'atom' },
+    ]);
+    // Made-up heights, both above the molecule's lowest rung so neither is folded.
+    const figure = buildCorrelation([[-0.5], [-0.24]], ends, H2_LEVELS, H2_MAKEUP);
+    expect(figure.columns[0].heading).toBe('H⁺');
+    expect(figure.columns[2].heading).toBe('H');
+    expect(figure.columns[0].rungs[0].label).toContain('H⁺ のイオンの部屋');
+    expect(figure.columns[2].rungs[0].label).toContain('H の原子の部屋');
+    const pick = figure.columns[0].rungs[0].picks[0]!;
+    expect(atomPickWords(figure, pick, ends)).toBe(
+      'H⁺ の 1s。結合する前の、電子の入っていない、イオンひとつの部屋です。',
+    );
+    // An ion that keeps electrons is an ion's room, not an empty one: O- of OH-.
+    const hydroxide = diagramEnds([{ z: 8, charge: -1 }, { z: 1 }], (z) => (z === 8 ? 'O' : 'H'));
+    expect(hydroxide[0]).toEqual({ heading: 'O⁻', kind: 'ion' });
+    expect(atomPickWords(null, { index: 0, spin: 'both', atom: 0 }, hydroxide)).toBe(
+      'O⁻ の部屋。結合する前の、イオンひとつの部屋です。',
+    );
+    // And the words stay free of numbers other than the orbital's name.
+    for (const text of correlationTexts(figure)) {
+      expect(text).not.toMatch(/\d+\.\d+/);
+      expect(text).not.toMatch(/[-−]/);
+    }
   });
 
   it('joins the molecule to the same atomic levels as before the set became one rung', () => {

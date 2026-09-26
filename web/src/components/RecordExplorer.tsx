@@ -18,7 +18,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LogGroup } from '../records/log';
-import { hillFormula, type StructureRecord } from '../records/record';
+import { moleculeHeading, type StructureRecord } from '../records/record';
 import { buildRecordTree, type PendingCandidate } from '../records/tree';
 import type { Candidate } from '../search/pool';
 import { IconButton } from './controls';
@@ -105,7 +105,7 @@ export function RecordExplorer(props: Props) {
     (): PendingCandidate[] =>
       candidates.map((candidate) => ({
         id: candidate.id,
-        formula: hillFormula(Array.from(candidate.z), symbolOf),
+        formula: moleculeHeading(candidate.z, candidate.charges, symbolOf),
         name: candidateName(candidates, candidate),
         status: candidate.status,
         text: statusText(candidate, now),

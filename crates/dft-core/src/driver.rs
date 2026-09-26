@@ -1,20 +1,27 @@
-//! Choosing the charge and spin state the user is never asked about.
+//! Choosing the spin state the user is never asked about.
 //!
 //! Requirement F4 is that no DFT parameter reaches the interface: the user
-//! places nuclei and the engine works out the rest. Charge is the easy half -
-//! neutral, unless nothing else works - and spin is the interesting one, because
-//! the electron count alone does not determine it. An even number of electrons
-//! is *usually* a closed shell, but O2 is not: its two highest electrons sit in
-//! a degenerate pair of orbitals and stay unpaired, and the triplet is 0.07
-//! Hartree below the singlet. Nothing in the geometry says so, so the only way
-//! to find out is to solve both and compare.
+//! places nuclei and the engine works out the rest. The charge is not part of
+//! that search. It is the user's - an ion is placed with its charge, and a
+//! molecule without one is neutral - and it is solved for exactly as given
+//! ([`crate::molecule::Molecule::atom_charges`]). Until v7 there was a last
+//! round here that tried one electron more or less when nothing else
+//! converged; it answered a question nobody had asked (a molecule that came
+//! back charged without saying so), and it is gone: a structure that cannot be
+//! solved as placed is a divergence (requirement F5), not a different ion.
+//!
+//! Spin is the interesting part, because the electron count alone does not
+//! determine it. An even number of electrons is *usually* a closed shell, but
+//! O2 is not: its two highest electrons sit in a degenerate pair of orbitals
+//! and stay unpaired, and the triplet is 0.07 Hartree below the singlet.
+//! Nothing in the geometry says so, so the only way to find out is to solve
+//! both and compare.
 //!
 //! The search is a sequence of rounds. Each round is a set of states to try and
 //! how hard to push the SCF at them; the first round whose attempts converge
 //! decides the answer, and later rounds exist only for the geometries that fail.
-//! Within a round every state has the same electron count, so comparing their
-//! energies is meaningful; across the charged states of the last round it would
-//! not be, and there the first state that converges wins instead.
+//! Every state has the same electron count, so within a round the lowest energy
+//! wins.
 //!
 //! Nothing here loops over geometries: the search runs once, on the structure as
 //! placed, and the state it settles on is then held fixed. Repeating it at every
@@ -28,7 +35,9 @@ use crate::scf::{self, InitialGuess, ScfOptions, ScfResult, System};
 /// A charge and spin multiplicity to solve for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpinState {
-    /// Total charge in units of the elementary charge.
+    /// Total charge in units of the elementary charge: always the molecule's
+    /// own, which the search does not change. Kept here so a caller holding
+    /// only the state still knows what was solved.
     pub charge: i32,
     /// Spin multiplicity `2S + 1`.
     pub multiplicity: u32,
@@ -67,8 +76,6 @@ pub struct DriverOptions {
     /// How many multiplicities above the ground-state guess to try, in steps of
     /// two, once the obvious ones have failed.
     pub extra_multiplicities: usize,
-    /// Whether to try adding or removing an electron as a last resort.
-    pub try_charges: bool,
 }
 
 impl Default for DriverOptions {
@@ -91,7 +98,6 @@ impl Default for DriverOptions {
                 ..ScfOptions::default()
             },
             extra_multiplicities: 2,
-            try_charges: true,
         }
     }
 }
@@ -120,10 +126,6 @@ impl Outcome {
 struct Round {
     states: Vec<SpinState>,
     options: ScfOptions,
-    /// Whether the states in this round can be compared by energy. They can
-    /// whenever they hold the same number of electrons, which is every round but
-    /// the charged one.
-    comparable: bool,
 }
 
 /// Runs the search and leaves `system.molecule` carrying the state it chose.
@@ -169,12 +171,10 @@ pub fn solve(
             if !result.converged {
                 continue;
             }
+            // Same electron count, so the lower energy is the better answer.
             let better = match &best {
                 None => true,
-                // Same electron count, so the lower energy is the better
-                // answer; different electron counts are not comparable at all,
-                // and there the order the states are tried in decides.
-                Some((_, previous)) => round.comparable && result.energy < previous.energy,
+                Some((_, previous)) => result.energy < previous.energy,
             };
             if better {
                 best = Some((state, result));
@@ -272,8 +272,10 @@ fn attempt(system: &mut System, state: SpinState, options: &ScfOptions) -> Optio
     })
 }
 
+/// Only the multiplicity changes: the charge is the one the molecule was
+/// placed with, and every state tried carries it.
 fn set_state(molecule: &mut Molecule, state: SpinState) {
-    molecule.charge = state.charge;
+    debug_assert_eq!(molecule.charge, state.charge, "the search never changes the charge");
     molecule.multiplicity = state.multiplicity;
 }
 
@@ -297,31 +299,24 @@ fn is_possible(molecule: &Molecule, state: SpinState, n_orbitals: usize) -> bool
 
 /// The rounds, in the order they are tried.
 fn rounds(molecule: &Molecule, options: &DriverOptions) -> Vec<Round> {
-    let neutral = Molecule { charge: 0, ..molecule.clone() };
-    let base = neutral.default_multiplicity();
+    let charge = molecule.charge;
+    let base = molecule.default_multiplicity();
 
     // An even electron count gets both the closed shell and the triplet, which
     // is the pair O2 has to choose between. An odd one has a single sensible
     // answer, one unpaired electron, and there is nothing to compare it with.
     let ground_states: Vec<SpinState> = if base == 1 {
-        vec![
-            SpinState { charge: 0, multiplicity: 1 },
-            SpinState { charge: 0, multiplicity: 3 },
-        ]
+        vec![SpinState { charge, multiplicity: 1 }, SpinState { charge, multiplicity: 3 }]
     } else {
-        vec![SpinState { charge: 0, multiplicity: 2 }]
+        vec![SpinState { charge, multiplicity: 2 }]
     };
 
     let mut rounds = vec![
-        Round { states: ground_states.clone(), options: options.scf.clone(), comparable: true },
+        Round { states: ground_states.clone(), options: options.scf.clone() },
         // The same states again, with the SCF slowed down. A density that
         // oscillates under ordinary damping often settles under heavy damping,
         // and that is a cheaper thing to try than a different spin state.
-        Round {
-            states: ground_states,
-            options: options.persistent_scf.clone(),
-            comparable: true,
-        },
+        Round { states: ground_states, options: options.persistent_scf.clone() },
     ];
 
     // Higher multiplicities. These are a fallback, not a search for the ground
@@ -330,33 +325,10 @@ fn rounds(molecule: &Molecule, options: &DriverOptions) -> Vec<Round> {
     // would cost more than the answer is worth in an application about watching
     // a molecule relax.
     let higher: Vec<SpinState> = (1..=options.extra_multiplicities)
-        .map(|step| SpinState { charge: 0, multiplicity: base + 2 * step as u32 })
+        .map(|step| SpinState { charge, multiplicity: base + 2 * step as u32 })
         .collect();
     if !higher.is_empty() {
-        rounds.push(Round {
-            states: higher,
-            options: options.persistent_scf.clone(),
-            comparable: true,
-        });
-    }
-
-    // Last resort: an electron more or less. The two are not comparable by
-    // energy - a cation is always above its neutral molecule - so whichever
-    // converges first is taken, cation before anion because losing an electron
-    // is the likelier fix for a structure that cannot hold them all.
-    if options.try_charges {
-        let charged = [1, -1]
-            .into_iter()
-            .map(|charge| {
-                let shifted = Molecule { charge, ..molecule.clone() };
-                SpinState { charge, multiplicity: shifted.default_multiplicity() }
-            })
-            .collect();
-        rounds.push(Round {
-            states: charged,
-            options: options.persistent_scf.clone(),
-            comparable: false,
-        });
+        rounds.push(Round { states: higher, options: options.persistent_scf.clone() });
     }
 
     rounds
@@ -430,9 +402,6 @@ mod tests {
         assert!(!is_possible(&lithium, singlet, 5));
         assert!(is_possible(&lithium, SpinState { charge: 0, multiplicity: 2 }, 5));
 
-        // And a hydrogen atom has no electron left to take away.
-        let hydrogen = Molecule::new(vec![Atom { z: 1, pos: [0.0; 3] }]).unwrap();
-        assert!(!is_possible(&hydrogen, SpinState { charge: 1, multiplicity: 1 }, 1));
     }
 
     #[test]
@@ -571,16 +540,17 @@ mod tests {
             scf: hopeless.clone(),
             persistent_scf: hopeless,
             extra_multiplicities: 1,
-            try_charges: true,
         };
         let mut system = System::build(water(), BasisKind::Sto3g, GridQuality::Coarse).unwrap();
         let outcome = solve(&mut system, &options, &mut always());
         assert!(!outcome.converged());
         assert_eq!(outcome.state, SpinState { charge: 0, multiplicity: 1 });
-        assert!(outcome.attempts.len() > 2, "every round should have been tried");
+        // Singlet and triplet twice, then the quintet: every round, and
+        // nothing charged among them.
+        assert_eq!(outcome.attempts.len(), 5, "every round should have been tried");
         assert!(outcome.attempts.iter().all(|a| !a.converged));
-        // The charged states are the last thing tried, and they were reached.
-        assert!(outcome.attempts.iter().any(|a| a.state.charge != 0));
+        assert!(outcome.attempts.iter().all(|a| a.state.charge == 0));
+        assert_eq!(system.molecule.charge, 0);
         assert_eq!(outcome.result.density.nrows(), system.n_functions());
     }
 }

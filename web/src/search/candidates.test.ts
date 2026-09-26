@@ -32,6 +32,7 @@ function source(overrides: Partial<CandidateSource> = {}): CandidateSource {
   return {
     z: METHANE.z,
     xyz: METHANE.xyz,
+    charges: new Int8Array(5),
     covalentRadius,
     batch: 'batch-1',
     id: () => `id-${next++}`,
@@ -95,6 +96,26 @@ describe('the structure as it is', () => {
     expect(candidate.start).toBe(candidate.built);
     expect(Array.from(candidate.start)).toEqual(Array.from(METHANE.xyz));
     expect(candidate.batch).toBe('batch-1');
+  });
+});
+
+describe('the charges of a candidate', () => {
+  // CH4 with one hydrogen made H+ (v7). A nudge moves atoms, never their charges.
+  const charged = new Int8Array([0, 1, 0, 0, 0]);
+
+  it('are the structure\'s own when it is tried as it is', () => {
+    expect(Array.from(candidateAsBuilt(source({ charges: charged })).charges)).toEqual([
+      0, 1, 0, 0, 0,
+    ]);
+  });
+
+  it('are the structure\'s own on every nudged candidate', () => {
+    const candidates = nudgedCandidates(source({ charges: charged }), 3, 11);
+    expect(candidates).toHaveLength(3);
+    for (const candidate of candidates) {
+      expect(Array.from(candidate.charges)).toEqual([0, 1, 0, 0, 0]);
+      expect(Array.from(candidate.start)).not.toEqual(Array.from(METHANE.xyz));
+    }
   });
 });
 

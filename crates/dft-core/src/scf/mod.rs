@@ -405,7 +405,7 @@ pub fn run_restricted(system: &System, options: &ScfOptions) -> ScfResult {
     };
     let mut density = match &options.initial_guess {
         InitialGuess::Atomic => {
-            guess::superposition_of_atomic_densities(system)
+            guess::starting_density(system)
         }
         InitialGuess::Core => fill(&system.core).2,
         restart => restart
@@ -507,7 +507,7 @@ pub fn run_unrestricted(system: &System, options: &ScfOptions) -> ScfResult {
     // genuinely different potentials.
     let (mut alpha, mut beta) = match &options.initial_guess {
         InitialGuess::Atomic => {
-            let total = guess::superposition_of_atomic_densities(system);
+            let total = guess::starting_density(system);
             (&total * 0.5, &total * 0.5)
         }
         InitialGuess::Core => {

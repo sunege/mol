@@ -30,6 +30,7 @@ function candidate(status: CandidateStatus, extra: Partial<Candidate> = {}): Can
     z: new Uint8Array([8, 1, 1]),
     built: new Float64Array(9),
     start: new Float64Array(9),
+    charges: new Int8Array(3),
     status,
     startedAt: status === 'waiting' ? null : 1000,
     finishedAt: null,

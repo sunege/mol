@@ -41,6 +41,7 @@ import {
   BOND_POPULATION_THRESHOLD,
   atomOrbitalWords,
   coreText,
+  freeAtomKind,
   frontierLabel,
   occupationMark,
   occupationText,
@@ -48,9 +49,11 @@ import {
   samePick,
   spinHeading,
   verdictBySymmetry,
+  type FreeAtomKind,
   type Frontier,
   type OrbitalPick,
 } from './orbital';
+import { formulaWithCharge } from './ion';
 import { SAME_VALLEY_KJ_PER_MOL } from '../records/log';
 import { HARTREE_TO_KJ_PER_MOL } from '../records/units';
 
@@ -61,16 +64,24 @@ export interface ScanRange {
   from: number;
   to: number;
   points: number;
+  /**
+   * Set when the far end was cut short because the pair carries a charge
+   * ({@link CHARGED_REACH}), which the figure says in a note under it.
+   */
+  charged?: true;
 }
 
 /** A pair of elements to walk together, and the range worth walking. */
 export interface ScanPair extends ScanRange {
   z: [number, number];
+  /** The charge put on each of them (v7), in the same order; 0 is neutral. */
+  charges: [number, number];
 }
 
-/** A pair whose range was measured before it was written down. */
-export interface ScanPreset extends ScanPair {
+/** A pair whose range was measured before it was written down, neutral (V7-7). */
+export interface ScanPreset extends ScanRange {
   id: string;
+  z: [number, number];
 }
 
 /**
@@ -126,7 +137,7 @@ export const SCAN_PRESETS: ScanPreset[] = [
  * than one worked out from where its atoms happen to be. The curated ranges are the ones that were walked end to end before they
  * were written down; a range reaching much further out can find the engine
  * calling a degenerate pair degenerate at one separation and not at the next
- * ({@link buildScan}'s last note).
+ * ({@link buildScan}'s note on lines that split).
  */
 export function presetFor(z: readonly number[]): ScanPreset | null {
   if (z.length !== 2) return null;
@@ -159,25 +170,58 @@ export function presetFor(z: readonly number[]): ScanPreset | null {
  * 2.65 and are counted as one pi pair. And at half the bond the wall is 4.1-4.7
  * Ha high over a well of 0.05-0.5, so the curve the figure is for is squashed
  * flat along its bottom; at 0.7 times the wall is 0.3-1.1 Ha.
+ *
+ * `reach` is the far factor, which is shorter for a charged pair
+ * ({@link CHARGED_REACH}); the near one is the same for both.
  */
-export function rangeAround(distance: number): ScanRange {
+export function rangeAround(distance: number, reach = NEUTRAL_REACH): ScanRange {
   const round = (value: number) => Math.round(value * 100) / 100;
   return {
     from: round(Math.max(0.3, distance * 0.7)),
-    to: round(Math.max(0.6, distance * 1.8)),
+    to: round(Math.max(0.6, distance * reach)),
     points: SCAN_POINTS,
   };
 }
+
+/** How far out {@link rangeAround} walks a neutral pair, in bond lengths. */
+export const NEUTRAL_REACH = 1.8;
+
+/**
+ * How far out it walks a charged one (V7-0), which is less far: H2+ is off the
+ * exact answer in its basis by more than a tenth of its well at 1.5 times its
+ * bond (neutral H2, 4% at 1.8), and He2+, F2- and Cl2- flatten and fall from
+ * 1.7-1.8 times on - LDA's delocalisation error, which spreads a charge over
+ * both atoms however far apart they are (`docs/dev-notes.md`, "v7-0 の実測").
+ */
+export const CHARGED_REACH = 1.4;
 
 /**
  * What a scan of the two atoms on screen walks: those two, in the order they
  * are on screen (so the marker puts each element back where it was), over the
  * measured range when there is one and otherwise around their separation.
+ *
+ * A pair whose total charge is not zero gets neither the measured range (those
+ * were walked neutral) nor the neutral reach, but {@link CHARGED_REACH}. The
+ * total decides it rather than the atoms' own charges: Na+ beside Cl-, or H+
+ * beside F-, is the very calculation the engine does for neutral NaCl and HF
+ * (V7-0), so it is walked as they are. The charges still travel with the pair,
+ * for the engine and for the free ions at the ends of the correlation diagram.
  */
-export function scanPairFor(z: readonly [number, number], distance: number): ScanPair {
+export function scanPairFor(
+  z: readonly [number, number],
+  distance: number,
+  charges: readonly [number, number] = [0, 0],
+): ScanPair {
+  const pair: Pick<ScanPair, 'z' | 'charges'> = {
+    z: [z[0], z[1]],
+    charges: [charges[0], charges[1]],
+  };
+  if (charges[0] + charges[1] !== 0) {
+    return { ...pair, ...rangeAround(distance, CHARGED_REACH), charged: true };
+  }
   const preset = presetFor(z);
   const range = preset === null ? rangeAround(distance) : preset;
-  return { z: [z[0], z[1]], from: range.from, to: range.to, points: range.points };
+  return { ...pair, from: range.from, to: range.to, points: range.points };
 }
 
 // --- words ----------------------------------------------------------------
@@ -210,6 +254,14 @@ export const SCAN_LEVELS_HINT =
 /** Under the lower panel, which is a different quantity from the upper one. */
 export const SCAN_ENERGY_HINT =
   '下は分子全体のエネルギーです。いちばん低いところが、その 2 原子の落ち着く距離です。';
+
+/**
+ * Under a scan of a charged pair, whose range stops short ({@link CHARGED_REACH}).
+ * No number and no name of the method: only that the calculation, not the
+ * molecule, is what gives out further along.
+ */
+export const SCAN_CHARGED_NOTE =
+  '電気を帯びた分子は、原子を離しすぎると計算が当てにならなくなるので、右端をここまでにしています。';
 
 /** The one thing the marker does to the rest of the app. */
 export const SCAN_MARKER_HINT =
@@ -385,6 +437,21 @@ export function lowestPoint(points: readonly ScanPoint[]): ScanPoint | null {
   return apart.energy - deepest.energy > MIN_WELL ? deepest : null;
 }
 
+/**
+ * Whether the curve is still going down where the figure ends on the right,
+ * rather than lying flat there: the lowest point is the last one, and the one
+ * halfway along is more than a valley above it. A charged pair makes this common
+ * (V7-7) - its range stops at {@link CHARGED_REACH} times the separation it was
+ * placed at, and H2+ placed at H2's length has its bottom past that - but a
+ * neutral pair placed squashed gets it too. Helium's tail, flat to a hair and
+ * lowest at the far end or not by chance, is the other case, and says so.
+ */
+function fallingAtTheRight(solved: readonly ScanPoint[]): boolean {
+  const deepest = deepestOf(solved);
+  const middle = solved[Math.floor((solved.length - 1) / 2)];
+  return deepest === solved[solved.length - 1] && middle.energy - deepest.energy > MIN_WELL;
+}
+
 function deepestOf(solved: readonly ScanPoint[]): ScanPoint {
   return solved.reduce((best, point) => (point.energy < best.energy ? point : best));
 }
@@ -479,7 +546,7 @@ export function buildScan(
     axis: { y: energyBottom, ticks: ticksOf(range, xOf), unit: '距離（Å）' },
     marker,
     core: core > 0 ? foldedRow(core, levelsBottom + 5) : null,
-    notes: notesOf(points, lowest, curves, solved.length),
+    notes: notesOf(points, lowest, curves, solved.length, range.charged === true),
   };
 }
 
@@ -784,6 +851,7 @@ function notesOf(
   lowest: ScanPoint | null,
   curves: readonly ScanCurve[],
   solvedCount: number,
+  charged: boolean,
 ): string[] {
   const notes: string[] = [];
   const solved = points.filter((point) => point.converged);
@@ -802,7 +870,9 @@ function notesOf(
     notes.push(
       deepestOf(solved) === solved[0]
         ? 'この図の中では左端がいちばん低く、落ち着く距離はもっと近いところにあります。'
-        : 'いちばん低いところと、離したときとの差がごくわずかで、谷と呼べるものがありません。' +
+        : fallingAtTheRight(solved)
+          ? 'この図の中では右端がいちばん低く、落ち着く距離はもっと遠いところにあります。'
+          : 'いちばん低いところと、離したときとの差がごくわずかで、谷と呼べるものがありません。' +
             '上の図のほうを見てください。',
     );
   }
@@ -821,6 +891,9 @@ function notesOf(
         'そこで線が切れ、本数が増えているのはそのためです。',
     );
   }
+  // Why the right-hand end is nearer than it is for the same atoms uncharged,
+  // which is otherwise read as the molecule coming apart there (V7-7).
+  if (charged) notes.push(SCAN_CHARGED_NOTE);
   return notes;
 }
 
@@ -969,6 +1042,30 @@ export interface CorrelationColumn {
   headingY: number;
   x: number;
   rungs: CorrelationRung[];
+  /** On the two free atoms' columns only: an atom, an ion, or H⁺ (v7). */
+  kind?: FreeAtomKind;
+}
+
+/** One end of the correlation diagram: its heading, and what stands there (v7). */
+export interface DiagramEnd {
+  heading: string;
+  kind: FreeAtomKind;
+}
+
+/**
+ * The two ends of the correlation diagram, as the atoms on screen were placed:
+ * an atom made into an ion is the free ion, headed H⁺ or O⁻ (V7-7), with the
+ * levels `atomLevels` returns for that charge. Each atom's own charge, not the
+ * total's: Na⁺ beside Cl⁻ is two ions at the ends however neutral the middle.
+ */
+export function diagramEnds(
+  atoms: readonly { z: number; charge?: number }[],
+  symbolOf: (z: number) => string,
+): DiagramEnd[] {
+  return atoms.map(({ z, charge = 0 }) => ({
+    heading: formulaWithCharge(symbolOf(z), charge),
+    kind: freeAtomKind(z, charge),
+  }));
 }
 
 export interface CorrelationLink {
@@ -1099,22 +1196,28 @@ function atomSets(energies: readonly number[]): AtomSet[] {
 export function atomPickWords(
   figure: CorrelationFigure | null,
   pick: OrbitalPick,
-  symbols: readonly string[],
+  ends: readonly DiagramEnd[],
 ): string {
   const along = pick.along ?? null;
   for (const column of figure?.columns ?? []) {
     const rung = column.rungs.find((r) => r.picks.some((p) => samePick(p, pick)));
-    if (rung) return atomOrbitalWords(column.heading, rung.name, along);
+    if (rung) return atomOrbitalWords(column.heading, rung.name, along, column.kind);
   }
-  return atomOrbitalWords(symbols[pick.atom ?? 0] ?? '', '', along);
+  const end = ends[pick.atom ?? 0];
+  return atomOrbitalWords(end?.heading ?? '', '', along, end?.kind);
 }
 
 export function buildCorrelation(
   atoms: readonly (readonly number[])[],
-  symbols: readonly string[],
+  symbols: readonly (string | DiagramEnd)[],
   levels: readonly OrbitalLevel[],
   makeup: readonly RungMakeup[],
 ): CorrelationFigure {
+  // A bare symbol is a neutral atom, which is every end there was before v7.
+  const ends = [0, 1].map((side): DiagramEnd => {
+    const end = symbols[side] ?? '';
+    return typeof end === 'string' ? { heading: end, kind: 'atom' } : end;
+  });
   const { core, shown } = foldCore(levels);
   const cut = shown.length === 0 ? -Infinity : Math.min(...shown.map((level) => level.energy));
   // The same electrons on either side: an atomic level below the molecule's cut
@@ -1150,11 +1253,13 @@ export function buildCorrelation(
     const outward = side === 0 ? -1 : 1;
     return {
       key: side === 0 ? 'left' : 'right',
-      heading: symbols[side] ?? '',
+      heading: ends[side].heading,
       headingY: CORR_HEADING_Y,
       x,
+      kind: ends[side].kind,
       rungs: kept[side].map(({ name, first, size }, at): CorrelationRung => {
-        const words = [`${symbols[side] ?? ''} の原子の部屋`, ...(name === '' ? [] : [name])];
+        const whose = ends[side].kind === 'atom' ? '原子' : 'イオン';
+        const words = [`${ends[side].heading} の${whose}の部屋`, ...(name === '' ? [] : [name])];
         const label = words.join('、');
         const offsets = Array.from({ length: size }, (_, offset) => offset);
         // Only a named p set is three directions; `atomSets` makes no other set.

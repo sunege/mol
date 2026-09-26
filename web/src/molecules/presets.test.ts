@@ -11,6 +11,22 @@ describe('toWorkerArrays', () => {
     expect(Array.from(xyz)).toEqual([0, 0, 0.1173, 0, 0.7572, -0.4693]);
   });
 
+  it('always sends a charge per atom, zero where none was put', () => {
+    const { charges } = toWorkerArrays([
+      { z: 8, pos: [0, 0, 0] },
+      { z: 1, pos: [0, 0.76, -0.47], charge: 1 },
+      { z: 1, pos: [0, -0.76, -0.47], charge: 0 },
+      { z: 17, pos: [2, 0, 0], charge: -1 },
+    ]);
+    expect(charges).toBeInstanceOf(Int8Array);
+    expect(Array.from(charges)).toEqual([0, 1, 0, -1]);
+    for (const preset of PRESETS) {
+      expect(Array.from(toWorkerArrays(preset.atoms).charges)).toEqual(
+        preset.atoms.map(() => 0),
+      );
+    }
+  });
+
   it('produces a coordinate array three times the atom count', () => {
     for (const preset of PRESETS) {
       const { z, xyz } = toWorkerArrays(preset.atoms);

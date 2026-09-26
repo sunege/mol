@@ -186,14 +186,20 @@ export interface ScfOutcome {
   converged: boolean;
   iterations: number;
   /**
-   * The spin multiplicity and charge the engine chose for itself.
+   * The spin multiplicity the engine chose for itself.
    *
    * Diagnostics, not interface. Requirement F4 keeps every DFT parameter off
-   * the screen, and these two must stay off it; they cross the boundary so that
-   * a developer can confirm from the console that O2 was treated as a triplet,
-   * and so phase 5 can hold the state fixed while the geometry moves.
+   * the screen, and this one must stay off it; it crosses the boundary so that
+   * a developer can confirm from the console that O2 was treated as a triplet.
    */
   multiplicity: number;
+  /**
+   * The total charge solved at: the sum of the request's `charges`, returned
+   * exactly as given (zero when they were omitted). The engine no longer picks
+   * one; a molecule that cannot be solved at the charge asked for does not
+   * converge. The charges themselves are the user's and are shown, on the
+   * atoms they were placed on (docs/v7).
+   */
   charge: number;
   /** How many spin states were solved before one was chosen. */
   attempts: number;
@@ -517,8 +523,26 @@ export type WorkerRequest =
    * A single point, answering with `progress` as it goes and then one `scf`.
    *
    * `level` is the {@link ModelLevel} to solve at; omitted means `'shape'`.
+   *
+   * `charges` is the charge placed on each atom, in the order of `z`; omitted
+   * means every atom is neutral (the default is set in one place, `dft-wasm`'s
+   * `atom_charges`). −1, 0 and +1 are the interface's rule and are not checked
+   * here; the engine refuses a list of the wrong length, a charge no atom can
+   * carry (two extra electrons, a noble-gas anion) and a molecule left with no
+   * electrons, with an `error`. The SCF sees only the total, so Na⁺ beside Cl⁻
+   * is the same calculation as neutral NaCl, starting guess included. What the
+   * split changes is what the molecule is compared with: the atoms the
+   * `'deformation'` surface is drawn against, and the free atoms of `atomLevels`
+   * and of an isosurface's `atom` orbital.
    */
-  | { id: number; type: 'scf'; z: Uint8Array; xyz: Float64Array; level?: ModelLevel }
+  | {
+      id: number;
+      type: 'scf';
+      z: Uint8Array;
+      xyz: Float64Array;
+      level?: ModelLevel;
+      charges?: Int8Array;
+    }
   /**
    * Relaxes the structure, answering with a `step` per accepted geometry and
    * `progress` as each part of the work starts, and then one `scf` for the final
@@ -533,7 +557,8 @@ export type WorkerRequest =
    * budget is the only one.
    *
    * `level` is the {@link ModelLevel} every step is solved at; omitted means
-   * `'shape'`.
+   * `'shape'`. `charges` holds for every step too, and means what it does for
+   * `scf`.
    *
    * `stop` is how the user's 中止 reaches a worker that is busy: memory shared
    * with the page ({@link raiseStop}), read after every step the way the budget
@@ -550,6 +575,7 @@ export type WorkerRequest =
       budgetMs?: number | null;
       level?: ModelLevel;
       stop?: Int32Array | null;
+      charges?: Int8Array;
     }
   /**
    * The orbital ladder of the last `scf` or `optimize` request.
@@ -594,6 +620,9 @@ export type WorkerRequest =
    *
    * Nothing here replaces the calculation the surfaces are drawn from: a scan
    * solves its own geometries and keeps none of them.
+   *
+   * `charges` is the charge on each of the two atoms, as for `scf`; charges the
+   * engine refuses are an `error` before any point is solved.
    */
   | {
       id: number;
@@ -603,6 +632,7 @@ export type WorkerRequest =
       to: number;
       points: number;
       budgetMs?: number | null;
+      charges?: Int8Array;
     }
   /**
    * The orbital levels of each element of `z` as a free atom, which are the two
@@ -613,8 +643,11 @@ export type WorkerRequest =
    * with its partly filled shell spread evenly over the degenerate orbitals, so
    * its levels do not split by spin. It needs no calculation to be loaded - it
    * is about the elements, not about anything on screen.
+   *
+   * `charges` makes each entry of `z` the ion placed, as for `scf`: a proton
+   * has no electrons, and its levels (all empty) are not a hydrogen atom's.
    */
-  | { id: number; type: 'atomLevels'; z: Uint8Array }
+  | { id: number; type: 'atomLevels'; z: Uint8Array; charges?: Int8Array }
   /**
    * Cuts the density of the last `scf` or `optimize` request at a new level.
    *

@@ -189,14 +189,17 @@ export class OrbitalCharacter {
  * A few milliseconds per element - it is the same atomic calculation every
  * molecular SCF already starts from - and at the level the scan beside it runs
  * at.
+ *
+ * `charges` is the charge on each entry of `z`, as for [`scf`]: an ion's levels
+ * are its own (a proton's are all empty, and lower than a hydrogen atom's).
  */
-export function atomLevels(z: Uint8Array): any;
+export function atomLevels(z: Uint8Array, charges?: Int8Array | null): any;
 
 /**
  * Relaxes a geometry given in Angstrom, calling `on_step` with each accepted
  * structure as it is produced (requirement F2).
  *
- * The charge and spin state are chosen once, on the structure as given, and
+ * The spin state is chosen once, on the structure as given, and
  * held for the whole optimisation: running the search at every geometry would
  * multiply the cost by the number of states tried, and the state is not what is
  * being optimised.
@@ -218,8 +221,9 @@ export function atomLevels(z: Uint8Array): any;
  *
  * `level` is what the calculation is for, as for [`scf`], and holds for every
  * step: the optimiser builds each new geometry in the basis of the one before.
+ * So do `charges`, as for [`scf`].
  */
-export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Function, on_progress?: Function | null, level?: string | null): Calculation;
+export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Function, on_progress?: Function | null, level?: string | null, charges?: Int8Array | null): Calculation;
 
 /**
  * Solves two atoms at `points` separations evenly spaced from `from_angstrom`
@@ -242,12 +246,18 @@ export function optimize(z: Uint8Array, xyz_angstrom: Float64Array, on_step: Fun
  *
  * Nothing here holds on to a calculation, so a scan neither replaces nor
  * disturbs the one the surfaces are being drawn from.
+ *
+ * `charges` is the charge on each of the two atoms, as for [`scf`]. The engine
+ * turns charges it refuses into a scan with no points; they are refused here
+ * instead, with the same message a single point would give, so that a caller
+ * is not left drawing an empty figure.
  */
-export function scan(z: Uint8Array, from_angstrom: number, to_angstrom: number, points: number, on_point: Function): void;
+export function scan(z: Uint8Array, from_angstrom: number, to_angstrom: number, points: number, on_point: Function, charges?: Int8Array | null): void;
 
 /**
- * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, choosing
- * the charge and spin state itself (requirement F4).
+ * Runs a Kohn-Sham LDA single point on a geometry given in Angstrom, at the
+ * charge placed on its atoms and choosing the spin state itself (requirement
+ * F4).
  *
  * Non-convergence comes back through `summary().converged`, never as a thrown
  * error: the UI turns it into an animation rather than a message
@@ -258,8 +268,11 @@ export function scan(z: Uint8Array, from_angstrom: number, to_angstrom: number, 
  *
  * `level` is what the calculation is for: `"shape"` (the default) or
  * `"measure"`. Any other name throws rather than being solved at the default.
+ *
+ * `charges` is the charge placed on each atom, in the order of `z`; absent
+ * means every atom is neutral (see [`atom_charges`]).
  */
-export function scf(z: Uint8Array, xyz_angstrom: Float64Array, on_progress?: Function | null, level?: string | null): Calculation;
+export function scf(z: Uint8Array, xyz_angstrom: Float64Array, on_progress?: Function | null, level?: string | null, charges?: Int8Array | null): Calculation;
 
 /**
  * Installs a panic hook that reports Rust panics to the browser console.
@@ -279,7 +292,7 @@ export interface InitOutput {
     readonly __wbg_calculation_free: (a: number, b: number) => void;
     readonly __wbg_isomesh_free: (a: number, b: number) => void;
     readonly __wbg_orbitalcharacter_free: (a: number, b: number) => void;
-    readonly atomLevels: (a: number, b: number) => [number, number, number];
+    readonly atomLevels: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly calculation_isosurface: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly calculation_orbitalCharacter: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly calculation_orbitals: (a: number) => [number, number, number];
@@ -296,11 +309,11 @@ export interface InitOutput {
     readonly isomesh_positiveIndices: (a: number) => [number, number];
     readonly isomesh_positiveNormals: (a: number) => [number, number];
     readonly isomesh_positivePositions: (a: number) => [number, number];
-    readonly optimize: (a: number, b: number, c: number, d: number, e: any, f: number, g: number, h: number) => [number, number, number];
+    readonly optimize: (a: number, b: number, c: number, d: number, e: any, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly orbitalcharacter_amplitudes: (a: number) => [number, number];
     readonly orbitalcharacter_populations: (a: number) => [number, number];
-    readonly scan: (a: number, b: number, c: number, d: number, e: number, f: any) => [number, number];
-    readonly scf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly scan: (a: number, b: number, c: number, d: number, e: number, f: any, g: number, h: number) => [number, number];
+    readonly scf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
     readonly start: () => void;
     readonly supportedElements: () => [number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;

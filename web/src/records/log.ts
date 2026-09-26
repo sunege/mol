@@ -4,8 +4,8 @@
  *
  * The question the log answers is "which of these shapes is the deepest, and
  * how many different ones did we find". So two things happen here. Records that
- * cannot be compared - a different molecule, a different charge the engine had
- * to pick, a different engine or level - are kept apart (`comparisonKey`); and
+ * cannot be compared - a different molecule, a different charge, a different
+ * engine or level - are kept apart (`comparisonKey`); and
  * within a set, records whose energies are within {@link SAME_VALLEY_KJ_PER_MOL}
  * of each other are one valley, because the same minimum reached from two
  * directions does not come out to the same digit.
@@ -15,7 +15,13 @@
  * minimum would be comparing a finished thing with an unfinished one.
  */
 import type { ModelLevel } from '../worker/protocol';
-import { comparisonKey, isSettled, levelOfModel, type StructureRecord } from './record';
+import {
+  comparisonKey,
+  headingOf,
+  isSettled,
+  levelOfModel,
+  type StructureRecord,
+} from './record';
 import { kilojoulesPerMole } from './units';
 
 /**
@@ -48,9 +54,9 @@ export interface LogEntry {
 }
 
 export interface LogGroup {
-  /** Internal, and not shown: it carries the charge (requirement F4). */
+  /** Internal, and not shown: it carries the model string. */
   key: string;
-  /** What the group is called on screen. */
+  /** What the group is called on screen: the formula with its charge (`headingOf`). */
   formula: string;
   /**
    * What its records were calculated for, which the heading says in the words
@@ -126,7 +132,7 @@ export function groupRecords(records: readonly StructureRecord[]): LogGroup[] {
 
     return {
       key,
-      formula: members[0].formula,
+      formula: headingOf(members[0]),
       level: levelOfModel(members[0].model),
       entries,
       valleys: sizes.length,
