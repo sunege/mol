@@ -3459,6 +3459,369 @@ O₂・分子軌道を開いた状態の節ごとの高さ（px）: 見出しと
 **2026-09-26、ユーザーの Firefox と講義 PC の確認が完了し、V6-11 完了となった。手直しは範囲外の
 1 つ（「…」のリストを `position: fixed` にして注意書きに隠れないように）だけで、v6 はこれで完了。**
 
+### v7 の相談での実測（イオン、2026-09-26）
+
+「イオンは置けるか」の相談のときに、一時 example（消した）で `driver` を通さず
+`molecule.charge` / `multiplicity` を直接置いて測った。ネイティブ release、Medium グリッド、
+減衰 0.5・20 回・最大 250 回。電荷は Mulliken（基底でまるで変わる目安。**画面には出さない**）。
+計画は [plan-v7.md](plan-v7.md)。
+
+| 置いたもの | STO-3G | 6-31G\* |
+| --- | --- | --- |
+| H₃O⁺ | 収束、最高被占 −0.594 Ha、O −0.23 / H +0.41×3 | −0.679、O −0.66 / H +0.55×3 |
+| NH₄⁺ | −0.769、N −0.45 / H +0.36×4 | −0.766、N −0.91 / H +0.48×4 |
+| H₃⁺ | −1.018、+0.33×3 | −0.984 |
+| HeH⁺ | −1.311、He +0.32 / H +0.68 | −1.289 |
+| OH⁻ | **+0.597**、O −0.85 / H −0.15 | **+0.218** |
+| F⁻・Cl⁻・H⁻ | 閉殻で空の軌道なし（1 原子） | **+0.236・+0.053・+0.232** |
+| NaCl（中性） | Na +0.71 / Cl −0.71 | +0.52 / −0.52 |
+| LiF（中性） | **+0.02** / −0.02 | +0.48 / −0.48 |
+
+- **陰イオンの最高被占軌道は正**＝余分な電子は本当は縛られていない（LDA の自己相互作用と、
+  拡散関数の無い基底が閉じ込めている）。形は出るが、注意書きが要る。
+- **最適化（STO-3G、`OPTIMIZER_GRID`、既定の `opt::Options`）**: H₃O⁺ 7 歩で O–H 1.025 Å・
+  H–O–H 110.1°、NH₄⁺ 4 歩で N–H 1.065 Å・109.5°、H₃⁺ 5 歩で 1.001 Å・60.0°。どれも収束。
+  （`opt::bond_angle` は度で返す。）
+- **H₂⁺ の解離（STO-3G、二重項）**: H 原子 −0.43567 Ha に対して、1.06 Å −0.1341、2 Å −0.1008、
+  **4 Å −0.0907**、8 Å −0.0000。4 Å まで 0.09 Ha（約 240 kJ/mol）低いまま（非局在化誤差）で、
+  8 Å では急に H 原子と一致する（対称性の破れた局在解に落ちたと見られる）。荷電二原子の
+  スキャンはこの間のどこかで切る（V7-0 で決める）。
+- **HeH⁺ の解離**: He との差 0.77 Å −0.0503、2 Å −0.0084、4 Å 以降 0。電荷は 4 Å で H に
+  +1.000 ＝ **He + H⁺ に正しく分かれる**（イオン化エネルギーの差が大きいので非局在化誤差が出ない）。
+- **エンジンは電荷があっても何も直さずに動いた**（SCF・UKS・勾配・最適化）。SAD は中性原子のまま
+  （`guess.rs` のコメントどおり SCF が数回で直す）で、反復は中性と同じ 23 回前後。
+
+### v7-0 の実測（イオンの参照値・スキャンの限界・陰イオンの文言・電荷の上限、2026-09-26）
+
+一時 example（`crates/dft-core/examples/`、消した）で `driver` を通さず `molecule.charge` /
+`multiplicity` を直接置いて測った。ネイティブ release、Medium グリッド、`ScfOptions::default()`。
+**V7-1 の `driver`（電荷を変えない）はまだ無い**ので、状態の選び方は手で写した（偶数の電子は
+一重項と三重項を解いて低いほう、奇数は二重項。既定 → 粘る設定の順）。
+
+**1. 参照値 `crates/dft-core/tests/data/scf_ions.json`**（`gen_reference.py` の `ion_reference()`、
+その関数だけ回した。他の生成物は動いていない）。形は `scf_open_shell.json` と同じ
+（`unrestricted_payload`。閉殻は RKS を 2 つの等しいスピンの列で書く）で、`charge` を持つので
+**`tests/common` の `OpenShellReferences` がそのまま読める**。`systems`: `h3o_plus`・`nh4_plus`・
+`h3_plus`・`heh_plus`（一重項）、`oh_minus`（一重項）、`h2_plus`（二重項）。`atoms`（閉殻の自由イオン。
+球平均の原子の解き方と一致すべきもの）: `h_minus`・`li_plus`・`f_minus`・`na_plus`・`cl_minus`。
+幾何は `GEOMETRIES` の `h3o_plus`（O–H 0.98 Å・112°）・`nh4_plus`（1.03 Å）・`h3_plus`（0.87 Å）・
+`heh_plus`（0.77 Å）・`h2_plus`（1.06 Å）、OH⁻ は既存の `oh`。`make_mol` / `build_mol` に
+`charge=0` の引数を足した（既存の呼び出しは変わらない）。
+
+エンジンとの差（Medium、許容差は既存の `GRID_TOLERANCE` 1e-4）: 参照の密度での項ごと
+（core・Coulomb は 1e-12 台、XC がほぼ全部）と、収束させた全エネルギーのどちらも最大
+**+1.5e-5 Ha（HeH⁺）**、ほかは 4e-6 以下。UKS・RKS とも収束、最高被占軌道も 4 桁一致。
+自由イオン 5 つは `Occupation::SphericalAverage` の Fine でも 1e-7 以内。
+
+**2. 荷電二原子のスキャンの上端 → `CHARGED_REACH = 1.4`**（中性は 1.8 のまま）。
+アプリと同じ流れ（0.7 × 平衡距離 Re で状態を選んで固定、各点は SAD から既定の SCF）で、Re の
+倍率ごとに回した（0.5 Å で状態を選んでも同じ状態になった）。
+
+- **H₂⁺ と基底の中で厳密な答え**（1 電子なので PySCF の UHF、同じ STO-3G）を、それぞれ自分の
+  Re（LDA 1.147 Å、厳密 1.061 Å）と井戸の底からの高さで比べた。差 ÷ 厳密な井戸の深さ
+  （0.116 Ha）: 1.3 倍 −4%、**1.4 倍 −7%、1.5 倍 −11%**、1.8 倍 −21%、2.5 倍 −43%。LDA は
+  2.5〜2.8 倍で平らになり、その先は**下がる**（非局在化誤差）。比べに中性 H₂（RKS）と FCI:
+  1.8 倍で +4%、10% を超えるのは 2.1 倍 ＝ **中性の 1.8 は同じ物差しで 10% の内側**。
+- ほかの荷電の組（エンジンだけ。「落ちる」＝既定の SCF が 100 回で収束しない最初の倍率、
+  「粘る」＝落ちた点を `DriverOptions::default().persistent_scf` で解き直したとき、「曲がる」＝
+  Re より外で曲線が下がり始める・跳ぶところ）:
+
+  | 組（状態、Re） | 落ちる | 粘る | 曲がる |
+  | --- | --- | --- | --- |
+  | H₂⁺（2、1.15 Å） | 3.0 まで無し | — | 2.9（1.5 で誤差 10%） |
+  | HeH⁺（1、0.94） | 無し | — | 無し（He + H⁺ に正しく分かれる） |
+  | He₂⁺（2、1.27） | 無し | — | **1.8**（6 Å で井戸より低い） |
+  | Li₂⁺（2、3.05）・LiH⁺（2、1.99） | 無し | — | 2.4・無し |
+  | N₂⁺（2、1.23） | 1.15 だけ・2.6 | 2.5 まで無し | — |
+  | O₂⁺（2、1.26） | **1.35**・1.5 | 1.7 | 1.75 で跳ぶ |
+  | O₂⁻（2、1.37） | 1.6 | 1.75 | — |
+  | OH⁻（1、1.11） | 1.65 | 2.1 | —（落ちた点は O + H⁻ に割れる） |
+  | F₂⁻（2、1.78）・Cl₂⁻（2、2.59） | 1.5・1.45 | 1.95・1.85 | **1.7**（1.45 から平ら） |
+  | CO⁺（2）・NO⁺（1）・CN⁻（1） | 1.95・1.75・1.95 | — | CO⁺ 1.9 で跳ぶ |
+  | HF⁺（2）・OH⁺（3）・C₂⁻（2） | 2.05・2.25・無し | — | — |
+  | **Cl₂⁺（2、2.08）・HCl⁺（2、1.44）** | **0.7 から全部** | 1.8・1.75 | Cl₂⁺ 1.35 に小さな折れ |
+  | NaCl⁺（2、2.46） | 0.7 から全部 | 0.9・1.1・1.25・1.5〜1.65 に穴 | — |
+
+  中性（同じ流れ）: H₂・N₂ は 3.0 倍まで落ちない、O₂ 2.5、HF 1.9（「HF は 1.89 Å から先で落ちる」）、
+  F₂ 1.6（プリセットで避けている）、NaCl 1.72。
+- **決めたこと**: 上端 1.4 倍。H₂⁺ の誤差が 10% を超える 1.5 倍の手前で、非局在化で曲線が寝る
+  He₂⁺・F₂⁻・Cl₂⁻（1.7〜1.8 倍）より十分手前。**判定は合計の電荷**（Na⁺ と Cl⁻ は中性の NaCl と
+  同じ SCF なので中性と同じ 1.8 倍・プリセットも中性のまま）。
+- **第 3 周期の π に穴が 1 つある陽イオン（Cl₂⁺・HCl⁺）は既定の SCF ではどの距離でも収束しない**
+  （Al・Si 原子と同じ、縮退した軌道の占有の振動）。今の `scan::solve_at` は既定の設定だけなので
+  **曲線が丸ごと穴**になる。落ちた点を `persistent_scf`（レベルシフト 0.5）で解き直すと 1.4 倍まで
+  穴が無くなる（Cl₂⁺ 0.7〜1.4 倍の 27 点がネイティブで 17.5 秒（全部穴）→ 23.9 秒、HCl⁺ 12.7 → 17.4、
+  O₂⁺ 1.9 → 2.1、H₂⁺ 0.6 のまま。WASM では数倍）。NaCl⁺ は解き直しても穴が残る。
+  **解き直しを荷電の分子だけにすれば中性のスキャンは 1 ビットも変わらない**（V7-1 に渡した）。
+
+**3. 陰イオンの最高被占軌道**（一重項、`run_restricted`、Medium）: 全部**正**。
+
+| | STO-3G | 6-31G\* |
+| --- | --- | --- |
+| OH⁻ | +0.597 | +0.218 |
+| F⁻ | +0.764 | +0.236 |
+| Cl⁻ | +0.271 | +0.053 |
+| CN⁻ | +0.283 | +0.069 |
+| NH₂⁻ | +0.493 | +0.213 |
+
+（最適化後の SO₄²⁻ +0.558、PO₄³⁻ +0.873、H₂O²⁻ +1.33。）**文言はチケットの案から趣旨を変えた**:
+案の「本当はこの分子に留まりにくい」は、この 5 つには当てはまらない（気体でも余分な電子を
+保つ陰イオン。正の値は LDA の自己相互作用の誤差で、拡散関数の無い基底が電子を閉じ込めて
+いるから収束する）。「計算の方法が苦手」とだけ言えば 1 価も 2 価も嘘にならない。決めた文言
+（V7-3 の `ANION_CAVEAT`）:
+「陰イオンの余分な電子は、この計算のしかたが苦手とするところです。形は出ますが、余分な電子の
+広がり方は目安として見てください。」
+
+**4. 合計の電荷の上限 → −2〜+2**（1 原子は −1 / 0 / +1 のまま）。STO-3G、一点は上の状態の選び方、
+最適化は `OPTIMIZER_GRID` と既定の `opt::Options`:
+
+| 置いたもの | 一点 | 最適化 |
+| --- | --- | --- |
+| CH₄²⁺（H 2 つを +） | 三重項で収束 | 11 歩で収束、C–H 1.30 Å ×4（まとまったまま） |
+| CH₄³⁺ | 二重項で収束 | **84 歩で回数上限、H が 3 つ 3.4〜3.8 Å へ飛ぶ**（175 秒） |
+| CH₄⁴⁺ | 収束しない | — |
+| SO₄²⁻（O 2 つを −） | 8 回で収束 | 6 歩で収束、S–O 1.71 Å ×4 |
+| PO₄³⁻（参考） | 収束 | 6 歩で収束、ただし最高被占 +0.87 Ha |
+| H₂O²⁺・H₂O²⁻（参考） | 三重項・一重項で収束 | 12 歩で O–H 1.30 Å・2 歩で回数上限（最高被占 +1.33） |
+
++3 で形が壊れ、+4 は解けないので上は +2。下は教科書の SO₄²⁻（・CO₃²⁻）が入る −2 で止める
+（−3 も解けるが余分な電子はさらに浮く）。
+
+**5. 自由イオン（V7-1 の差密度の基準・SAD）**: `atomic_orbitals` と同じ設定（Coarse、
+コア・ハミルトニアンから、球平均、80 回、ダンピング 8 回）で Z = 1〜18 の ±1（H⁺ は電子 0 なので
+除く）を両基底で解いた。**35 × 2 のうち 67 が収束して `tr(D S)` が電子数と一致**（Na⁺・Cl⁻・
+O⁻・H⁻ を含む）。**STO-3G の He⁻・Ne⁻・Ar⁻ だけは、殻が埋まっていて余分な電子の入る関数が無く、
+`converged: true` のまま `tr(D S)` が 1 足りない**（エラーにならず黙って電子を落とす）。6-31G\* では
+3 つとも入る。貴ガスの陰イオンは実在もしないので、**He・Ne・Ar は − にできない**ことにする
+（V7-3 のボタン、V7-1 の組み立て）。そうすると 1 原子 −1 までなら STO-3G でも分子全体の
+基底に必ず電子が入る（H 1 関数に 2、Li〜F 5 関数に 10、Na〜Cl 9 関数に 18）。
+
+**6. ついでに見つけたこと: 正四面体の CH₄⁺ が解けない。** 二重項（3 重に縮退した軌道に穴が 1 つ）は
+既定・粘る設定（レベルシフト 0.5）・レベルシフト 1.0・ダンピング 0.95 のどれでも収束しない
+（エネルギーは −39.112835 Ha で止まり、交換子の残差が下がらない）。0.05 Å 揺らしても同じ。
+V7-1 の `driver` の順（二重項 → 粘る二重項 → 高い多重度）だと **0.64 Ha 上の四重項**で収束し、
+最適化で分子が崩れる（正四面体から 24 歩で回数上限・C–H 1.91 Å、揺らしたものは 65 歩で
+H–H 0.90 Å の組ができる）。2 重に縮退した穴の CO₂⁺・ベンゼン⁺ は粘る設定で 37 回で収束、
+NH₃⁺・H₂O⁺・CH₄⁻ は既定で収束する。直すなら「ヤーン・テラーの向きに揺らす」だが v7 の範囲外。
+V7-1 と V7-8 に渡した。
+
+### V7-1 の実装メモ（原子ごとの電荷・指定どおりに解く・イオン基準の差密度、2026-09-26）
+
+**形**: `Molecule.atom_charges: Vec<i32>` と `with_atom_charges(charges)`（合計を `charge` に、多重度を
+推し直して `validate`）。`validate` は「長さ → 原子ごと（−2 以下・`z` 超の +・He/Ne/Ar の −）→
+`charge == 和` → 電子数」の順。`charge` を直接書く古い書き方（テストの共通部・`scan::solve_at`・
+`driver::set_state`）は全部やめた: 共通部は `with_atom_charges` で最初の原子に合計を置く
+（`molecule_with(charges)` も足した）、`set_state` は多重度だけ書く。`driver` から ±1 の段と
+`DriverOptions::try_charges`、`Round::comparable`（全部の段が同じ電子数になったので常に真）を消した。
+「全部落ちる」テストは 5 回（一重項・三重項 × 2 段 + 五重項）で、どれも電荷 0。
+
+**計画から変えたこと: SCF の初期値はイオンにしない。** 板の決まり 4 の「SAD の初期値も同じ関数」で
+実装したら、V7-0 の頼み（Cl₂⁺ を 0.7〜1.4 倍で全点収束）が 1.27 倍から先で崩れた。V7-0 の実測は
+V7-1 の前 ＝ 初期値が中性原子（対称）だった。Cl⁺ + Cl で始めると穴が片側に寄る。同じ幾何・
+Medium・既定 → 粘る設定の合計の反復回数（`ion` ＝置いたとおりのイオン、`中性` ＝中性原子を
+電子数に縮めたもの）:
+
+| | ion | 中性 |
+| --- | --- | --- |
+| H₃O⁺（H⁺）・NH₄⁺（H⁺）・OH⁻（O⁻） | 8・8・8 | 9・10・7 |
+| Na⁺Cl⁻ 2.4 Å・3.5 Å | 8・11 | 8・14 |
+| He₂⁺ 0.8・1.0・1.2・1.4 倍 | 13・16・100・185 | 6・6・6・6 |
+| F₂⁻ 1.0・1.4 倍 | 10・296 | 6・6 |
+| O₂⁺ 1.0・1.2 倍 | 16・26 | 7・7 |
+| Cl₂⁺ 1.0・1.2・1.4 倍 | 188・291・**落ちる** | 139・166・180 |
+| HCl⁺（H⁺ でも Cl⁺ でも）1.0・1.4 倍 | 134〜159 | 135〜152 |
+
+さらに **O₂⁺ 1.3・1.4 倍と Cl₂⁺ 1.3 倍は、イオンで始めると別の（穴が片側の、低い）解**に落ちた
+（O₂⁺ 1.3 倍で −146.7196 と −146.7093 Ha）。印をどちらに付けたかで SCF の答えが変わる ＝ 決まり 1
+（SCF が使うのは合計だけ）が収束先で破れる。なので **`guess::starting_density`（中性原子の重ね合わせ ×
+電子数 / 核電荷の和）を SCF の `InitialGuess::Atomic` に、`superposition_of_atomic_densities`（置いた
+とおりのイオン）を差密度の基準に**分けた。中性の分子では倍率がちょうど 1 で、初期値は v6 と
+ビット単位で同じ（中性のテストは全部そのまま）。縮めないで中性のまま（V7-0 の条件、跡が合わない）
+でもよかったが、跡が電子数と合うほうを取った（Cl₂⁺ 1.4 倍も 180 回で収束）。H₃O⁺ を H⁺ で置いても
+O⁺ で置いても**密度行列まで完全に一致**する（`reference_ions.rs`）。
+
+**スキャン**: `distance_scan(z, charges, …)`。`solve_at` は荷電（合計 ≠ 0）のときだけ落ちた点を
+`persistent_scf` で解き直す。27 点・0.7〜1.4 倍（`cargo test --release` の一時テスト、消した）:
+Cl₂⁺ 26.9 秒・HCl⁺ 20.1・O₂⁺ 2.3・He₂⁺ 0.7、**どれも穴なし**。テストは 6 点の Cl₂⁺ と、「既定の SCF
+だけでは 2.08 Å で落ちる」（解き直しが効いていることの確認）。
+
+**自由原子**: `atomic_orbitals(z, charge, kind)` / `atomic_levels(z, charge, kind)` は `Result`
+（貴ガスの − などは `GeometryError`）。電子 0 は `Molecule` として `validate` を通らないので、
+`NoElectrons` のときだけ構造体リテラルで裸の核を作り、コア・ハミルトニアンを正準直交化して Jacobi
+（`symmetric_eigen_sorted`）。検査は `H C = S C e` と直交規格。`atomic_column` は引数を変えず
+`system.molecule.atom_charges[atom]` を読む（`System` が覚えているものは `System` から取る）。
+
+**テスト**（`tests/reference_ions.rs` と各モジュール）: `scf_ions.json` の 6 分子（Medium、1e-4）と
+自由イオン 5 つ（Fine・球平均、1e-4）、`driver` が H₃O⁺・OH⁻・H₂⁺ を電荷を変えずに解く、
+H₃O⁺・NH₄⁺ の最適化（O–H 3 本と角 3 つが等しく角の和 < 350°／N–H 4 本と角 6 つが等しい、許容差は
+`optimize.rs` と同じ）、2 つの重ね合わせの `tr(D S)`（H₃O⁺・NH₄⁺・OH⁻・HeH⁺・NaCl）と基準の原子ごとの
+区画、H⁺ で置いた差密度の `tr(ΔD S) ≈ 0` と、H⁺ / O⁺ で置いたときの陽子の区画の差がちょうど 1。
+`cargo clippy` の警告は 37 のまま（`lebedev_data.rs` の既存のエラーで止まるのも同じ）。
+
+### V7-2 の実装メモ（原子ごとの電荷を Worker 越しに、2026-09-26）
+
+**形**: `scf` / `optimize` / `scan` / `atomLevels` の最後に `charges: Option<Vec<i8>>`（JS では
+`Int8Array | null` と省略）。`Vec<i32>` にしなかったのは `.d.ts` が `Int32Array` になり、契約の
+`Int8Array` と型が合わなくなるから。幅を広げるのと省略＝全部 0 は `atom_charges` の 1 か所。
+組み立ては `build_molecule(z, xyz, charges)` が `from_angstrom(..)?.with_atom_charges(..)`。
+
+**文言**: `describe(&GeometryError) -> JsValue` が全 7 種を英文にする（`{:?}` は契約ではない）。既存の
+`build_molecule` の `{:?}`（`CoincidentAtoms` など）もこれに寄せた。`atomLevels` は自由原子を 1 原子の
+分子として解くので、`UnsupportedAtomCharge` の `atom` を `z` の中の位置に付け替える。`scan` はエンジン
+が「点が 1 つも来ない」で黙るので、仮の形（0 と 1 Å）で `with_atom_charges` を先に通して同じ文言で
+拒む（可否は距離に依らない）。`System::build` の `BasisError` の `{:?}` は触っていない（イオンと無関係）。
+
+**engine.test.ts**（実物の `.wasm`）: H₃O⁺（仮の三角錐、O–H 0.98 Å・110°）が電荷 1 で収束し中性の
+ラジカルとエネルギーが違う、H⁺ で置いても O⁺ で置いても `energy` が `toBe` で一致し、差密度の
+`densityMax` は O⁺ 基準のほうが大きい（0.425 と 0.277、酸素の周りに「無かった電子」がある）、
+`atomLevels` の H⁺ は 1 段で H と違い O⁺ < O < O⁻（1s）、H₂⁺ のスキャン 3 点が `[1,0]` と `[0,1]` で一致、
+拒否 8 通り。
+
+**失敗**: `web` で `npx prettier --write` を掛けたら、リポジトリに prettier の設定が無いので 80 桁で
+無関係なファイルまで整形された（`git checkout` で戻して手で入れ直した）。**TS にも整形ツールを掛けない**。
+
+### V7-3 の実装メモ（イオンの純粋な部分、2026-09-26）
+
+**置いた場所**: 型は `scene/viewer.ts` の `AtomCharge`（`-1 | 0 | 1`）と `SceneAtom.charge?`。
+`molecules/atoms.ts` に App から `withPositions` と `atomsFromFlat(z, xyz, charges?)` を移した。**中性の
+原子は `charge: 0` ではなく欄そのものを持たない**（v6 までの `{ z, pos }` と `toEqual` で一致し続ける）。
+`components/ion.ts` が可否・式・印・注意書き、差密度の言葉は `density.ts` の `explainChannel` の
+**3 つめの省略可能な引数 `hasIons`**（既定 false ＝ 今の呼び出し側は変わらない）。
+
+**`Segmented` の無効**: 群ごとの `disabled` しか無かったので `SegmentedOption.disabled?` を足した
+（`disabled || option.disabled`）。`ionOptions(atoms, index)` が `ION_OPTIONS` に無効を埋めて返す
+（共有の `ION_OPTIONS` は書き換えない）。
+
+**可否の式**: 今の値は常に可。別の値 c は「電子数 − (c − 今) ≥ 1」かつ「合計 − 今 + c が −2〜+2」かつ
+「c < 0 なら He・Ne・Ar でない」。原子ごとの電子数は見ない（H⁺ は電子 0 で正しい）。
+
+**まだ電荷が落ちる経路**（V7-4・V7-6 で塞ぐ）: `atomsOfFlat` は `charges` を受けず、探索の候補
+（`atomsOfFlat(candidate.z, candidate.start)`）と記録を開く経路は中性に戻る。緩和の `withPositions` は
+もう保つ。
+
+### V7-4 の実装メモ（イオンのボタンと計算をつなぐ、2026-09-26）
+
+**ボタン**: `削除` / `全消去` の下に `Segmented`（`ION_GROUP_LABEL`、選択肢は `ionOptions(atoms, selected)`、
+選んでいなければ `ION_OPTIONS` + 群ごと無効）。`selected` が範囲外でも投げないよう、`atoms[selected]` が
+あるときだけ `ionOptions` を呼ぶ（`ionRow`）。押すと `chargeSelected` が選んだ原子だけ作り直し
+（中性は欄を消す）、`invalidateResult()`。`handBuilt`・計測・`presetId` は触らない。
+**計算中は固めた**（チケットの指定。`削除` は計算中も押せて計算を止めるので、厳密には「他の編集と同じ」
+ではない。計算を始めると観測モードで `selected` が `null` になるので、固めるのは計算中に計算タブへ戻って
+原子を選んだときだけ効く）。
+
+**計算に通したところ**: `calculate` の `scf`、緩和の `optimize`（`null` の予算・`level` の後ろ）、
+記録の等値面の `solveForSurface` の `scf`、探索の `CandidateSource`。**`scan` と `atomLevels` はまだ**（V7-7）。
+`atomsOfFlat` は `(z, xyz, charges?)` に広げ、候補を開くところが `candidate.charges` を渡す。記録を開く
+`atomsOfRecord` はまだ中性（V7-6）。
+
+**探索**: `CandidateRequest.charges: Int8Array` を**必須**にした（省略可にすると、書き忘れた候補が黙って
+中性で解かれる）。テストのひな形（`pool.test.ts` の `request`、`candidates.test.ts` の `source`、
+`components/search.test.ts` の `candidate`）に中性の配列を足した。
+
+**注意書き**: `hasAnion(atoms)` のとき `ANION_CAVEAT` をイオンの行の下と、**観察タブの先頭**（`ObservePanel` の
+上。数値は上に固定の `StatusHeader` にあるので、その直下になる）。クラスは `.hint.anion-caveat`
+（`level-hint` と同じ余白）。差密度の説明は `explainChannel(…, hasIons(atoms))`。
+
+**ブラウザ（Browser ペイン、WebGL 無し）**: 原子は App の fiber のフック（3 番 `atoms`・8 番 `selected`・
+9 番 `mode`）の `queue.dispatch` で選んだ。H₂O の H を「+ にする」→「この形のまま計算」で収束
+（`[dft] charge 1, multiplicity 2`、−74.374154 Ha）→「安定な形にする」5 歩で収束し、後の `atoms` の H に
+`charge: 1` が残る。H 1 個で「+ にする」だけ無効（「− にする」は可）。OH の O を「− にする」で注意書きが
+計算タブと観察タブに 1 つずつ、中性に戻すと消える。差密度の説明はイオンの文言に切り替わる。
+「今の形を試す」の OH⁻ の候補は `charges [-1, 0]` で `settled`、`outcome.charge` −1。
+**この確認で IndexedDB に H₂O⁺ と OH⁻ の記録が中性の見出しで入った**（V7-6 までの穴。谷・順位は
+`comparisonKey` に電荷が入っているので混ざらない）。
+
+### V7-5 の実装メモ（3D の原子に +/− の印、2026-09-26）
+
+**置き方**: 印は電荷が 0 でない原子ごとに 1 つの `CSS2DObject`（`labelElement('charge-badge')`、文字は
+`badgeText`）で、プールの扱いは `#syncBondLabels` と同じ（減るときは `group.remove`）。中心は球の輪郭の
+**カメラから見て右上 45°**（`scene/badges.ts` の `badgeAnchor(center, radius, right, up)`、純粋な関数で
+`badges.test.ts`）。チケットは「ワールドの上方向に半径」でもよいとしていたが、それだと回すと印が原子の
+真上・真下・中心に重なって見えるので、カメラの向き（`camera.quaternion` で (1,0,0) と (0,1,0) を回す）を
+使い、**tick で毎フレーム置き直す**（`#placeChargeBadges()`、`#scaleHandles()` の後）。`#syncAll()` の最後で
+`#syncChargeBadges()` が作り直して置く。印と原子の対応は `#badgeAtoms`（原子の添字）。
+**`setPositions` は `{ ...this.#atoms[i], pos }` に直した**（前は `{ z, pos }` でアニメーションの 1 フレーム目に
+電荷が消えていた）。`dispose` で `#chargeBadgeGroup.clear()`。
+
+**CSS**: `.charge-badge` は直径 1.1rem の丸、地 `#151a21`・枠 `#2d3644`・文字 `#d6dde8` の 700。青・赤は使わない
+（差密度の色）。z-index は層（`.viewer-labels`）のものをそのまま使うので進捗カードより下。
+
+**確かめられなかったこと**: Claude の作業ブラウザでは `MoleculeViewer` のコンストラクタが WebGL で落ち、
+App が `webgl.ok = false` にするので **canvas も `.viewer-labels` も作られない**（`.charge-badge` は 0 個、
+H₂O の H を + にしても変わらない）。印の DOM・位置・重なりは V7-8 に回した（確認項目は V7-8 の「V7-5 で入ったもの」）。
+
+### V7-6 の実装メモ（記録: 原子ごとの電荷・ファイル version 2・見出し、2026-09-26）
+
+**形**: `StructureRecord.charges?: number[]`（`z` と同じ並び）。`createRecord` は `RecordDraft.charges`
+（必須、`ArrayLike<number>` なので候補の `Int8Array` をそのまま渡せる）を `Array.from` して**いつも書く**。
+`formula` は Hill 式のまま。読むのは `chargesOf(record)`（無ければ全部 0、コピーを返す）だけ。
+見出しは `headingOf(record)` ＝ `formulaWithCharge(formula, outcome.charge)`、記録でない原子（画面の分子・
+候補）は `moleculeHeading(z, charges, symbolOf)`（合計は `charges` の和）。`record.ts` が
+`components/ion.ts` を import する（ion.ts の import は型だけなので循環しない）。
+
+**束ね方**: `LogGroup.formula` を `headingOf(members[0])` にしただけで、ツリー（`recordsOnly` の
+`byFormula`・`formulaId`）・画面の分子の行（`currentFormula`）・候補の行（`PendingCandidate.formula`）・
+「…」の書き出し（App の `exportRecords` は `headingOf(r) === only` で選ぶ）・消す（`recordIdsUnder`）が
+全部電荷込みの見出しで揃う。`comparisonKey` は元から電荷込みなので触っていない。**同じ段に 2 つの群が
+並ぶのは、知らない `model` が 2 種あるときだけ**になった（tree.test / records.test の「電荷だけ違う 2 群」の
+テストはその形に書き換え、イオンが別の分子になるテストを足した）。候補の「電荷は解くまで分からないので
+最初の群の下」は、見出しが要求の電荷を持つので要らなくなった（その分子の段は 1 つ）。
+
+**ファイル**: `LOG_VERSION = 2`、`READABLE_VERSIONS = [1, 2]`。v2 は `charges` 必須で、長さ = 原子数・
+各 −1/0/+1・和 = `outcome.charge` を `checkCharges` が見る（文言は「原子ごとの電荷が…」の 4 つ、`kind: 'shape'`）。
+**v1 は `charges` があっても捨てる**（v1 は書いたことが無いので、あれば手で足したもの）。
+**チケットから変えた 1 点**: ブラウザの IndexedDB の記録は v6 までの全部が `charges` 無し（Browser ペインでは
+25 件中 23 件）で、`writeStructureLog` がそのまま書くと**自分で書いた v2 を自分で拒否する**。そこで書くときに
+`charges: chargesOf(r)` で補い、さらに v6 までは `driver` が ±1 を自分で選べたので、**全部 0 のときだけは
+和が `outcome.charge` と合わなくてよい**（それが「v7 より前にエンジンが選んだ電荷」の書き方）。和の不一致の
+テストは [0,0,1,1]（合計 1）にした。Browser ペインの 25 件を丸ごと書いて読み戻すと 25 件とも通る。
+
+**IndexedDB**: `store.ts` は `getAll()` をそのまま返す（検査しない）ので `charges` 無しの記録も通る。
+V7-4 の確認で入った 2 件は見出しが「H₂O⁺」「HO⁻」になった（`outcome.charge` から）が、名前は
+「H₂O · 10:36」「HO · 10:37」のまま、開くと原子は中性。
+
+**ブラウザ（Browser ペイン、WebGL 無し）**: App の fiber のフック 3（`atoms`）に H₃O⁺（4 番目の H に
+`charge: 1`）を入れて「安定な形にする」→ 7 歩で収束（−75.113583 Ha）、ツリーの先頭に「H₃O⁺」の分子、
+名前「H₃O⁺ · 10:56」。同じ形を中性で → 11 歩（−75.168569 Ha）、「H₃O」の別の行、`current` は H₃O。
+H₃O⁺ の記録を開くと `atoms` の 4 番目に `charge: 1`、`current` は H₃O⁺。IndexedDB の 2 件を
+`writeStructureLog` → `version: 2`、`charges` [0,0,0,1] / [0,0,0,0]、読み戻して見出しが同じ。
+`docs/C₃H₆-記録-20260920-1859.json`（v1）は `/@fs/` で取って読めて、3 件とも `charges` 無し・中性。
+
+### V7-7 の実装メモ（荷電二原子: スキャンの範囲と相関図の原子の側、2026-09-26）
+
+**範囲**: `scanPairFor(z, distance, charges = [0, 0])` は `ScanPair` に `charges` を足して返し、合計が 0 で
+なければ `rangeAround(distance, CHARGED_REACH)` ＋ `charged: true`（`ScanRange` の任意の欄）。`rangeAround`
+の上端の倍率は引数になり、既定は `NEUTRAL_REACH = 1.8`。`ScanPreset` は `ScanPair` から外して `ScanRange`
+＋ `id` ＋ `z`（プリセットは中性だけなので電荷を持たない）。**荷電かは合計**（チケット本文の「どちらかが
+0 でなければ」は V7-0 で変わった）。注意の 1 文 `SCAN_CHARGED_NOTE` は `buildScan` の `notes` の最後に、
+`range.charged` のときだけ。数字も「電荷」も書かない（F4 のテストの語に「電荷」がある）。
+
+**相関図**: `diagramEnds(atoms, symbolOf)` が `{ heading: formulaWithCharge(…), kind }` を返し、
+`FreeAtomKind = 'atom' | 'ion' | 'bare'`（`orbital.ts` の `freeAtomKind(z, charge)`、`bare` は電子 0 ＝
+今のボタンでは H⁺ だけ）。`buildCorrelation` の 2 つめは `string | DiagramEnd` を受ける（文字列は中性の原子
+＝ 既存のテストはそのまま）。列に `kind` が乗り、`atomPickWords(figure, pick, ends)` はそれを
+`atomOrbitalWords(heading, name, along, kind)` に渡す。イオンは「原子の」を言わず「イオンひとつの部屋」、
+`bare` は「電子の入っていない、」を足す。OrbitalPanel に `ends` の prop（図が無い間の言葉のため）。
+
+**App**: `scanPairKey` は `"1:1,1:0"`（原子ごとの `z:電荷`）、`scanPairEnds`（memo）から `atomLevels(z, charges)`
+と `correlationEnds`。`screenPair` に電荷、`scanOnScreen` は電荷も比べる（電荷を変えると図は消える）。
+`.scan(…, onPoint, undefined, new Int8Array(pair.charges))`。**`alongTheAxis` が `{ z, pos }` を作り直して
+電荷を落としていた**ので、`ScanPair` の `z`・`charges` を受けて中性は欄なしで組むようにした。
+
+**右端の注意（チケットに無かった直し）**: 範囲は画面の距離が中心なので、H₂ の 0.74 Å のまま H を + にした
+H₂⁺ は 0.52〜1.04 Å で谷が右の外。最低点が右端だと `lowestPoint` は null（「離したとき」＝右端との差が 0）で、
+注意は「谷と呼べるものがありません」になっていた（嘘）。`fallingAtTheRight`: 最低点が最後の解けた点で、
+真ん中の解けた点がそれより `MIN_WELL` 以上高い → 「この図の中では右端がいちばん低く、落ち着く距離は
+もっと遠いところにあります。」（左端の文の対）。He₂ の平らな尻尾は真ん中との差が `MIN_WELL` 未満なので
+元の文のまま。中性にも効く（押しつぶして置いた二原子）。
+
+**ブラウザ（Browser ペイン、WebGL 無し、フック 3 に dispatch）**: H⁺ + H を 0.74 Å で「この形のまま計算」→
+−0.515474 Ha、相関図の見出し「H⁺」「H」、H⁺ の線 →「H⁺ の 1s。結合する前の、電子の入っていない、イオン
+ひとつの部屋です。」、H の線 →「H の原子の 1s。…原子ひとつの部屋です。」。スキャン 0.52〜1.04 Å
+（目盛り 0.6〜1.0、約 5 秒）、注意の 2 文（右端・荷電）。マーカーを 0.92 Å に → `atoms[0].charge === 1` のまま、
+一点計算 −0.558835 Ha（中性 H₂ なら −1.1 台）。He + H⁺ を 0.78 Å で → −2.824330 Ha、見出し「He」「H⁺」、
+スキャン 0.55〜1.09 Å・「いちばん低いのは 0.94 Å」＋荷電の注意。
+
 ### P3・P4 の実装メモ
 
 - **Worker は `Calculation` ハンドルを保持している。** `dft-wasm::scf()` は

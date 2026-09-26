@@ -10,6 +10,8 @@ v3〜v6 と同じく、板（`docs/vN/README.md`）とチケットに分け、1 
 設計と理由を書いているので、細部はそこを読む。経緯・実測・却下した案・数字の出どころは
 [docs/dev-notes.md](docs/dev-notes.md)（自動では読まれない。触る領域の節だけ読む）。
 
+- **v7 のチケット（計画済み・未着手）: [docs/v7/README.md](docs/v7/README.md)（板）。**
+  **なぜこの形か**だけ: [docs/plan-v7.md](docs/plan-v7.md)
 - v6 のチケット（完了）: [docs/v6/README.md](docs/v6/README.md)（板）。
   **なぜこの形か**だけ: [docs/plan-v6.md](docs/plan-v6.md)
 - v5 のチケット（完了）: [docs/v5/README.md](docs/v5/README.md)（板）。
@@ -66,7 +68,10 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   `gen_reference.py` の生成物にする（STO-3G・6-31G\*・Lebedev・`tests/data/`・`units.json` も
   生成物で手編集しない）。例外は `xc/lda.rs` の VWN5 定数。合わないときは先にどちらが正しいかを確かめる。
 - **基底は `System` が覚えている**（`System::kind`、`BasisKind::{Sto3g, B631Gs}`）。`System` から
-  別の `System` を組む箇所（SAD の原子・最適化の毎歩）は必ず `system.kind` を引き継ぐ。
+  別の `System` を組む箇所（SAD の原子・最適化の毎歩）は必ず `system.kind` を引き継ぐ。**原子ごとの
+  電荷も `Molecule` が覚えていて**（`atom_charges`、組み立ては `with_atom_charges`、`charge` は常にその和）、
+  `System` から `System` を組む箇所は引き継ぐ。SCF の初期値（`guess::starting_density`）は合計しか見ず、
+  原子ごとの値が効くのは差密度の基準（`superposition_of_atomic_densities`）と自由原子（`atomic_orbitals`）だけ。
 - **勾配は HF 項 + Pulay 項**で、SCF 収束時にしか成り立たない。書き換えたら
   `integrals/deriv.rs` の**項ごとの**有限差分と並進不変性を先に見る。
 - **XC のグリッド重み微分は省略**＝解析勾配は「グリッド固定のエネルギー」の厳密な微分。検証は
@@ -75,6 +80,7 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   `scf/linalg.rs` の Jacobi。検査は `A V = V Λ` と `V L Vᵀ = A` の両方。
 - **スピン探索は一重項と三重項を両方解いて比べる**（ギャップでの振り分けは不可）。探索は
   Medium、勝った状態だけ Fine で解き直す（`driver::solve_then_refine`）。
+- **電荷は指定どおり**（`driver` は変えない。±1 の段は v7 で取り除いた）。
 - **性能の前提を崩さない**（どれも壊すと答えは同じまま遅くなる。理由は dev-notes）:
   `DensityPair` / `BasisSet::groups()` / グリッド点の 128 点ブロック / **証明できる上界でだけ**
   落とすスクリーニング / `BasisOnGrid` は SCF 1 回ごとに作って捨てる / XC の行列積は `kernels.rs`。
@@ -84,9 +90,9 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   「有向辺が往復で打ち消し合う」で検査する（「無向辺が 2 枚」ではない）。
 
 ### 画面に出すもの（要件 F4 / F5）
-- **DFT パラメータを出さない**: 基底・電荷・多重度・試した状態・試行回数。`ScfOutcome` の
-  `multiplicity` / `charge` / `attempts` は診断用（dev の `console.debug` だけ）。進捗の段階名も
-  「何に時間を使っているか」だけ。
+- **DFT パラメータを出さない**: 基底・多重度・試した状態・試行回数。電荷はユーザーが原子に付けた
+  もので、`ScfOutcome.charge` はその合計。**多重度**・`attempts` は診断用（dev の `console.debug`
+  だけ）。進捗の段階名も「何に時間を使っているか」だけ。
 - **非収束は例外ではなく戻り値。「解けなかった」と「間に合わなかった」を区別する**:
   SCF 非収束 → 発散アニメーションだけ、数値・等値面は全部 `—`。時間切れ・回数上限
   （`interrupted` / `maxSteps`）→ そこまでの構造を残し、数値・等値面を出し、理由を表示する。
@@ -105,6 +111,9 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   あり、ずれても落ちずカードが止まるだけなので `engine.test.ts` が実物の `.wasm` で照合する。
 - **段（`ModelLevel = 'shape' | 'measure'`）は識別子だけが境界を越える**（基底名は越えない）。写すのは
   `dft-wasm` の `basis_for` だけで、省略＝`'shape'` もそこ 1 か所、**知らない名前はエラー**。段が違う結果は比べない。
+- **`charges`（原子ごと、`Int8Array`、省略＝中性、既定は `dft-wasm` の `atom_charges` の 1 か所）**を
+  `scf` / `optimize` / `scan` / `atomLevels` の最後に付ける。拒否の文言は `describe`（`GeometryError` の
+  `{:?}` は流さない）。
 - **キャンセルは `terminate()` + 再生成。** 保持中の `Calculation`（密度）も消えるので等値面は
   SCF からやり直し（`hasDensityRef`）。等値面の要求は App で合流させる（`wantedRef`）。
   **「中止」ボタンだけは `stopRelaxations()`** で形を残す（分離されたページでは共有の停止フラグで
@@ -118,6 +127,7 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   間だけ使い回し、キューが尽きたら捨てる（ベンゼンで 1 本 139 MiB）。**候補は `atoms`・
   `FramePlayer`・前面の Worker を触らない。** **段は `SEARCH_LEVEL`（`'shape'`）固定**で、プールの
   要求も候補の記録もそこから取る（プールは段を受け取らず、前面の `level` を読まない）。
+  **候補は電荷を受け継ぐ**（`CandidateRequest.charges`、揺らすのは位置だけ）。
 - **1 候補の予算は `budgetMs`**（10 分）。step コールバックから**例外を投げて**止める＝
   `reason: 'interrupted'` と**そこまでの構造**が返る（`terminate()` と違って構造が残る）。
   前面は送らない。`dft-wasm` の `on_step` の**戻り値は読まれない**。
@@ -134,6 +144,9 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   （計算中にユーザーが選んだモードは戻さない）。計測は原子の並びが変わる操作で消す。
   **選んだ原子にワールド XYZ の矢印**（編集モードだけ、viewer の `#handles`）。矢印のドラッグは軸の上だけ
   （`axisDrag.ts`）、原子のドラッグは画面の面内（V6-10）。
+- **イオンは計算タブのボタンで選んだ原子に付ける**（`SceneAtom.charge`、−1/0/+1、`components/ion.ts`。
+  可否は `ionOptions`、選んでいなければ全部無効、計算中は固める）。電荷の変更は `invalidateResult()` だが
+  `handBuilt` も計測も触らない。陰イオンには `ANION_CAVEAT`（ボタンの下と観察タブの先頭、`.hint.anion-caveat`）。
 - **パネルのタブ＝モード**（v5）: 「計算」＝編集、「観察」＝観測（`components/Tabs.tsx`）。選ばれた
   タブは `mode` そのもので、タブ用の状態を持たない（押すと `chooseMode`、描くのは 1 枚だけ）。
   例外は 720px 以下の「記録」タブだけ（App の `narrowRecords`、`panelTabs.ts`）。状態・全エネルギーと、
@@ -158,12 +171,15 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   明示して渡し**、計算中は固める。**画面の数値の段は別の `resultLevel`**（状態の行に出す）。
   記録の等値面は選択ではなく**記録の段**で解く（`levelOfRecord`）。
 - **記録**（`hasUsableStructure()` で終わるたびに 1 件）。**比べてよい組は Hill 式 + 電荷 +
-  `engineModel(level)`**（電荷は `driver` が選ぶので内部の比較キーに使い、**画面には出さない**）。
+  `engineModel(level)`**（電荷はユーザーが付けたもので、見出しは `formulaWithCharge`（合計は
+  `outcome.charge`、`headingOf`）。ツリーの分子はこの見出しで束ね、H₃O⁺ と H₃O は別の分子）。
   `engineModel` の文字列は基底・汎関数・最適化グリッドを変えたら書き換える。**記録の段は `model` から
   引く**（`levelOfModel`、フィールドは無い）ので、変えた古い文字列は段ごと残す（知らない `model` の
   ファイルは拒否）。群の見出しの段は `levelLabel`。**同じ谷は 1 kJ/mol 以内**。
   時間切れ・回数上限は「途中」で順位にも谷にも入れない。**開いたら数値は記録のもの**（等値面の
-  ための一点計算で上書きしない。グリッドが違う）。ファイルは形を変えたら `version` を上げ、
+  ための一点計算で上書きしない。グリッドが違う）。ファイルは形を変えたら `version` を上げ（v2 で
+  原子ごとの `charges`、読むのは `chargesOf` だけ、**v1 だけは中性として読む**。書くときは `chargesOf` で
+  補い、全部 0 だけは和が `outcome.charge` と合わなくてよい ＝ v7 より前にエンジンが選んだ電荷）、
   **1 件でも駄目なら全部拒否**。保存は `RecordStore` 越しで、**開けないブラウザでは「残りません」と
   案内して動かす**（失敗にしない）。
 - **計測値は viewer が描いている位置から出す**（補間フレームは React に届かない。パネルは
@@ -251,6 +267,9 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   境界は `scan()` / `atomLevels()` と `scanPoint`（中間）・`scanDone`（終端、中身なし）で、
   **点の上限 `MAX_SCAN_POINTS` は 60、Worker が拒否する**。**スキャンは保持中の `Calculation` を
   触らない**ので等値面は生き残る。**収束しない点も届く**（曲線の穴。HF は 1.89 Å から先で落ちる）。
+  **荷電の組はプリセットを使わず、上端を `CHARGED_REACH`（1.4）倍で切る**（LDA の非局在化誤差、V7-0。
+  荷電かは**合計**で決め、Na⁺ + Cl⁻ は中性と同じ）。相関図の両端は**置いたとおりのイオン**（`diagramEnds`、
+  鍵は原子ごとの `z:電荷`）、マーカーの置き直しも電荷を保つ（V7-7）。
   **図は `components/scan.ts`（純粋）。距離スキャンは `DistanceScan.tsx`、相関図は
   `CorrelationDiagram.tsx` で二原子の分子軌道の節のはしごの代わり**（V4-8・V6-4。どちらも
   **原子がちょうど 2 個のときだけ**。相関図の分子の線は `picks` で軌道を選ぶ）。
@@ -284,6 +303,10 @@ cargo run --release --example profile -- benzene --optimize   # ネイティブ�
   走らせるボタンを計算タブへ、二原子は相関図だけ（原子の線も押せて、縮退の組は押したときの画面の向きで
   選ぶ）、記録ツリーの並びの固定と「…」から消す、段ごとの注意書き、座標軸のハンドル。**「…」のリストは
   `position: fixed`**（`menuPlacement.ts`。ツリーの箱に切り取られない）。細部は dev-notes の「V6-n の実装メモ」。
+- **v7 は「イオンを置く」**（2026-09-26 計画、未着手）: 置いた原子をボタンで ±1 のイオンにし、H₂O + H⁺ →
+  H₃O⁺ のような結合を見る。**電荷は原子に付けるが SCF は合計だけ**、差密度の基準は置いたとおりのイオン、
+  **電荷は画面に出す（F4 の読み替え、多重度などは出さないまま）**、陰イオンは注意書き付き、荷電二原子の
+  スキャンは範囲を切る。**v7 の規約は各チケットが完了時にこの節へ書き足す**（それまでは上の規約が今のコード）。
 - **記録の置き場所**: 経緯・実測・却下した案は dev-notes の「フェーズの記録」に足し、この
   CLAUDE.md には規約と現状だけを 1〜2 行で足す。
 
